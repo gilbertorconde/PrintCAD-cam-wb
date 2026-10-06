@@ -1,0 +1,48 @@
+name: Release
+
+# Pushing a tag such as v0.2.0 builds the package and publishes it as a
+# GitHub release. printCAD installs a release's .pcbench file and offers
+# updates when a newer tag is released.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (toolchain and target from rust-toolchain.toml)
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Tests
+        run: cargo test --target x86_64-unknown-linux-gnu
+
+      - name: Pack (the tag must name bench.toml's version)
+        id: pack
+        run: |
+          scripts/pack.sh "$GITHUB_REF_NAME" | tee pack.log
+          echo "file=$(head -n1 pack.log)" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # A tag with a suffix (v0.2.0-beta.1) is a prerelease, which
+        # printCAD's "latest release" leaves out.
+        run: |
+          flags=()
+          case "$GITHUB_REF_NAME" in *-*) flags+=(--prerelease) ;; esac
+          gh release create "$GITHUB_REF_NAME" "${{ steps.pack.outputs.file }}" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag \
+            "${flags[@]}"
