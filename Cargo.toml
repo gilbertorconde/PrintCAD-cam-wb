@@ -1,9 +1,9 @@
 [package]
 name = "cam"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-description = "A printCAD workbench package: pocket toolpaths from a sketch, written as G-code"
+description = "A printCAD workbench package: 3-axis CAM on the document's solids, after camcraft"
 publish = false
 
 [lib]
@@ -14,6 +14,12 @@ crate-type = ["cdylib"]
 # [patch.crates-io] naming the checkout's crates.
 printcad-bench-sdk = "0.1"
 serde = { version = "1", features = ["derive"] }
+cam-protocol = { path = "protocol" }
+# camcraft's job types, tool library and job file, to build what the helper
+# runs; none of the machining is linked in.
+camcraft-core.workspace = true
+camcraft-post.workspace = true
+camcraft-session.workspace = true
 
 # The package, the native helper that does the machining, what the two say
 # to each other, and camcraft's engine, copied in from upstream
