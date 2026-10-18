@@ -18,6 +18,10 @@ Only `camcraft-import`:
 
 - The `opencascade` feature is gone (its code, `build.rs` and
   `tests/opencascade.rs`), and with it every trace of OpenCascade and the LGPL.
+- `native` reads a solid in ogeom's native format, as printCAD keeps a body's
+  shape, and tessellates it as a STEP file's solids are: `step::mesh_bodies`
+  and `step::weld_faces` are what `step` did inline, split out so both use
+  them.
 
 And one test: ogeom is 0.11.1 here, which printCAD's shapes need, and it
 meshes `round_edge_loose_fit.step`'s seam that 0.11.0 drew off the torus, so

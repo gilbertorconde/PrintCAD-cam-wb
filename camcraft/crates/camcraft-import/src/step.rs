@@ -217,7 +217,7 @@ pub fn load_step(path: impl AsRef<Path>, tolerance: f64) -> Result<(Body, StepRe
 /// Why [`mesh`] refused, kept apart so that [`load_step`] can tell a file that
 /// cannot be meshed as finely as asked from a kernel that did not.
 #[derive(Debug)]
-enum Refusal {
+pub(crate) enum Refusal {
     /// A face lies further off its surface than the tolerance.
     OffSurface {
         /// The face, in the kernel's order.
@@ -308,13 +308,25 @@ fn mesh(path: &Path, tolerance: f64) -> Result<KernelMesh, Refusal> {
         }
     }
 
+    mesh_bodies(model, &bodies, tolerance)
+}
+
+/// Tessellate `bodies` of `model` to within `tolerance` millimetres, face by face
+/// in ogeom's order of faces, refusing a face that will not mesh or lies further
+/// off its surface than `tolerance`: [`mesh`]'s work once the bodies are found,
+/// shared with [`crate::native`].
+pub(crate) fn mesh_bodies(
+    model: &Model,
+    bodies: &[Shape],
+    tolerance: f64,
+) -> Result<KernelMesh, Refusal> {
     let deflection = Deflection {
         chord: tolerance * CHORD_PER_TOLERANCE,
         ..Deflection::default()
     };
     let mut out = KernelMesh::default();
     let mut faces_from = Vec::new();
-    for body in &bodies {
+    for body in bodies {
         let (faces, _) = face_meshes_for(model, body, deflection, None, MILLIMETRES)
             .map_err(|e| e.to_string())?;
         for (shape, piece) in faces {
@@ -567,12 +579,66 @@ pub fn load_step_with(
         source,
     })?;
 
-    let faces = |detail: String| StepError::Faces {
-        path: name.clone(),
-        detail,
-    };
-    let face_count = u32::try_from(soup.face_triangles.len())
-        .map_err(|_| faces(format!("{} faces is too many", soup.face_triangles.len())))?;
+    let Welded {
+        body,
+        triangles,
+        degenerate,
+        vertices,
+    } = weld_faces(&soup).map_err(|e| match e {
+        WeldError::Faces(detail) => StepError::Faces {
+            path: name.clone(),
+            detail,
+        },
+        WeldError::Empty => StepError::Empty { path: name.clone() },
+        WeldError::Mesh(source) => StepError::Mesh {
+            path: name.clone(),
+            source,
+        },
+    })?;
+    Ok((
+        body,
+        StepReport {
+            unit: facts.unit,
+            faces: facts.faces,
+            triangles,
+            degenerate,
+            vertices,
+            tolerance,
+            check,
+        },
+    ))
+}
+
+/// A kernel's triangles welded into a [`Body`], each keeping its face.
+pub(crate) struct Welded {
+    /// The body.
+    pub body: Body,
+    /// Triangles the kernel produced.
+    pub triangles: u64,
+    /// Triangles dropped because corners coincided.
+    pub degenerate: u64,
+    /// Vertices after welding.
+    pub vertices: u64,
+}
+
+/// Why [`weld_faces`] gave no body.
+#[derive(Debug)]
+pub(crate) enum WeldError {
+    /// The triangles could not be matched to their faces.
+    Faces(String),
+    /// No triangle was left.
+    Empty,
+    /// The welded mesh was not usable.
+    Mesh(MeshError),
+}
+
+/// Weld `soup`'s triangles into a body whose faces are the kernel's, in its
+/// order: [`load_step_with`]'s work once the mesh is checked, shared with
+/// [`crate::native`].
+pub(crate) fn weld_faces(soup: &KernelMesh) -> Result<Welded, WeldError> {
+    let face_count = u32::try_from(soup.face_triangles.len()).map_err(|_| {
+        WeldError::Faces(format!("{} faces is too many", soup.face_triangles.len()))
+    })?;
     // The face of each triangle, in the kernel's order.
     let face_of = soup
         .face_triangles
@@ -599,27 +665,17 @@ pub fn load_step_with(
     let degenerate = weld.degenerate;
     let vertices = weld.vertex_count() as u64;
     if weld.triangle_count() == 0 {
-        return Err(StepError::Empty { path: name });
+        return Err(WeldError::Empty);
     }
-    let mesh = weld.finish().map_err(|source| StepError::Mesh {
-        path: name.clone(),
-        source,
-    })?;
-
+    let mesh = weld.finish().map_err(WeldError::Mesh)?;
     let body = Body::with_faces(mesh, labels, face_count)
-        .map_err(|e: TopologyError| faces(e.to_string()))?;
-    Ok((
+        .map_err(|e: TopologyError| WeldError::Faces(e.to_string()))?;
+    Ok(Welded {
         body,
-        StepReport {
-            unit: facts.unit,
-            faces: facts.faces,
-            triangles,
-            degenerate,
-            vertices,
-            tolerance,
-            check,
-        },
-    ))
+        triangles,
+        degenerate,
+        vertices,
+    })
 }
 
 #[cfg(test)]
