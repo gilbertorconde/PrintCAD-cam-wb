@@ -1,0 +1,175 @@
+//! What the CAM package asks its native helper, and what the helper answers.
+//!
+//! The package (WebAssembly, in printCAD's sandbox) writes a [`Request`] as JSON
+//! on the helper's standard input; the helper runs the setup with camcraft on
+//! every core and writes a [`Response`] as JSON on its standard output. Every
+//! point is in the document's coordinates, millimetres, so the package draws
+//! what it gets without knowing how the setup turned the part.
+
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+
+/// The helper's file name in the package's `helpers/<os>-<arch>/` folder
+/// (`.exe` on Windows, which printCAD adds).
+pub const HELPER: &str = "camcraft-helper";
+
+/// Bumped whenever a request or response changes shape, so a package never
+/// reads an answer from a helper of another build.
+pub const VERSION: u32 = 1;
+
+/// One setup to run.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Request {
+    /// [`VERSION`], as the package was built with.
+    pub version: u32,
+    /// A camcraft job holding one setup, as TOML (`camcraft_session::job_text`).
+    /// Its models' paths are not read: their shapes are in [`Request::shapes`].
+    pub job: String,
+    /// Each model's solid, by the model's name in the job.
+    pub shapes: BTreeMap<String, Shape>,
+    /// The most points to send back for drawing one operation's toolpath; a
+    /// denser one is thinned to it. Zero sends none.
+    pub max_points: usize,
+}
+
+/// A body's solid, as printCAD keeps it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Shape {
+    /// The B-rep in ogeom's native format, in the body's own frame.
+    pub text: String,
+    /// Where the body sits: a row-major rigid 4x4 matrix, as
+    /// `printcad_bench_sdk::api::Body::placement` has it.
+    pub placement: [f64; 16],
+}
+
+/// The placement that leaves a body where it is.
+pub const IDENTITY: [f64; 16] = [
+    1.0, 0.0, 0.0, 0.0, //
+    0.0, 1.0, 0.0, 0.0, //
+    0.0, 0.0, 1.0, 0.0, //
+    0.0, 0.0, 0.0, 1.0,
+];
+
+/// What came of a [`Request`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "kebab-case")]
+pub enum Response {
+    /// The setup ran: its toolpaths, checks and programs.
+    Ran(Box<Run>),
+    /// It could not run, and why, as a person should read it.
+    Refused {
+        /// Why.
+        why: String,
+    },
+}
+
+/// A setup, run.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Run {
+    /// [`VERSION`], as the helper was built with.
+    pub version: u32,
+    /// Whether it may be posted: it verified against the material and no check
+    /// fails. camcraft refuses to post otherwise.
+    pub passed: bool,
+    /// What the checks found, failures first.
+    pub findings: Vec<Finding>,
+    /// What happened, in order, for a log.
+    pub notes: Vec<String>,
+    /// Everything worth a person's attention.
+    pub warnings: Vec<String>,
+    /// The box around the stock, low and high corners.
+    pub stock: [[f64; 3]; 2],
+    /// The work zero.
+    pub origin: [f64; 3],
+    /// Each operation, in the setup's order.
+    pub operations: Vec<OperationRun>,
+    /// The material left when the setup is done, coarsely, for drawing.
+    pub material: Option<Material>,
+    /// How long it took, in seconds.
+    pub seconds: f64,
+}
+
+/// How bad a finding is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Level {
+    /// Refuses posting.
+    Fail,
+    /// Worth reading before cutting.
+    Warn,
+    /// For information.
+    Note,
+    /// A check that passed.
+    Pass,
+}
+
+/// One thing a check found.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Finding {
+    /// How bad.
+    pub level: Level,
+    /// camcraft's code, `CC107` say.
+    pub code: String,
+    /// The line, as camcraft prints it.
+    pub text: String,
+    /// The operation it is about, by its place in the setup.
+    pub operation: Option<usize>,
+}
+
+/// One operation, run.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct OperationRun {
+    /// Its name.
+    pub name: String,
+    /// Whether it made a toolpath: `generated`, `skipped` or `disabled`.
+    pub made: String,
+    /// A line saying what it did.
+    pub summary: String,
+    /// Its own warnings.
+    pub warnings: Vec<String>,
+    /// Its toolpath for drawing, thinned to the request's budget.
+    pub strokes: Vec<Stroke>,
+    /// How many points the whole toolpath has, before thinning.
+    pub points: usize,
+    /// How far it cuts, in millimetres.
+    pub cut_mm: f64,
+    /// How far it moves at rapid, in millimetres.
+    pub rapid_mm: f64,
+    /// Its program, when it made a toolpath.
+    pub program: Option<Program>,
+}
+
+/// A run of moves of one kind.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Stroke {
+    /// Rapid moves, or moves at a feed.
+    pub rapid: bool,
+    /// Its points, the first being where the moves start.
+    pub points: Vec<[f32; 3]>,
+}
+
+/// A G-code program.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Program {
+    /// Its file name, without the extension, as camcraft names it.
+    pub name: String,
+    /// The post's extension, `nc` or `tap` say.
+    pub extension: String,
+    /// The post it was written for.
+    pub post: String,
+    /// The program.
+    pub text: String,
+    /// How many lines it has.
+    pub lines: usize,
+}
+
+/// The material's top, sampled coarsely, as triangles in the document's
+/// coordinates.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Material {
+    /// Corners.
+    pub positions: Vec<[f32; 3]>,
+    /// Three corners a triangle.
+    pub indices: Vec<u32>,
+}

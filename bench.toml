@@ -1,9 +1,12 @@
 id = "io.github.gilbertorconde.cam"
 name = "CAM"
-version = "0.1.0"
+version = "0.2.0"
 api = "printcad:workbench@0.1"
-description = "Pocket toolpaths from a sketch's outline, written as G-code"
-feature_kinds = ["io.github.gilbertorconde.cam.pocket"]
+description = "3-axis CNC toolpaths on the document's solids with camcraft, checked against the material and written as G-code"
+feature_kinds = ["io.github.gilbertorconde.cam.setup", "io.github.gilbertorconde.cam.operation"]
 
 [capabilities]
 save_dialog = true
+# The machining runs in camcraft-helper, a native program the package ships
+# for each system, on every core.
+helper = true

@@ -1,9 +1,9 @@
 [package]
 name = "cam"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-description = "A printCAD workbench package: pocket toolpaths from a sketch, written as G-code"
+description = "A printCAD workbench package: 3-axis CAM on the document's solids, after camcraft"
 publish = false
 
 [lib]
@@ -14,9 +14,84 @@ crate-type = ["cdylib"]
 # [patch.crates-io] naming the checkout's crates.
 printcad-bench-sdk = "0.1"
 serde = { version = "1", features = ["derive"] }
+cam-protocol = { path = "protocol" }
+# camcraft's job types, tool library and job file, to build what the helper
+# runs; none of the machining is linked in.
+camcraft-core.workspace = true
+camcraft-post.workspace = true
+camcraft-session.workspace = true
+
+# The package (this crate, built for wasm32-wasip2), the native helper that
+# does the machining, what the two say to each other, and camcraft's engine,
+# copied in from upstream (camcraft/README.md says from where).
+[workspace]
+resolver = "3"
+members = [".", "protocol", "helper", "camcraft/crates/*"]
+default-members = [".", "protocol", "helper"]
+
+[workspace.package]
+version      = "0.2.0"
+edition      = "2024"
+rust-version = "1.98"
+license      = "MIT OR Apache-2.0"
+repository   = "https://github.com/dan335/camcraft"
+authors      = ["dan335"]
+
+[workspace.dependencies]
+camcraft-geom    = { path = "camcraft/crates/camcraft-geom",    version = "0.2.0" }
+camcraft-import  = { path = "camcraft/crates/camcraft-import",  version = "0.2.0" }
+step-check       = { path = "camcraft/crates/step-check",       version = "0.2.0" }
+camcraft-sim     = { path = "camcraft/crates/camcraft-sim",     version = "0.2.0" }
+camcraft-core    = { path = "camcraft/crates/camcraft-core",    version = "0.2.0" }
+camcraft-post    = { path = "camcraft/crates/camcraft-post",    version = "0.2.0" }
+camcraft-session = { path = "camcraft/crates/camcraft-session", version = "0.2.0" }
+
+clipper2-rust = "1.2"
+csv           = "1.4"
+directories   = "6"
+glam          = { version = "0.33", features = ["serde"] }
+# printCAD's solids come as ogeom's native format, which 0.11.1 writes.
+ogeom-core    = "0.11.1"
+ogeom-io      = "0.11.1"
+ogeom-geom    = "0.11.1"
+ogeom-math    = "0.11.1"
+ogeom-mesh    = "0.11.1"
+ogeom-topo    = "0.11.1"
+parry3d-f64   = "0.31"
+proptest      = "1.11"
+rayon         = "1.12"
+spade         = "2.15"
+serde         = { version = "1.0", features = ["derive"] }
+serde_json    = "1"
+stl_io        = "0.11"
+thiserror     = "2.0"
+toml          = "1.1"
+
+# camcraft's own rules, for its crates (each opts in with `[lints]`).
+[workspace.lints.rust]
+unsafe_code  = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+unwrap_used         = "deny"
+expect_used         = "deny"
+panic               = "deny"
+indexing_slicing    = "warn"
+float_cmp           = "warn"
+cast_possible_truncation = "warn"
+cast_precision_loss = "warn"
 
 [profile.release]
-opt-level = "s"
 lto = true
 codegen-units = 1
 strip = true
+
+# Geometry work is unusably slow in an unoptimised debug build, tests included.
+[profile.dev.package."*"]
+opt-level = 2
+[profile.dev.package.camcraft-geom]
+opt-level = 2
+[profile.dev.package.camcraft-sim]
+opt-level = 2
+[profile.dev.package.camcraft-core]
+opt-level = 2
