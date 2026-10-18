@@ -15,11 +15,12 @@ crate-type = ["cdylib"]
 printcad-bench-sdk = "0.1"
 serde = { version = "1", features = ["derive"] }
 
-# camcraft's engine, copied in from upstream (camcraft/README.md says from
-# where), as members of this workspace.
+# The package, the native helper that does the machining, what the two say
+# to each other, and camcraft's engine, copied in from upstream
+# (camcraft/README.md says from where).
 [workspace]
 resolver = "3"
-members = [".", "camcraft/crates/*"]
+members = [".", "protocol", "helper", "camcraft/crates/*"]
 default-members = ["."]
 
 [workspace.package]

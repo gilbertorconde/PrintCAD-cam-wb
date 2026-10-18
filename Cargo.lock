@@ -111,6 +111,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cam-protocol"
+version = "0.2.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "camcraft-core"
 version = "0.2.0"
 dependencies = [
@@ -133,6 +140,21 @@ dependencies = [
  "glam 0.33.12",
  "parry3d-f64",
  "thiserror",
+]
+
+[[package]]
+name = "camcraft-helper"
+version = "0.2.0"
+dependencies = [
+ "cam-protocol",
+ "camcraft-core",
+ "camcraft-geom",
+ "camcraft-import",
+ "camcraft-session",
+ "glam 0.33.12",
+ "ogeom-core",
+ "ogeom-io",
+ "serde_json",
 ]
 
 [[package]]

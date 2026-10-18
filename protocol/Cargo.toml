@@ -1,0 +1,10 @@
+[package]
+name = "cam-protocol"
+version = "0.2.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "What the CAM package and its native helper say to each other"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
