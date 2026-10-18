@@ -1,0 +1,18 @@
+[package]
+name        = "camcraft-geom"
+description = "Geometry primitives for camcraft: meshes and their topology, BVH, height maps, 2D contours, rings and arcs, and fields on a lifted grid."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+authors.workspace      = true
+
+[dependencies]
+glam.workspace        = true
+parry3d-f64.workspace = true
+clipper2-rust.workspace = true
+thiserror.workspace   = true
+
+[lints]
+workspace = true
