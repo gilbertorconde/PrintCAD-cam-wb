@@ -20,16 +20,39 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Format
-        run: cargo fmt --check
+        run: cargo fmt --all --check
 
-      - name: Clippy
-        run: cargo clippy --release -- -D warnings
+      - name: Clippy (the package, as WebAssembly)
+        run: cargo clippy --release -p cam --target wasm32-wasip2 -- -D warnings
 
-      - name: Tests (on the build machine; the package logic is plain Rust)
-        run: cargo test --target x86_64-unknown-linux-gnu
+      - name: Clippy (the helper and what it speaks)
+        run: cargo clippy --release -p cam-protocol -p camcraft-helper -- -D warnings
+
+      - name: Tests (the package, the helper, and camcraft's engine)
+        run: cargo test --release --workspace
+
+  helpers:
+    uses: ./.github/workflows/helpers.yml
+
+  pack:
+    needs: [check, helpers]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (toolchain and target from rust-toolchain.toml)
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: helper-*
+          path: helpers
+          merge-multiple: true
 
       - name: Pack
-        run: scripts/pack.sh
+        run: HELPERS=helpers scripts/pack.sh
 
       - uses: actions/upload-artifact@v4
         with:

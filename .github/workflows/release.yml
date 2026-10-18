@@ -1,8 +1,8 @@
 name: Release
 
-# Pushing a tag such as v0.2.0 builds the package and publishes it as a
-# GitHub release. printCAD installs a release's .pcbench file and offers
-# updates when a newer tag is released.
+# Pushing a tag such as v0.2.0 builds the package, with its helper for every
+# system, and publishes it as a GitHub release. printCAD installs a release's
+# .pcbench file and offers updates when a newer tag is released.
 on:
   push:
     tags: ["v*"]
@@ -14,7 +14,11 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  helpers:
+    uses: ./.github/workflows/helpers.yml
+
   release:
+    needs: helpers
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,12 +29,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Tests
-        run: cargo test --target x86_64-unknown-linux-gnu
+        run: cargo test --release --workspace
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: helper-*
+          path: helpers
+          merge-multiple: true
 
       - name: Pack (the tag must name bench.toml's version)
         id: pack
         run: |
-          scripts/pack.sh "$GITHUB_REF_NAME" | tee pack.log
+          HELPERS=helpers scripts/pack.sh "$GITHUB_REF_NAME" | tee pack.log
           echo "file=$(head -n1 pack.log)" >> "$GITHUB_OUTPUT"
 
       - name: Publish the release

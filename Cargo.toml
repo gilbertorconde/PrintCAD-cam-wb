@@ -21,13 +21,13 @@ camcraft-core.workspace = true
 camcraft-post.workspace = true
 camcraft-session.workspace = true
 
-# The package, the native helper that does the machining, what the two say
-# to each other, and camcraft's engine, copied in from upstream
-# (camcraft/README.md says from where).
+# The package (this crate, built for wasm32-wasip2), the native helper that
+# does the machining, what the two say to each other, and camcraft's engine,
+# copied in from upstream (camcraft/README.md says from where).
 [workspace]
 resolver = "3"
 members = [".", "protocol", "helper", "camcraft/crates/*"]
-default-members = ["."]
+default-members = [".", "protocol", "helper"]
 
 [workspace.package]
 version      = "0.2.0"

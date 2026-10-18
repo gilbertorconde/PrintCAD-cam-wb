@@ -1,0 +1,48 @@
+name: Helpers
+
+# The native helper, built on each system printCAD runs on, as artifacts named
+# helper-<os>-<arch> holding <os>-<arch>/camcraft-helper[.exe]: the folder the
+# package keeps it in. CI and Release both call this.
+on:
+  workflow_call:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  helper:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-latest,    folder: linux-x86_64,   target: x86_64-unknown-linux-gnu }
+          - { runner: ubuntu-24.04-arm, folder: linux-aarch64,  target: aarch64-unknown-linux-gnu }
+          - { runner: macos-latest,     folder: macos-aarch64,  target: aarch64-apple-darwin }
+          - { runner: macos-15-intel,   folder: macos-x86_64,   target: x86_64-apple-darwin }
+          - { runner: windows-latest,   folder: windows-x86_64, target: x86_64-pc-windows-msvc, exe: .exe }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (toolchain from rust-toolchain.toml)
+        shell: bash
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        shell: bash
+        run: cargo build --release -p camcraft-helper --target ${{ matrix.target }}
+
+      - name: Lay it out as the package has it
+        shell: bash
+        run: |
+          mkdir -p "out/${{ matrix.folder }}"
+          cp "target/${{ matrix.target }}/release/camcraft-helper${{ matrix.exe }}" "out/${{ matrix.folder }}/"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: helper-${{ matrix.folder }}
+          path: out/
