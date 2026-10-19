@@ -4,6 +4,7 @@
 use cam_protocol::{HeightPlane, Run};
 use printcad_bench_sdk::api::*;
 
+use crate::playback::{material_at, tool_at};
 use crate::runs::State;
 use crate::{Cam, Kind, operations_of, setups};
 
@@ -53,7 +54,18 @@ pub fn draw(cam: &Cam, frame: &mut Frame) {
             color: ZERO,
             kind: MarkKind::Cross { size: 8.0 },
         });
-        if edited_setup
+        // The moment being played back, while the setup is open.
+        let moment = cam
+            .playing
+            .as_ref()
+            .filter(|p| edited_setup && p.setup == node.id)
+            .and_then(|p| {
+                let play = run.playback.as_ref()?;
+                Some((play, p.moment(play)?))
+            });
+        if let Some((play, m)) = moment {
+            frame.meshes.push(material_at(play, m));
+        } else if edited_setup
             && cam.show_material
             && let Some(m) = &run.material
         {
@@ -84,12 +96,23 @@ pub fn draw(cam: &Cam, frame: &mut Frame) {
                 }
             }
             let color = if this || edited_setup { ACCENT } else { MUTED };
+            // Played back, as far as the tool has gone.
+            let mut left = match moment {
+                Some((_, m)) if i > m.op => continue,
+                Some((_, m)) if i == m.op => m.drawn,
+                _ => usize::MAX,
+            };
             for stroke in &op.strokes {
+                if left < 2 {
+                    break;
+                }
+                let points = &stroke.points[..stroke.points.len().min(left)];
+                left -= points.len();
                 if stroke.rapid && !(this || edited_setup) {
                     continue;
                 }
                 frame.lines.push(Polyline {
-                    points: stroke.points.clone(),
+                    points: points.to_vec(),
                     color: if stroke.rapid { RAPID } else { color },
                     width: if this { 1.5 } else { 1.0 },
                     dashed: stroke.rapid,
@@ -102,6 +125,9 @@ pub fn draw(cam: &Cam, frame: &mut Frame) {
                     points, op.points
                 ));
             }
+        }
+        if let Some((play, m)) = moment {
+            tool_at(frame, play, m, STOCK);
         }
     }
 }

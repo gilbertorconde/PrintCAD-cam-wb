@@ -58,6 +58,9 @@ panels, the drawing and the helper that runs camcraft.
   through material and the other failures camcraft checks for are listed in
   the setup's and the operation's panels, and a setup that fails is not
   posted (Save anyway exists, and says what it is).
+- **Playback.** An open setup plays its run back: the material coming off,
+  the tool where it is, and the toolpath as far as it has gone, with a slider
+  to stop at any moment.
 - **Drawn over the model.** The stock's box, the work zero, each operation's
   toolpath (rapids dashed while it is edited), and the material left.
 - **G-code through the save dialog,** one program per operation, for GRBL,
