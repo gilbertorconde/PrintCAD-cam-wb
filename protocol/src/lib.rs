@@ -138,6 +138,21 @@ pub struct OperationRun {
     pub rapid_mm: f64,
     /// Its program, when it made a toolpath.
     pub program: Option<Program>,
+    /// Its heights as camcraft resolved them, each a plane across the stock.
+    #[serde(default)]
+    pub heights: Vec<HeightPlane>,
+}
+
+/// One of an operation's heights: clearance, retract, top or bottom.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct HeightPlane {
+    /// Which height: `Clearance`, `Retract`, `Top` or `Bottom`.
+    pub name: String,
+    /// How high it is above the work zero, along the tool's axis.
+    pub z: f64,
+    /// A rectangle across the stock at that height, a little bigger than it,
+    /// in the model's coordinates.
+    pub corners: [[f32; 3]; 4],
 }
 
 /// A run of moves of one kind.
