@@ -52,8 +52,10 @@ panels, the drawing and the helper that runs camcraft.
   tabs to hold a profiled part, and finishing passes along a pocket's walls.
 - **Tools.** Preferences › CAM holds the tool library, which starts as
   camcraft's twenty common router bits, each with presets for the materials
-  it suits. A setup takes a copy of a tool when an operation first cuts with
-  it, so a document never depends on the machine it is opened on.
+  it suits. The chosen tool's kind, dimensions and presets can be edited,
+  and a Fusion tool library exported as CSV imports into it. A setup takes a
+  copy of a tool when an operation first cuts with it, so a document never
+  depends on the machine it is opened on.
 - **Checked against the material.** Every setup is simulated: a gouge, a rapid
   through material and the other failures camcraft checks for are listed in
   the setup's and the operation's panels, and a setup that fails is not
@@ -64,7 +66,9 @@ panels, the drawing and the helper that runs camcraft.
 - **Drawn over the model.** The stock's box, the work zero, each operation's
   toolpath (rapids dashed while it is edited), and the material left.
 - **G-code through the save dialog,** one program per operation, for GRBL,
-  Masso or Centroid CNC12 (Avid), in millimetres or inches.
+  Masso or Centroid CNC12 (Avid), in millimetres or inches, or through a
+  machine profile of your own in camcraft's TOML, which a setup carries a
+  copy of.
 - **Formulas.** Every number of a setup and of an operation takes a formula.
 - **Script commands**, for scripts and AI agents:
 
@@ -74,6 +78,8 @@ local setup = cam.setup{bodies = {"<body id>"}, margin = 3, post = "grbl"}
 local rough = cam.operation{setup = setup.feature, strategy = "adaptive", tool = "1/4 upcut",
                            heights = {bottom_from = "model-top", bottom = -6}}
 cam.status{id = setup.feature}          -- queued, running, ready (with its checks), failed
+cam.import_tools{text = fusion_csv}     -- a Fusion tool library, exported as CSV
+cam.add_post{text = profile_toml}       -- a machine profile of your own
 local program = cam.gcode{id = rough.feature}
 ```
 
@@ -99,6 +105,8 @@ useful there.
 - The helper reports no progress while it runs, only that it is running.
 - Picked faces and edges follow camcraft's rules: a pick is a point on the
   face, found again on the solid by that point.
+- printCAD offers a package no dialog to open a file, so a Fusion CSV or a
+  machine profile is named by its path, and the helper reads it.
 
 ## Install it
 
