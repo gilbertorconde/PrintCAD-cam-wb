@@ -248,3 +248,62 @@ fn a_profile_leaves_its_tabs() {
         cut(", tabs = { width = 6.0, height = 3.0, spacing = 40.0 }")
     );
 }
+
+/// A run plays back in order, within budget, the material only ever coming
+/// off, and the tool's way drawn no further than the operation goes.
+#[test]
+fn a_run_plays_back_as_it_cut() {
+    let job = JOB.replace(
+        "passes = { stepdown = 3.0, stepover = 3.0 }",
+        "passes = { stepdown = 3.0, stepover = 3.0 }\n\n\
+         [[setup.operation]]\nname = \"finish\"\nstrategy = \"profile\"\ntool = \"flat-6\"",
+    );
+    let request = Request {
+        version: VERSION,
+        job,
+        shapes: BTreeMap::from([(
+            "part".to_string(),
+            Shape {
+                text: native("hinge_jig.step"),
+                placement: IDENTITY,
+            },
+        )]),
+        max_points: 2000,
+    };
+    let run = answer(&request).unwrap();
+    let play = run.playback.as_ref().expect("a playback");
+    assert!(play.moments.len() > 10 && play.moments.len() <= 60 + run.operations.len());
+    assert_eq!(play.indices.len() % 3, 0);
+    let cells = play.base.len();
+    let mut last: Option<&cam_protocol::Moment> = None;
+    for m in &play.moments {
+        assert_eq!(m.heights.len(), cells);
+        let drawn: usize = run.operations[m.op]
+            .strokes
+            .iter()
+            .map(|s| s.points.len())
+            .sum();
+        assert!(m.drawn <= drawn, "{} of {drawn}", m.drawn);
+        if let Some(l) = last {
+            assert!((l.op, l.moves) < (m.op, m.moves), "out of order");
+            let grew = l
+                .heights
+                .iter()
+                .zip(&m.heights)
+                .filter(|(a, b)| b > a)
+                .count();
+            assert_eq!(grew, 0, "material came back at {grew} cells");
+        }
+        last = Some(m);
+    }
+    let end = last.unwrap();
+    assert_eq!((end.op, end.moves), (1, end.of));
+    let first = &play.moments[0];
+    assert!(
+        first.heights.iter().zip(&end.heights).any(|(a, b)| b < a),
+        "nothing came off"
+    );
+    // The answer stays small enough to send every run.
+    let bytes = serde_json::to_string(play).unwrap().len();
+    assert!(bytes < 2_000_000, "{bytes} bytes");
+}

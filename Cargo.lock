@@ -155,6 +155,7 @@ dependencies = [
  "camcraft-geom",
  "camcraft-import",
  "camcraft-session",
+ "camcraft-sim",
  "glam 0.33.12",
  "ogeom-core",
  "ogeom-io",
