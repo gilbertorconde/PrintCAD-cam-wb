@@ -1,7 +1,7 @@
 //! What the view draws: each setup's stock and work zero, its operations'
 //! toolpaths, and the material it leaves.
 
-use cam_protocol::Run;
+use cam_protocol::{HeightPlane, Run};
 use printcad_bench_sdk::api::*;
 
 use crate::runs::State;
@@ -13,6 +13,10 @@ const STOCK: Rgb = [0.9, 0.62, 0.25];
 const RAPID: Rgb = [0.9, 0.3, 0.25];
 const ZERO: Rgb = [0.35, 0.8, 0.4];
 const MATERIAL: Rgb = [0.78, 0.66, 0.5];
+const CLEARANCE: Rgb = [0.35, 0.8, 0.4];
+const RETRACT: Rgb = [0.3, 0.75, 0.75];
+const TOP: Rgb = [0.31, 0.64, 0.9];
+const BOTTOM: Rgb = [0.75, 0.45, 0.85];
 
 /// The most points drawn of the setups not being edited, together.
 const BACKGROUND_POINTS: usize = 60_000;
@@ -74,6 +78,11 @@ pub fn draw(cam: &Cam, frame: &mut Frame) {
                 }
                 background += points;
             }
+            if this {
+                for plane in &op.heights {
+                    height_plane(frame, plane);
+                }
+            }
             let color = if this || edited_setup { ACCENT } else { MUTED };
             for stroke in &op.strokes {
                 if stroke.rapid && !(this || edited_setup) {
@@ -95,6 +104,38 @@ pub fn draw(cam: &Cam, frame: &mut Frame) {
             }
         }
     }
+}
+
+/// One of the edited operation's heights: a see-through plane across the
+/// stock, its edge, and its name and height at a corner.
+fn height_plane(frame: &mut Frame, plane: &HeightPlane) {
+    let color = match plane.name.as_str() {
+        "Clearance" => CLEARANCE,
+        "Retract" => RETRACT,
+        "Top" => TOP,
+        _ => BOTTOM,
+    };
+    frame.meshes.push(Mesh {
+        positions: plane.corners.to_vec(),
+        indices: vec![0, 1, 2, 0, 2, 3],
+        color,
+        opacity: 0.12,
+        ..Default::default()
+    });
+    frame.lines.push(Polyline {
+        points: plane.corners.to_vec(),
+        color,
+        closed: true,
+        ..Default::default()
+    });
+    frame.labels.push(Label {
+        at: plane.corners[0],
+        text: format!("{}  Z {:.2}", plane.name, plane.z),
+        color,
+        size: 12.0,
+        pill: true,
+        mono: false,
+    });
 }
 
 /// The stock's box, as twelve edges.

@@ -2,18 +2,18 @@
 //! they make.
 //!
 //! A setup and an operation are features of the package's own kinds. Their
-//! numbers are top-level fields, so a formula can drive any of them (`/stepover`,
-//! `/margin_side`); the rest of an operation is camcraft's own [`Operation`],
-//! kept whole. A job is made from them only to be sent to the helper: one
+//! numbers are fields of their own, so a formula can drive any of them
+//! (`/stepover`, `/margin_side`, `/heights/clearance`); the rest of an operation
+//! is camcraft's own [`Operation`], kept whole. A job is made from them only to be sent to the helper: one
 //! setup, its bodies as models, its stock, and its operations in the order the
 //! document has them.
 
 use std::collections::BTreeMap;
 
 use camcraft_core::job::{
-    Along, Boundary, BoxOf, Containment, Depths, FeatureRef, FixedBox, Job, Leave,
-    MachiningBoundary, ModelDef, Operation, Origin, Preset, Selection, Setup, StockDef, StockSpec,
-    StockToLeave, StrategySpec, ToolSpec,
+    Along, Boundary, BoxOf, Containment, Depths, FeatureRef, FixedBox, Height, HeightRef, Heights,
+    Job, Leave, MachiningBoundary, ModelDef, Operation, Origin, Outline, Preset, Selection, Setup,
+    StockDef, StockSpec, StockToLeave, StrategySpec, ToolSpec,
 };
 use camcraft_core::setup::frame::{Axis, Orientation};
 use printcad_bench_sdk::serde_json;
@@ -240,6 +240,56 @@ pub struct Pick {
     pub at: [f64; 3],
 }
 
+/// An operation's heights, Fusion's Heights tab: each an offset in millimetres
+/// from what it is measured from. A top or a bottom with nothing to measure from
+/// is the strategy's own, and its offset waits for one.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct HeightsData {
+    pub clearance: f64,
+    pub clearance_from: HeightRef,
+    pub retract: f64,
+    pub retract_from: HeightRef,
+    pub top: f64,
+    #[serde(default)]
+    pub top_from: Option<HeightRef>,
+    pub bottom: f64,
+    #[serde(default)]
+    pub bottom_from: Option<HeightRef>,
+}
+
+impl Default for HeightsData {
+    fn default() -> Self {
+        Self::of(&Heights::default())
+    }
+}
+
+impl HeightsData {
+    /// camcraft's heights as numbers.
+    pub fn of(h: &Heights) -> Self {
+        Self {
+            clearance: h.clearance.offset,
+            clearance_from: h.clearance.reference,
+            retract: h.retract.offset,
+            retract_from: h.retract.reference,
+            top: h.top.map_or(0.0, |t| t.offset),
+            top_from: h.top.map(|t| t.reference),
+            bottom: h.bottom.map_or(0.0, |b| b.offset),
+            bottom_from: h.bottom.map(|b| b.reference),
+        }
+    }
+
+    /// The numbers as camcraft's heights.
+    pub fn heights(&self) -> Heights {
+        let at = |reference, offset| Height { reference, offset };
+        Heights {
+            clearance: at(self.clearance_from, self.clearance),
+            retract: at(self.retract_from, self.retract),
+            top: self.top_from.map(|r| at(r, self.top)),
+            bottom: self.bottom_from.map(|r| at(r, self.bottom)),
+        }
+    }
+}
+
 /// An operation: which setup it belongs to, camcraft's operation, and its
 /// numbers, which are what it cuts with.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -267,6 +317,10 @@ pub struct OperationData {
     pub angle: f64,
     /// A 3D boundary's additional offset.
     pub margin: f64,
+    /// Where it travels and the levels it cuts between. A document from before
+    /// they could be set has camcraft's defaults, which it cut with.
+    #[serde(default)]
+    pub heights: HeightsData,
     #[serde(default)]
     pub faces: Vec<Pick>,
     #[serde(default)]
@@ -292,6 +346,7 @@ impl OperationData {
             axial: 0.0,
             angle: 0.0,
             margin: 0.0,
+            heights: HeightsData::default(),
             faces: Vec::new(),
             edges: Vec::new(),
         };
@@ -327,6 +382,7 @@ impl OperationData {
             _ => 0.0,
         };
         self.margin = op.boundary.margin;
+        self.heights = HeightsData::of(&op.heights);
     }
 
     /// The operation as it cuts: its numbers written in.
@@ -361,7 +417,51 @@ impl OperationData {
             _ => {}
         }
         op.boundary.margin = self.margin;
+        op.heights = self.heights.heights();
         op
+    }
+
+    /// The operation as the job has it: [`Self::operation`] with its picks.
+    /// camcraft finds a pick by its point when its number does not match, so
+    /// any number does; printCAD's face names are not camcraft's numbers.
+    pub fn picked(&self, name: &str, model_of: impl Fn(&str) -> Option<String>) -> Operation {
+        let refs = |picks: &[Pick]| -> Vec<FeatureRef> {
+            picks
+                .iter()
+                .filter_map(|p| {
+                    Some(FeatureRef {
+                        model: model_of(&p.body)?,
+                        index: u32::MAX,
+                        at: p.at,
+                    })
+                })
+                .collect()
+        };
+        let mut op = self.operation(name);
+        op.selection = Selection {
+            faces: refs(&self.faces),
+            edges: refs(&self.edges),
+        };
+        op
+    }
+
+    /// Whether its top or bottom may be measured from its picks: it has some,
+    /// and is not a drill, whose holes each go to their own.
+    pub fn can_measure_from_picks(&self) -> bool {
+        self.picked("", |b| Some(b.to_string()))
+            .can_measure_from_picks()
+    }
+
+    /// What its bottom is with none given: its picks for a 2D operation cut
+    /// round them, else its strategy's own.
+    pub fn bottom_unset(&self) -> Option<HeightRef> {
+        let op = self.picked("", |b| Some(b.to_string()));
+        let uses = op.strategy.uses();
+        if uses.outline && !op.selection.is_empty() && op.outline == Outline::Selection {
+            uses.bottom.map(|_| HeightRef::Selection)
+        } else {
+            uses.bottom
+        }
     }
 
     /// Change the strategy, keeping the tool and the numbers that still apply.
@@ -430,6 +530,12 @@ impl OperationData {
         }
         if !(positive(self.feed) && positive(self.plunge)) {
             return Some("The feeds must be more than 0.".into());
+        }
+        if let Some(why) = self
+            .picked("", |b| Some(b.to_string()))
+            .cannot_measure_from_picks()
+        {
+            return Some(format!("The heights do not work: {why}."));
         }
         self.operation(&self.operation.name)
             .cannot_use(tool)
@@ -589,20 +695,6 @@ pub fn job(
             .find(|m| m.body == body)
             .map(|m| m.name.clone())
     };
-    let refs = |picks: &[Pick]| -> Vec<FeatureRef> {
-        picks
-            .iter()
-            .filter_map(|p| {
-                Some(FeatureRef {
-                    model: model_of(&p.body)?,
-                    // camcraft finds a pick by its point when its number does not
-                    // match; printCAD's face names are not camcraft's numbers.
-                    index: u32::MAX,
-                    at: p.at,
-                })
-            })
-            .collect()
-    };
     let mut camcraft = Setup::new(name);
     camcraft.models = models.iter().map(|m| m.name.clone()).collect();
     camcraft.stocks = vec!["stock".into()];
@@ -614,14 +706,7 @@ pub fn job(
         .origin([setup.offset_x, setup.offset_y, setup.offset_z]);
     camcraft.operations = operations
         .iter()
-        .map(|(name, data)| {
-            let mut op = data.operation(name);
-            op.selection = Selection {
-                faces: refs(&data.faces),
-                edges: refs(&data.edges),
-            };
-            op
-        })
+        .map(|(name, data)| data.picked(name, model_of))
         .collect();
     Job {
         tolerance: setup.tolerance,
@@ -721,5 +806,68 @@ mod tests {
         };
         assert_eq!(setup.adopt("A", &other), "A (2)");
         assert_ne!(setup.tools["A"].number, setup.tools["A (2)"].number);
+    }
+
+    #[test]
+    fn the_heights_are_what_it_cuts_between() {
+        let mut op = OperationData::new(None, StrategySpec::named("pocket-clearing").unwrap());
+        op.heights.clearance_from = HeightRef::ModelTop;
+        op.heights.clearance = 7.0;
+        op.heights.top_from = Some(HeightRef::StockTop);
+        op.heights.top = -1.0;
+        op.heights.bottom_from = Some(HeightRef::Absolute);
+        op.heights.bottom = -5.0;
+        let cut = op.operation("p");
+        assert_eq!(
+            cut.heights.clearance,
+            Height {
+                reference: HeightRef::ModelTop,
+                offset: 7.0
+            }
+        );
+        assert_eq!(cut.heights.top.unwrap().offset, -1.0);
+        assert_eq!(cut.heights.bottom.unwrap().reference, HeightRef::Absolute);
+        // Not given, the strategy's own; the offset waits.
+        op.heights.top_from = None;
+        assert_eq!(op.operation("p").heights.top, None);
+        assert_eq!(OperationData::from(&op.to_value()).unwrap(), op);
+    }
+
+    #[test]
+    fn an_operation_from_before_heights_cuts_with_camcrafts() {
+        let op = OperationData::new(None, StrategySpec::named("adaptive").unwrap());
+        let mut value = op.to_value();
+        value.as_object_mut().unwrap().remove("heights");
+        let old = OperationData::from(&value).unwrap();
+        assert_eq!(old.operation("a").heights, Heights::default());
+    }
+
+    #[test]
+    fn a_height_from_the_picks_needs_some() {
+        let tools = BTreeMap::from([(
+            "Flat 6".to_string(),
+            ToolSpec {
+                diameter: 6.0,
+                ..ToolSpec::default()
+            },
+        )]);
+        let mut op = OperationData::new(None, StrategySpec::named("pocket").unwrap());
+        op.use_tool("Flat 6", &tools["Flat 6"], None, 0.05);
+        assert!(!op.can_measure_from_picks());
+        op.heights.bottom_from = Some(HeightRef::Selection);
+        assert!(op.problem(&tools).unwrap().contains("nothing is picked"));
+        op.faces.push(Pick {
+            body: "b".into(),
+            at: [0.0; 3],
+        });
+        assert!(op.can_measure_from_picks());
+        assert_eq!(op.problem(&tools), None);
+        // A drill's holes each go to their own bottom.
+        let mut drill = OperationData::new(None, StrategySpec::named("drill").unwrap());
+        drill.edges.push(Pick {
+            body: "b".into(),
+            at: [0.0; 3],
+        });
+        assert!(!drill.can_measure_from_picks());
     }
 }

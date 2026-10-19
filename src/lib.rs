@@ -498,6 +498,15 @@ impl Bench for Cam {
                         ),
                         param("feed", ParamKind::Number, false, "mm/min"),
                         param("plunge", ParamKind::Number, false, "mm/min"),
+                        param(
+                            "heights",
+                            ParamKind::Any,
+                            false,
+                            "{clearance, retract, top, bottom: mm above what each is measured \
+                             from; clearance_from, retract_from, top_from, bottom_from: \
+                             stock-top|stock-bottom|model-top|model-bottom|absolute|selection, \
+                             a top or bottom without one is the strategy's own}",
+                        ),
                         param("name", ParamKind::String, false, "the operation's name"),
                     ],
                     returns: "{feature}".into(),
@@ -617,7 +626,7 @@ impl Bench for Cam {
                 p("tolerance", "Tolerance", Dim::Length),
             ];
         }
-        vec![
+        let mut out = vec![
             p("stepover", "Stepover", Dim::Length),
             p("stepdown", "Stepdown", Dim::Length),
             p("feed", "Feed", Dim::Number),
@@ -627,7 +636,36 @@ impl Bench for Cam {
             p("axial", "Stock to leave, floors", Dim::Length),
             p("angle", "Pass angle", Dim::Angle),
             p("margin", "Boundary offset", Dim::Length),
-        ]
+        ];
+        // The heights, by their own names; a top or a bottom only while it is
+        // given.
+        let heights = OperationData::from(&node.data).map(|d| d.heights);
+        for (key, label, given) in [
+            ("clearance", "Clearance height", true),
+            ("retract", "Retract height", true),
+            (
+                "top",
+                "Top height",
+                heights.is_some_and(|h| h.top_from.is_some()),
+            ),
+            (
+                "bottom",
+                "Bottom height",
+                heights.is_some_and(|h| h.bottom_from.is_some()),
+            ),
+        ] {
+            if given {
+                out.push(Parameter {
+                    key: format!("/heights/{key}"),
+                    name: Some(format!("{key}_height")),
+                    label: label.into(),
+                    dim: Dim::Length,
+                    pointer: format!("/heights/{key}"),
+                    ..Default::default()
+                });
+            }
+        }
+        out
     }
 
     fn run_command(&mut self, command: &str, args: Value) -> Result<Value, String> {
@@ -688,6 +726,15 @@ impl Bench for Cam {
                 if let Some(v) = number("stepdown") {
                     data.stepdown = v;
                     data.multiple_depths = true;
+                }
+                if let Some(given) = args.get("heights").and_then(Value::as_object) {
+                    // Over what it has: `{clearance = 15, top_from = "model-top"}`.
+                    let mut heights = json!(data.heights);
+                    if let Some(h) = heights.as_object_mut() {
+                        h.extend(given.clone());
+                    }
+                    data.heights =
+                        serde_json::from_value(heights).map_err(|e| format!("heights: {e}"))?;
                 }
                 host::set_feature_data(&id, data.to_value())?;
                 self.refresh(&setup, false);

@@ -3,8 +3,8 @@
 
 use cam_protocol::{Level, Run};
 use camcraft_core::job::{
-    Boundary, Containment, CutDirection, Depths, Leave, Outline, ProfileSide, StrategySpec,
-    ToolKind, ToolSpec,
+    Boundary, Containment, CutDirection, Depths, HeightRef, Leave, Outline, ProfileSide,
+    StrategySpec, ToolKind, ToolSpec,
 };
 use camcraft_core::setup::frame::{Axis, Orientation};
 use camcraft_post::profile::Profile;
@@ -655,6 +655,219 @@ const CONTAINMENTS: [(Containment, &str); 3] = [
     (Containment::Outside, "Tool outside it"),
 ];
 
+/// What a height may be measured from, in the order the panel lists them.
+const HEIGHT_REFS: [(HeightRef, &str); 6] = [
+    (HeightRef::StockTop, "The stock's top"),
+    (HeightRef::StockBottom, "The stock's bottom"),
+    (HeightRef::ModelTop, "The part's top"),
+    (HeightRef::ModelBottom, "The part's bottom"),
+    (HeightRef::Absolute, "The work zero"),
+    (HeightRef::Selection, "The picks"),
+];
+
+/// The heights the panel shows, by the key their fields and choices go by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeightKey {
+    Clearance,
+    Retract,
+    Top,
+    Bottom,
+}
+
+impl HeightKey {
+    fn named(key: &str) -> Option<Self> {
+        Some(match key {
+            "clearance" => Self::Clearance,
+            "retract" => Self::Retract,
+            "top" => Self::Top,
+            "bottom" => Self::Bottom,
+            _ => return None,
+        })
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Self::Clearance => "clearance",
+            Self::Retract => "retract",
+            Self::Top => "top",
+            Self::Bottom => "bottom",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Clearance => "Clearance",
+            Self::Retract => "Retract",
+            Self::Top => "Top",
+            Self::Bottom => "Bottom",
+        }
+    }
+
+    /// What it is measured from, `None` for the strategy's own.
+    fn from(self, data: &OperationData) -> Option<HeightRef> {
+        let h = &data.heights;
+        match self {
+            Self::Clearance => Some(h.clearance_from),
+            Self::Retract => Some(h.retract_from),
+            Self::Top => h.top_from,
+            Self::Bottom => h.bottom_from,
+        }
+    }
+
+    fn offset(self, data: &OperationData) -> f64 {
+        let h = &data.heights;
+        match self {
+            Self::Clearance => h.clearance,
+            Self::Retract => h.retract,
+            Self::Top => h.top,
+            Self::Bottom => h.bottom,
+        }
+    }
+
+    fn offset_mut(self, data: &mut OperationData) -> &mut f64 {
+        let h = &mut data.heights;
+        match self {
+            Self::Clearance => &mut h.clearance,
+            Self::Retract => &mut h.retract,
+            Self::Top => &mut h.top,
+            Self::Bottom => &mut h.bottom,
+        }
+    }
+
+    /// What it is with none given, for a top or a bottom; `None` when it must
+    /// be given.
+    fn unset(self, data: &OperationData) -> Option<HeightRef> {
+        match self {
+            Self::Clearance | Self::Retract => None,
+            Self::Top => data.strategy().uses().top,
+            Self::Bottom => data.bottom_unset(),
+        }
+    }
+
+    /// The choices of what it is measured from: the strategy's own first for
+    /// a top or a bottom, the picks only where it may be measured from them,
+    /// or already is.
+    fn choices(self, data: &OperationData) -> Vec<Option<HeightRef>> {
+        let mut out = Vec::new();
+        if self.unset(data).is_some() {
+            out.push(None);
+        }
+        let picks = matches!(self, Self::Top | Self::Bottom) && data.can_measure_from_picks();
+        out.extend(
+            HEIGHT_REFS
+                .iter()
+                .map(|(r, _)| *r)
+                .filter(|r| *r != HeightRef::Selection || picks || self.from(data) == Some(*r))
+                .map(Some),
+        );
+        out
+    }
+
+    /// The heights the strategy has.
+    fn shown(data: &OperationData) -> Vec<Self> {
+        let uses = data.strategy().uses();
+        let mut out = vec![Self::Clearance];
+        if uses.stay_down {
+            out.push(Self::Retract);
+        }
+        if uses.top.is_some() {
+            out.push(Self::Top);
+        }
+        if data.bottom_unset().is_some() {
+            out.push(Self::Bottom);
+        }
+        out
+    }
+}
+
+/// What a top or a bottom is with none given, in words.
+fn unset_words(r: HeightRef) -> &'static str {
+    match r {
+        HeightRef::StockTop => "the stock's top",
+        HeightRef::ModelTop => "the part's top",
+        HeightRef::Selection => "the picks",
+        _ => "the part's bottom",
+    }
+}
+
+/// The Heights group: for each height the strategy has, what it is measured
+/// from and, when it is given, its offset.
+fn heights_group(data: &OperationData, feature: &str) -> Widget {
+    let mut rows = Vec::new();
+    for h in HeightKey::shown(data) {
+        let from = h.from(data);
+        let choices = h.choices(data);
+        let options = choices
+            .iter()
+            .map(|c| match c {
+                Some(r) => HEIGHT_REFS
+                    .iter()
+                    .find(|(x, _)| x == r)
+                    .map_or("?", |(_, l)| l)
+                    .to_string(),
+                None => format!(
+                    "The strategy's own: {}",
+                    h.unset(data).map_or("", unset_words)
+                ),
+            })
+            .collect();
+        let at = choices.iter().position(|c| *c == from).unwrap_or(0);
+        rows.push(choice(
+            &format!("{}_from", h.key()),
+            &format!("{} from", h.label()),
+            options,
+            at,
+        ));
+        if from.is_some() {
+            rows.push(number(
+                &format!("heights/{}", h.key()),
+                &format!("{}, above it", h.label()),
+                h.offset(data),
+                Dim::Length,
+                2,
+                feature,
+            ));
+        }
+    }
+    let uses = data.strategy().uses();
+    let about = match data.strategy() {
+        _ if uses.top.is_none() && uses.bottom.is_none() => {
+            Some("It follows the part all the way down, so it has no top or bottom.")
+        }
+        StrategySpec::Contour { .. } => {
+            Some("Without a top or bottom, its levels run from the part's top down to its bottom.")
+        }
+        StrategySpec::Flat { .. } => Some(
+            "Only the flats between the top and bottom are finished; without them, every \
+             flat of the part.",
+        ),
+        StrategySpec::Drill { .. } => Some(
+            "Each hole starts at its picked rim. Bottom is how deep a hole goes when its \
+             bottom edge is not picked.",
+        ),
+        StrategySpec::Profile { .. } | StrategySpec::Pocket { .. } => Some(
+            "Without a bottom, each area is cut down to the lowest point picked in it, or \
+             to the part's bottom when nothing is picked. From the picks, each area's top \
+             and bottom are the highest and lowest points picked in it, plus the offset.",
+        ),
+        StrategySpec::Face { .. } => {
+            Some("Without a bottom, the stock is faced down to the part's top.")
+        }
+        _ => None,
+    };
+    if let Some(about) = about {
+        rows.push(Widget::Text {
+            text: about.into(),
+            mono: false,
+        });
+    }
+    rows.push(Widget::Text {
+        text: "The view shows each height as a plane across the stock, from the last run.".into(),
+        mono: false,
+    });
+    group("Heights", rows)
+}
+
 pub fn operation_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
     let Some(data) = OperationData::from(&node.data) else {
         return vec![note(NoteKind::Error, "The operation's data does not read.")];
@@ -940,6 +1153,7 @@ pub fn operation_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
     if !geometry.is_empty() {
         panel.push(group("Geometry", geometry));
     }
+    panel.push(heights_group(&data, id));
 
     if let Some(problem) = setup_data.and_then(|s| data.problem(&s.tools)) {
         panel.push(note(NoteKind::Warning, problem));
@@ -977,7 +1191,10 @@ pub fn operation_event(cam: &mut Cam, id: &str, event: PanelEvent) {
                 "axial" => &mut data.axial,
                 "angle" => &mut data.angle,
                 "margin" => &mut data.margin,
-                _ => return,
+                other => match other.strip_prefix("heights/").and_then(HeightKey::named) {
+                    Some(h) => h.offset_mut(&mut data),
+                    None => return,
+                },
             };
             *slot = value;
         }
@@ -1090,6 +1307,22 @@ pub fn operation_event(cam: &mut Cam, id: &str, event: PanelEvent) {
             "containment" => {
                 if let Some((x, _)) = CONTAINMENTS.get(index) {
                     data.operation.boundary.containment = *x;
+                }
+            }
+            other if other.ends_with("_from") => {
+                let Some(h) = other.strip_suffix("_from").and_then(HeightKey::named) else {
+                    return;
+                };
+                let Some(from) = h.choices(&data).get(index).copied() else {
+                    return;
+                };
+                let heights = &mut data.heights;
+                match (h, from) {
+                    (HeightKey::Clearance, Some(r)) => heights.clearance_from = r,
+                    (HeightKey::Retract, Some(r)) => heights.retract_from = r,
+                    (HeightKey::Top, r) => heights.top_from = r,
+                    (HeightKey::Bottom, r) => heights.bottom_from = r,
+                    _ => return,
                 }
             }
             "outline" => {
