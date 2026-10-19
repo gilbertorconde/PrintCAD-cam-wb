@@ -12,13 +12,21 @@ use printcad_bench_sdk::api::*;
 use printcad_bench_sdk::host;
 
 use crate::data::{OperationData, Pick, STRATEGIES, SetupData, StockKind, Zero};
+use crate::linking::{linking_event, linking_group};
 use crate::runs::State;
 use crate::{Cam, operation_node, operations_of, setup_node, setups};
 
 /// The most findings a panel lists.
 const FINDINGS: usize = 12;
 
-fn number(id: &str, label: &str, value: f64, dim: Dim, decimals: usize, feature: &str) -> Widget {
+pub(crate) fn number(
+    id: &str,
+    label: &str,
+    value: f64,
+    dim: Dim,
+    decimals: usize,
+    feature: &str,
+) -> Widget {
     Widget::Number {
         id: id.into(),
         label: label.into(),
@@ -36,7 +44,7 @@ fn number(id: &str, label: &str, value: f64, dim: Dim, decimals: usize, feature:
     }
 }
 
-fn choice(id: &str, label: &str, options: Vec<String>, selected: usize) -> Widget {
+pub(crate) fn choice(id: &str, label: &str, options: Vec<String>, selected: usize) -> Widget {
     Widget::Choice {
         id: id.into(),
         label: label.into(),
@@ -62,7 +70,7 @@ fn note(kind: NoteKind, text: impl Into<String>) -> Widget {
     }
 }
 
-fn group(title: &str, children: Vec<Widget>) -> Widget {
+pub(crate) fn group(title: &str, children: Vec<Widget>) -> Widget {
     Widget::Group {
         title: title.into(),
         open: true,
@@ -1154,6 +1162,7 @@ pub fn operation_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
         panel.push(group("Geometry", geometry));
     }
     panel.push(heights_group(&data, id));
+    panel.push(linking_group(&data, spec, id));
 
     if let Some(problem) = setup_data.and_then(|s| data.problem(&s.tools)) {
         panel.push(note(NoteKind::Warning, problem));
@@ -1179,6 +1188,23 @@ pub fn operation_event(cam: &mut Cam, id: &str, event: PanelEvent) {
     };
     let setup = data.setup.clone().and_then(|s| setup_node(&s));
     let tolerance = setup.as_ref().map_or(0.05, |(_, s)| s.tolerance);
+    let linking = match &event {
+        PanelEvent::Number { id, .. }
+        | PanelEvent::Toggle { id, .. }
+        | PanelEvent::Choice { id, .. } => id.strip_prefix("linking/"),
+        _ => None,
+    };
+    if let Some(field) = linking {
+        let tool = data
+            .operation
+            .tool
+            .as_ref()
+            .and_then(|t| setup.as_ref()?.1.tools.get(t).cloned());
+        if linking_event(&mut data, field, &event, tool.as_ref()) {
+            cam.write_operation(id, &data);
+        }
+        return;
+    }
     match event {
         PanelEvent::Number { id: field, value } => {
             let slot = match field.as_str() {

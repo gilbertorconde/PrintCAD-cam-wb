@@ -19,6 +19,8 @@ use camcraft_core::setup::frame::{Axis, Orientation};
 use printcad_bench_sdk::serde_json;
 use serde::{Deserialize, Serialize};
 
+use crate::linking::LinkingData;
+
 /// Where a setup's stock comes from.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -321,6 +323,10 @@ pub struct OperationData {
     /// they could be set has camcraft's defaults, which it cut with.
     #[serde(default)]
     pub heights: HeightsData,
+    /// How it moves between cuts; camcraft's defaults for a document from
+    /// before they could be set.
+    #[serde(default)]
+    pub linking: LinkingData,
     #[serde(default)]
     pub faces: Vec<Pick>,
     #[serde(default)]
@@ -347,6 +353,7 @@ impl OperationData {
             angle: 0.0,
             margin: 0.0,
             heights: HeightsData::default(),
+            linking: LinkingData::default(),
             faces: Vec::new(),
             edges: Vec::new(),
         };
@@ -383,6 +390,7 @@ impl OperationData {
         };
         self.margin = op.boundary.margin;
         self.heights = HeightsData::of(&op.heights);
+        self.linking = LinkingData::of(&op.linking);
     }
 
     /// The operation as it cuts: its numbers written in.
@@ -397,6 +405,7 @@ impl OperationData {
             _ => None,
         };
         op.passes.feed = self.feed;
+        self.linking.apply(&mut op.linking);
         op.linking.plunge_feed = self.plunge;
         op.passes.rpm = (self.rpm > 0.0).then(|| self.rpm.round() as u32);
         op.passes.stock_to_leave = match uses.stock_to_leave {

@@ -20,6 +20,7 @@
 
 mod data;
 mod draw;
+mod linking;
 mod panel;
 mod runs;
 
@@ -507,6 +508,17 @@ impl Bench for Cam {
                              stock-top|stock-bottom|model-top|model-bottom|absolute|selection, \
                              a top or bottom without one is the strategy's own}",
                         ),
+                        param(
+                            "linking",
+                            ParamKind::Any,
+                            false,
+                            "{retract_feed, safe_distance, ramp_angle, lead_sweep: numbers; \
+                             retraction: minimum|full; entry: helix|plunge|ramp; leads, \
+                             reorder, allow_reverse: booleans; stay_down, lead_radius, \
+                             ramp_feed, ramp_stepdown, helix_diameter, lead_vertical, \
+                             lead_straight, lead_arc: {value, given}, the strategy's own \
+                             unless given}",
+                        ),
                         param("name", ParamKind::String, false, "the operation's name"),
                     ],
                     returns: "{feature}".into(),
@@ -637,9 +649,22 @@ impl Bench for Cam {
             p("angle", "Pass angle", Dim::Angle),
             p("margin", "Boundary offset", Dim::Length),
         ];
+        let data = OperationData::from(&node.data);
+        if let Some(d) = &data {
+            for (pointer, name, label, dim) in d.linking.parameters() {
+                out.push(Parameter {
+                    key: pointer.clone(),
+                    name: Some(name.into()),
+                    label: label.into(),
+                    dim,
+                    pointer,
+                    ..Default::default()
+                });
+            }
+        }
         // The heights, by their own names; a top or a bottom only while it is
         // given.
-        let heights = OperationData::from(&node.data).map(|d| d.heights);
+        let heights = data.map(|d| d.heights);
         for (key, label, given) in [
             ("clearance", "Clearance height", true),
             ("retract", "Retract height", true),
@@ -727,14 +752,14 @@ impl Bench for Cam {
                     data.stepdown = v;
                     data.multiple_depths = true;
                 }
-                if let Some(given) = args.get("heights").and_then(Value::as_object) {
-                    // Over what it has: `{clearance = 15, top_from = "model-top"}`.
-                    let mut heights = json!(data.heights);
-                    if let Some(h) = heights.as_object_mut() {
-                        h.extend(given.clone());
-                    }
+                // Over what it has: `heights = {clearance = 15, top_from = "model-top"}`.
+                if let Some(given) = args.get("heights") {
                     data.heights =
-                        serde_json::from_value(heights).map_err(|e| format!("heights: {e}"))?;
+                        over(&data.heights, given).map_err(|e| format!("heights: {e}"))?;
+                }
+                if let Some(given) = args.get("linking") {
+                    data.linking =
+                        over(&data.linking, given).map_err(|e| format!("linking: {e}"))?;
                 }
                 host::set_feature_data(&id, data.to_value())?;
                 self.refresh(&setup, false);
@@ -1058,6 +1083,20 @@ impl Cam {
 }
 
 bench!(Cam);
+
+/// `now` with the fields of `given`, an object, over it: what a script command
+/// sets of a group of numbers.
+fn over<T: serde::Serialize + serde::de::DeserializeOwned>(
+    now: &T,
+    given: &Value,
+) -> Result<T, String> {
+    let given = given.as_object().ok_or("a table of its fields")?;
+    let mut value = serde_json::to_value(now).map_err(|e| e.to_string())?;
+    if let Some(fields) = value.as_object_mut() {
+        fields.extend(given.clone());
+    }
+    serde_json::from_value(value).map_err(|e| e.to_string())
+}
 
 #[cfg(test)]
 mod tests {
