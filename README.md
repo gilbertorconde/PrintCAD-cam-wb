@@ -38,6 +38,10 @@ panels, the drawing and the helper that runs camcraft.
   profiles and pockets; facing; drilling. An operation
   (`io.github.gilbertorconde.cam.operation`) belongs to a setup and runs in the
   document's order, each against what the one before left.
+- **Heights**, as Fusion's Heights tab: the clearance, the retract, and the top
+  and bottom it cuts between, each measured from the stock, the part, the work
+  zero or the picked faces and edges. The view shows them as planes across the
+  stock while the operation is edited.
 - **Tools.** Preferences › CAM holds the tool library, which starts as
   camcraft's twenty common router bits, each with presets for the materials
   it suits. A setup takes a copy of a tool when an operation first cuts with
@@ -56,7 +60,8 @@ panels, the drawing and the helper that runs camcraft.
 ```lua
 local cam = pc.io.github.gilbertorconde.cam
 local setup = cam.setup{bodies = {"<body id>"}, margin = 3, post = "grbl"}
-local rough = cam.operation{setup = setup.feature, strategy = "adaptive", tool = "1/4 upcut"}
+local rough = cam.operation{setup = setup.feature, strategy = "adaptive", tool = "1/4 upcut",
+                           heights = {bottom_from = "model-top", bottom = -6}}
 cam.status{id = setup.feature}          -- queued, running, ready (with its checks), failed
 local program = cam.gcode{id = rough.feature}
 ```
@@ -83,8 +88,8 @@ useful there.
 - The helper reports no progress while it runs, only that it is running.
 - Picked faces and edges follow camcraft's rules: a pick is a point on the
   face, found again on the solid by that point.
-- Heights, linking and leads keep camcraft's defaults; the panel does not
-  show them yet.
+- Linking and leads keep camcraft's defaults; the panel does not show them
+  yet.
 
 ## Install it
 

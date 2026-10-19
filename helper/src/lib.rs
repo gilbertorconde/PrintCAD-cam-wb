@@ -15,11 +15,14 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use cam_protocol::{
-    Finding, IDENTITY, Level, Material, OperationRun, Program, Request, Run, Stroke, VERSION,
+    Finding, HeightPlane, IDENTITY, Level, Material, OperationRun, Program, Request, Run, Stroke,
+    VERSION,
 };
+use camcraft_core::job::{HeightContext, Operation, Outline};
 use camcraft_core::path::toolpath::{MoveRole, Toolpath};
 use camcraft_core::run::Made;
 use camcraft_core::setup::frame::Frame;
+use camcraft_core::setup::{Bodies, Prepared, features, prepare};
 use camcraft_geom::mesh::Aabb;
 use camcraft_import::native::load_native;
 use camcraft_session::checks::Level as CheckLevel;
@@ -92,8 +95,27 @@ pub fn answer(request: &Request) -> Result<Run, String> {
 
     let frame = ran.result.frame;
     let tolerance = job.tolerance.max(0.02);
+    let stock_box = Aabb::union_all(&ran.result.stocks);
+    let bodies: Bodies<'_> = loaded.iter().map(|(n, m)| (*n, &m.body)).collect();
+    // Laid out again only for a height measured from the picks.
+    let mut prepared: Option<Option<Prepared>> = None;
     let mut operations = Vec::new();
     for (k, op) in ran.result.operations.iter().enumerate() {
+        let heights = match (setup.operations.get(k), stock_box) {
+            (Some(spec), Some(stock)) => {
+                let mut ctx = ran.result.heights;
+                if spec.heights.measured_from_selection() || down_to_picks(spec) {
+                    let laid = prepared.get_or_insert_with(|| prepare(&job, 0, &bodies).ok());
+                    ctx.picked = laid.as_ref().and_then(|p| {
+                        features::picks(&spec.selection, p, &bodies, job.tolerance)
+                            .ok()
+                            .flatten()
+                    });
+                }
+                planes(spec, &ctx, stock, &frame)
+            }
+            _ => Vec::new(),
+        };
         let made = match op.made {
             Made::Generated => "generated",
             Made::Kept => "kept",
@@ -129,10 +151,11 @@ pub fn answer(request: &Request) -> Result<Run, String> {
             cut_mm,
             rapid_mm,
             program,
+            heights,
         });
     }
 
-    let stock = Aabb::union_all(&ran.result.stocks)
+    let stock = stock_box
         .map(|b| corners(&frame, b))
         .unwrap_or([[0.0; 3]; 2]);
     Ok(Run {
@@ -181,6 +204,55 @@ fn findings(ran: &Ran) -> Vec<Finding> {
     };
     out.sort_by_key(|f| rank(f.level));
     out
+}
+
+/// Whether a 2D operation goes down to its picks without a bottom: it has some,
+/// and they are what it cuts round.
+fn down_to_picks(op: &Operation) -> bool {
+    op.strategy.uses().outline && !op.selection.is_empty() && op.outline == Outline::Selection
+}
+
+/// `op`'s heights as planes across `stock`, as camcraft's app draws them: the
+/// clearance, the retract where it stays down, and the top and bottom where
+/// the strategy has them.
+fn planes(op: &Operation, ctx: &HeightContext, stock: Aabb, frame: &Frame) -> Vec<HeightPlane> {
+    let uses = op.strategy.uses();
+    let (top, bottom) = if uses.outline {
+        op.levels_2d(ctx, ctx.picked)
+    } else {
+        op.levels_3d(ctx)
+    };
+    // A little past the stock, so a plane on its top does not hide its edges.
+    let grow = 0.04 * (stock.max.x - stock.min.x).max(stock.max.y - stock.min.y);
+    let (lo, hi) = (
+        stock.min.truncate() - DVec2::splat(grow),
+        stock.max.truncate() + DVec2::splat(grow),
+    );
+    [
+        ("Clearance", Some(op.heights.clearance.resolve(ctx))),
+        (
+            "Retract",
+            uses.stay_down.then(|| op.heights.retract.resolve(ctx)),
+        ),
+        ("Top", uses.top.map(|_| top)),
+        ("Bottom", uses.bottom.map(|_| bottom)),
+    ]
+    .into_iter()
+    .filter_map(|(name, z)| {
+        let z = z?;
+        let at = |x: f64, y: f64| to_f32(frame.to_model(DVec3::new(x, y, z)));
+        Some(HeightPlane {
+            name: name.into(),
+            z,
+            corners: [
+                at(lo.x, lo.y),
+                at(hi.x, lo.y),
+                at(hi.x, hi.y),
+                at(lo.x, hi.y),
+            ],
+        })
+    })
+    .collect()
 }
 
 /// A box in the setup's frame as low and high corners in the model's.

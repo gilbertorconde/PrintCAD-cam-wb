@@ -125,3 +125,65 @@ fn a_placed_body_is_machined_where_it_sits() {
     assert!((there[0][0] - here[0][0] - 100.0).abs() < 1e-6);
     assert!((there[0][1] - here[0][1]).abs() < 1e-6);
 }
+
+/// A bottom 2 mm under the stock's top keeps the cut above it, and the
+/// heights come back as planes where they resolved.
+#[test]
+fn the_heights_hold_and_come_back_as_planes() {
+    let job = JOB.replace(
+        "passes = { stepdown = 3.0, stepover = 3.0 }",
+        "passes = { stepdown = 3.0, stepover = 3.0 }\n\
+         heights = { bottom = { ref = \"stock-top\", offset = -2.0 } }",
+    );
+    let request = Request {
+        version: VERSION,
+        job,
+        shapes: BTreeMap::from([(
+            "part".to_string(),
+            Shape {
+                text: native("hinge_jig.step"),
+                placement: IDENTITY,
+            },
+        )]),
+        max_points: 0,
+    };
+    let run = answer(&request).unwrap();
+    let top = run.stock[1][2];
+    let op = &run.operations[0];
+    assert_eq!(op.made, "generated");
+    let plane = |name: &str| {
+        op.heights
+            .iter()
+            .find(|p| p.name == name)
+            .unwrap_or_else(|| panic!("no {name} plane in {:?}", op.heights))
+    };
+    let clearance = plane("Clearance").corners[0][2];
+    assert!(
+        (f64::from(clearance) - (top + 10.0)).abs() < 1e-3,
+        "{clearance}"
+    );
+    let bottom = plane("Bottom").corners[0][2];
+    assert!((f64::from(bottom) - (top - 2.0)).abs() < 1e-3, "{bottom}");
+    // Each corner a little outside the stock, across it.
+    let corners = plane("Bottom").corners;
+    assert!(f64::from(corners[0][0]) < run.stock[0][0]);
+    assert!(f64::from(corners[2][0]) > run.stock[1][0]);
+
+    let full = Request {
+        max_points: 1_000_000,
+        ..request
+    };
+    let run = answer(&full).unwrap();
+    let lowest = run.operations[0]
+        .strokes
+        .iter()
+        .filter(|s| !s.rapid)
+        .flat_map(|s| s.points.iter())
+        .map(|p| f64::from(p[2]))
+        .fold(f64::INFINITY, f64::min);
+    assert!(
+        lowest >= top - 2.0 - 1e-3,
+        "cut down to {lowest}, under {}",
+        top - 2.0
+    );
+}
