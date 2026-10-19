@@ -25,6 +25,7 @@ mod panel;
 mod passes;
 mod playback;
 mod runs;
+mod tools;
 
 use std::collections::BTreeMap;
 
@@ -51,6 +52,8 @@ const ADD_OPERATION: &str = "add_operation";
 const SETUP: &str = "setup";
 const OPERATION: &str = "operation";
 const TOOLS: &str = "tools";
+const IMPORT_TOOLS: &str = "import_tools";
+const ADD_POST: &str = "add_post";
 const RUN: &str = "run";
 const STATUS: &str = "status";
 const GCODE: &str = "gcode";
@@ -78,6 +81,9 @@ struct Settings {
     post: String,
     /// A new setup's tolerance, millimetres.
     tolerance: f64,
+    /// The user's own machine profiles, as camcraft's TOML, by name.
+    #[serde(default)]
+    posts: BTreeMap<String, String>,
 }
 
 impl Default for Settings {
@@ -95,6 +101,7 @@ impl Default for Settings {
             tools,
             post: "grbl".into(),
             tolerance: 0.05,
+            posts: BTreeMap::new(),
         }
     }
 }
@@ -136,6 +143,17 @@ struct Cam {
     playing: Option<playback::Playing>,
     /// The tick job keeping it playing.
     ticking: Option<u64>,
+    /// The settings page's chosen preset of the chosen tool, and chosen post.
+    chosen_preset: Option<usize>,
+    chosen_post: Option<usize>,
+    /// The paths typed on the settings page, of a Fusion tool library and of
+    /// a machine profile.
+    import_path: String,
+    post_path: String,
+    /// A file being read for the settings page, by its job.
+    reading: Option<(u64, tools::Reading)>,
+    /// What the settings page last did with a file.
+    settings_note: Option<Result<String, String>>,
     /// A word for the task panel about the last thing tried.
     hint: Option<String>,
 }
@@ -229,6 +247,8 @@ fn request_for(node: &Node, setup: &SetupData) -> Result<String, String> {
         job: camcraft_session::job_text(&job).map_err(|e| e.to_string())?,
         shapes,
         max_points: DRAWN_POINTS,
+        post: setup.post_profile.clone(),
+        read: None,
     };
     serde_json::to_string(&request).map_err(|e| e.to_string())
 }
@@ -314,7 +334,8 @@ impl Cam {
         let name = name
             .map(str::to_string)
             .unwrap_or_else(|| format!("Setup {}", count + 1));
-        let data = SetupData::new(bodies, &self.settings.post, self.settings.tolerance);
+        let mut data = SetupData::new(bodies, &self.settings.post, self.settings.tolerance);
+        data.post_profile = self.settings.posts.get(&data.post).cloned();
         host::add_feature(SETUP_KIND, &name, None, data.to_value())
     }
 
@@ -569,6 +590,29 @@ impl Bench for Cam {
                     ..Default::default()
                 },
                 Command {
+                    id: id(IMPORT_TOOLS),
+                    summary: "Add a Fusion tool library, exported as CSV, to the tool library"
+                        .into(),
+                    params: vec![param(
+                        "text",
+                        ParamKind::String,
+                        true,
+                        "the CSV file's text",
+                    )],
+                    returns: "{said}: what was added, and what left out".into(),
+                    see_also: vec![id(TOOLS)],
+                    ..Default::default()
+                },
+                Command {
+                    id: id(ADD_POST),
+                    summary: "Keep a machine profile of one's own, in camcraft's TOML, \
+                              beside the built-in posts"
+                        .into(),
+                    params: vec![param("text", ParamKind::String, true, "the profile's TOML")],
+                    returns: "{name}: the post's name, for a setup's `post`".into(),
+                    ..Default::default()
+                },
+                Command {
                     id: id(RUN),
                     summary: "Run a setup again, or queue it behind the one running".into(),
                     params: id_only("the setup, or one of its operations"),
@@ -747,6 +791,7 @@ impl Bench for Cam {
                         data.margin_top = m;
                     }
                     if let Some(post) = text("post") {
+                        data.post_profile = self.settings.posts.get(&post).cloned();
                         data.post = post;
                     }
                     if let Some(t) = number("tolerance") {
@@ -804,6 +849,16 @@ impl Bench for Cam {
                 host::set_feature_data(&id, data.to_value())?;
                 self.refresh(&setup, false);
                 Ok(json!({ "feature": id }))
+            }
+            IMPORT_TOOLS => {
+                let text = text("text").ok_or("the CSV's text, as `text`")?;
+                let said = tools::import_tools(&mut self.settings.tools, &text)?;
+                Ok(json!({ "said": said }))
+            }
+            ADD_POST => {
+                let text = text("text").ok_or("the profile's TOML, as `text`")?;
+                let name = tools::add_post(&mut self.settings.posts, &text)?;
+                Ok(json!({ "name": name }))
             }
             TOOLS => Ok(Value::Array(
                 self.settings
@@ -910,6 +965,19 @@ impl Bench for Cam {
                     }
                 }
                 self.keep_playing();
+                true
+            }
+            Event::JobFinished { job, result } if self.reading.is_some_and(|(j, _)| j == *job) => {
+                let for_what = self.reading.take().map(|(_, r)| r);
+                self.settings_note = Some(tools::read_text(result).and_then(|text| {
+                    match for_what {
+                        Some(tools::Reading::Tools) => {
+                            tools::import_tools(&mut self.settings.tools, &text)
+                        }
+                        _ => tools::add_post(&mut self.settings.posts, &text)
+                            .map(|name| format!("Added the post '{name}'.")),
+                    }
+                }));
                 true
             }
             Event::JobFinished { job, result } => {
@@ -1102,6 +1170,9 @@ impl Bench for Cam {
     fn job(entry: &str, input: &str) -> Result<String, String> {
         if entry == playback::TICK {
             return Ok(playback::wait(input));
+        }
+        if entry == tools::READ {
+            return tools::read_job(input);
         }
         if entry != JOB {
             return Err(format!("no job `{entry}`"));

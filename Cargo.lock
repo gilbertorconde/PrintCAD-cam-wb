@@ -154,6 +154,7 @@ dependencies = [
  "camcraft-core",
  "camcraft-geom",
  "camcraft-import",
+ "camcraft-post",
  "camcraft-session",
  "camcraft-sim",
  "glam 0.33.12",

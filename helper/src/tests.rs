@@ -75,6 +75,7 @@ fn a_native_solid_runs_and_posts() {
             },
         )]),
         max_points: 5000,
+        ..Request::default()
     };
     let run = answer(&request).unwrap();
     for f in &run.findings {
@@ -116,6 +117,7 @@ fn a_placed_body_is_machined_where_it_sits() {
                 },
             )]),
             max_points: 0,
+            ..Request::default()
         };
         answer(&request).unwrap().stock
     };
@@ -146,6 +148,7 @@ fn the_heights_hold_and_come_back_as_planes() {
             },
         )]),
         max_points: 0,
+        ..Request::default()
     };
     let run = answer(&request).unwrap();
     let top = run.stock[1][2];
@@ -208,6 +211,7 @@ fn a_profile_posts_its_leads() {
                 },
             )]),
             max_points: 0,
+            ..Request::default()
         };
         let run = answer(&request).unwrap();
         let op = &run.operations[0];
@@ -237,6 +241,7 @@ fn a_profile_leaves_its_tabs() {
                 },
             )]),
             max_points: 0,
+            ..Request::default()
         };
         let run = answer(&request).unwrap();
         let op = &run.operations[0];
@@ -269,6 +274,7 @@ fn a_run_plays_back_as_it_cut() {
             },
         )]),
         max_points: 2000,
+        ..Request::default()
     };
     let run = answer(&request).unwrap();
     let play = run.playback.as_ref().expect("a playback");
@@ -306,4 +312,59 @@ fn a_run_plays_back_as_it_cut() {
     // The answer stays small enough to send every run.
     let bytes = serde_json::to_string(play).unwrap().len();
     assert!(bytes < 2_000_000, "{bytes} bytes");
+}
+
+/// A file the package names is read for it; one too big, or not there, is
+/// refused with a reason.
+#[test]
+fn a_file_is_read_for_the_package() {
+    let request = Request {
+        version: VERSION,
+        ..Request::default()
+    };
+    let path = format!("{}/Cargo.toml", env!("CARGO_MANIFEST_DIR"));
+    assert!(
+        crate::read(&request, &path)
+            .unwrap()
+            .contains("camcraft-helper")
+    );
+    assert!(
+        crate::read(&request, "/no/such/file")
+            .unwrap_err()
+            .contains("cannot read")
+    );
+    let old = Request {
+        version: VERSION + 1,
+        ..Request::default()
+    };
+    assert!(crate::read(&old, &path).unwrap_err().contains("reinstall"));
+}
+
+/// A setup posts with a profile of the user's that the request carries.
+#[test]
+fn a_post_of_ones_own_writes_the_program() {
+    let grbl = include_str!("../../camcraft/crates/camcraft-post/profiles/grbl.toml");
+    let mine = grbl.replacen("\"GRBL\"", "\"My mill\"", 1).replacen(
+        "extension = \"nc\"",
+        "extension = \"mine\"",
+        1,
+    );
+    let request = Request {
+        version: VERSION,
+        job: JOB.replace("post = \"grbl\"", "post = \"My mill\""),
+        shapes: BTreeMap::from([(
+            "part".to_string(),
+            Shape {
+                text: native("hinge_jig.step"),
+                placement: IDENTITY,
+            },
+        )]),
+        max_points: 0,
+        post: Some(mine),
+        read: None,
+    };
+    let run = answer(&request).unwrap();
+    let program = run.operations[0].program.as_ref().unwrap();
+    assert_eq!(program.post, "My mill");
+    assert_eq!(program.extension, "mine");
 }

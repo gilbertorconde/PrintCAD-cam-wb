@@ -16,6 +16,7 @@ use crate::linking::{linking_event, linking_group};
 use crate::passes::{finishing_group, passes_event, strategy_rows, tabs_group};
 use crate::playback::{playback_event, playback_group};
 use crate::runs::State;
+use crate::tools::{READ, Reading, files_groups, tool_editor, tool_event};
 use crate::{Cam, operation_node, operations_of, setup_node, setups};
 
 /// The most findings a panel lists.
@@ -92,8 +93,12 @@ fn x_axes(z: Axis) -> Vec<Axis> {
         .collect()
 }
 
-fn posts() -> Vec<String> {
-    Profile::builtin_names().map(String::from).collect()
+/// The posts to choose from: camcraft's built-in ones, then the user's.
+fn posts(cam: &Cam) -> Vec<String> {
+    Profile::builtin_names()
+        .map(String::from)
+        .chain(cam.settings.posts.keys().cloned())
+        .collect()
 }
 
 fn kind_label(kind: ToolKind) -> &'static str {
@@ -404,7 +409,12 @@ pub fn setup_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
             number("offset_z", "Offset Z", setup.offset_z, Dim::Length, 2, id),
         ],
     ));
-    let posts = posts();
+    let mut posts = posts(cam);
+    // A post of someone else's the setup carries, though this library has
+    // not got it.
+    if !posts.contains(&setup.post) {
+        posts.push(setup.post.clone());
+    }
     panel.push(group(
         "Post",
         vec![
@@ -544,8 +554,16 @@ pub fn setup_event(cam: &mut Cam, id: &str, event: PanelEvent) {
                 }
                 "zero" => setup.zero = Zero::ALL.get(index).copied().unwrap_or_default(),
                 "post" => {
-                    if let Some(p) = posts().get(index) {
-                        setup.post = p.clone();
+                    let mut posts = posts(cam);
+                    if !posts.contains(&setup.post) {
+                        posts.push(setup.post.clone());
+                    }
+                    let Some(p) = posts.get(index).cloned() else {
+                        return;
+                    };
+                    if p != setup.post {
+                        setup.post_profile = cam.settings.posts.get(&p).cloned();
+                        setup.post = p;
                     }
                 }
                 "new_strategy" => {
@@ -1473,8 +1491,34 @@ pub fn settings_panel(cam: &Cam) -> Vec<Widget> {
             ]
         })
         .collect();
-    let posts = posts();
-    vec![
+    let posts = posts(cam);
+    let mut editor = Vec::new();
+    if let Some((name, tool)) = cam
+        .chosen_tool
+        .and_then(|i| cam.settings.tools.iter().nth(i))
+    {
+        editor.push(tool_editor(name, tool, cam.chosen_preset));
+    }
+    editor.extend(files_groups(
+        &cam.settings.posts,
+        &cam.import_path,
+        &cam.post_path,
+        cam.chosen_post,
+        cam.reading.is_some(),
+    ));
+    match &cam.settings_note {
+        Some(Ok(said)) => editor.push(note(NoteKind::Info, said.clone())),
+        Some(Err(why)) => editor.push(note(NoteKind::Error, why.clone())),
+        None => {}
+    }
+    if cam.reading.is_some() {
+        editor.push(note(
+            NoteKind::Info,
+            "Reading the file… printCAD hands it over while the CAM workbench is open, \
+             and this page shows it after the next change on it.",
+        ));
+    }
+    let mut page = vec![
         Widget::Heading {
             text: "Tool library".into(),
         },
@@ -1513,6 +1557,9 @@ pub fn settings_panel(cam: &Cam) -> Vec<Widget> {
             ButtonStyle::Small,
             true,
         ),
+    ];
+    page.extend(editor);
+    page.extend([
         Widget::Separator,
         Widget::Heading {
             text: "A new setup".into(),
@@ -1543,10 +1590,57 @@ pub fn settings_panel(cam: &Cam) -> Vec<Widget> {
              program yourself before it cuts: in a simulator you trust, then as an air cut \
              above the stock, with a hand near the e-stop.",
         ),
-    ]
+    ]);
+    page
 }
 
 pub fn settings_event(cam: &mut Cam, event: PanelEvent) {
+    if tool_event(
+        &mut cam.settings.tools,
+        &mut cam.chosen_tool,
+        &mut cam.chosen_preset,
+        &event,
+    ) {
+        return;
+    }
+    match &event {
+        PanelEvent::Text { id, value } if id == "import_path" => {
+            cam.import_path = value.clone();
+            return;
+        }
+        PanelEvent::Text { id, value } if id == "post_path" => {
+            cam.post_path = value.clone();
+            return;
+        }
+        PanelEvent::Select { id, index } if id == "posts" => {
+            cam.chosen_post = Some(*index);
+            return;
+        }
+        PanelEvent::Button { id } if id == "remove_post" => {
+            if let Some(name) = cam
+                .chosen_post
+                .take()
+                .and_then(|i| cam.settings.posts.keys().nth(i).cloned())
+            {
+                cam.settings.posts.remove(&name);
+            }
+            return;
+        }
+        PanelEvent::Button { id } if id == "import_tools" || id == "add_post" => {
+            let (path, reading) = if id == "import_tools" {
+                (cam.import_path.clone(), Reading::Tools)
+            } else {
+                (cam.post_path.clone(), Reading::Post)
+            };
+            cam.settings_note = None;
+            match host::start_job(READ, path.trim()) {
+                Ok(job) => cam.reading = Some((job, reading)),
+                Err(e) => cam.settings_note = Some(Err(e)),
+            }
+            return;
+        }
+        _ => {}
+    }
     let tools = &mut cam.settings.tools;
     let name_at = |tools: &std::collections::BTreeMap<String, ToolSpec>, row: usize| {
         tools.keys().nth(row).cloned()
@@ -1573,7 +1667,10 @@ pub fn settings_event(cam: &mut Cam, event: PanelEvent) {
                 _ => {}
             }
         }
-        PanelEvent::Select { id, index } if id == "tools" => cam.chosen_tool = Some(index),
+        PanelEvent::Select { id, index } if id == "tools" => {
+            cam.chosen_tool = Some(index);
+            cam.chosen_preset = None;
+        }
         PanelEvent::Button { id } if id == "add_tool" => {
             if let Some(name) = cam.chosen_tool.and_then(|i| name_at(tools, i))
                 && let Some(tool) = tools.get(&name).cloned()
@@ -1598,7 +1695,7 @@ pub fn settings_event(cam: &mut Cam, event: PanelEvent) {
             cam.chosen_tool = None;
         }
         PanelEvent::Choice { id, index } if id == "post" => {
-            if let Some(p) = posts().get(index) {
+            if let Some(p) = posts(cam).get(index) {
                 cam.settings.post = p.clone();
             }
         }

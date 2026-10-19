@@ -4,7 +4,7 @@
 use std::io::{Read, Write};
 
 use cam_protocol::{Request, Response};
-use camcraft_helper::answer;
+use camcraft_helper::{answer, read};
 
 fn main() -> std::process::ExitCode {
     let mut text = String::new();
@@ -24,9 +24,15 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::FAILURE;
         }
     };
-    let response = match answer(&request) {
-        Ok(run) => Response::Ran(Box::new(run)),
-        Err(why) => Response::Refused { why },
+    let response = match &request.read {
+        Some(path) => match read(&request, path) {
+            Ok(text) => Response::Read { text },
+            Err(why) => Response::Refused { why },
+        },
+        None => match answer(&request) {
+            Ok(run) => Response::Ran(Box::new(run)),
+            Err(why) => Response::Refused { why },
+        },
     };
     let mut out = std::io::stdout().lock();
     match serde_json::to_writer(&mut out, &response) {

@@ -11,6 +11,7 @@ cam-protocol = { path = "../protocol" }
 camcraft-core.workspace = true
 camcraft-geom.workspace = true
 camcraft-import.workspace = true
+camcraft-post.workspace = true
 camcraft-session.workspace = true
 camcraft-sim.workspace = true
 glam.workspace = true

@@ -159,6 +159,7 @@ impl Runs {
             Ok(json) => match serde_json::from_str::<Response>(json) {
                 Ok(Response::Ran(run)) => State::Ready(run),
                 Ok(Response::Refused { why }) => State::Failed(why),
+                Ok(Response::Read { .. }) => State::Failed("the helper read a file instead".into()),
                 Err(e) => State::Failed(format!("the helper's answer does not read: {e}")),
             },
             Err(e) if e == "stopped" => State::Stopped,

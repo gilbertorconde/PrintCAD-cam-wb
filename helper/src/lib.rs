@@ -25,6 +25,7 @@ use camcraft_core::setup::frame::Frame;
 use camcraft_core::setup::{Bodies, Prepared, features, prepare};
 use camcraft_geom::mesh::Aabb;
 use camcraft_import::native::load_native;
+use camcraft_post::profile::Profile;
 use camcraft_session::checks::Level as CheckLevel;
 use camcraft_session::{Model, Models, Ran, load_profile, parse_job, program, run_setup};
 use glam::{DAffine3, DMat4, DVec2, DVec3};
@@ -32,8 +33,12 @@ use glam::{DAffine3, DMat4, DVec2, DVec3};
 /// How many columns a side the drawn material has, at most.
 const MATERIAL_COLUMNS: usize = 100;
 
-/// Run `request`'s setup, or say why it cannot run.
-pub fn answer(request: &Request) -> Result<Run, String> {
+/// The largest file [`read`] reads: a tool library or a machine profile is
+/// far smaller.
+const MOST_READ: u64 = 16 << 20;
+
+/// Whether `request` was written for this helper.
+fn speaks(request: &Request) -> Result<(), String> {
     if request.version != VERSION {
         return Err(format!(
             "the package speaks version {} to its helper, which speaks {VERSION}: \
@@ -41,6 +46,30 @@ pub fn answer(request: &Request) -> Result<Run, String> {
             request.version
         ));
     }
+    Ok(())
+}
+
+/// The text of the file at `path`, for `request`: a tool library or a machine
+/// profile the package was pointed at.
+pub fn read(request: &Request, path: &str) -> Result<String, String> {
+    speaks(request)?;
+    let path = std::path::Path::new(path.trim());
+    let size = std::fs::metadata(path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?
+        .len();
+    if size > MOST_READ {
+        return Err(format!(
+            "{} is {} MB, too big for a tool library or a profile",
+            path.display(),
+            size >> 20
+        ));
+    }
+    std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
+}
+
+/// Run `request`'s setup, or say why it cannot run.
+pub fn answer(request: &Request) -> Result<Run, String> {
+    speaks(request)?;
     let started = Instant::now();
     let job = parse_job(&request.job, "the setup").map_err(|e| e.to_string())?;
     let setup = job.setups.first().ok_or("the job has no setup")?;
@@ -91,7 +120,12 @@ pub fn answer(request: &Request) -> Result<Run, String> {
     }
     let models: Models<'_> = loaded.iter().map(|(n, m)| (*n, m)).collect();
     let ran = run_setup(&job, 0, &models).map_err(|e| e.to_string())?;
-    let profile = load_profile(&setup.post, None).map_err(|e| e.to_string())?;
+    let profile = match &request.post {
+        Some(text) => {
+            Profile::from_toml(text).map_err(|e| format!("the post {}: {e}", setup.post))?
+        }
+        None => load_profile(&setup.post, None).map_err(|e| e.to_string())?,
+    };
 
     let frame = ran.result.frame;
     let tolerance = job.tolerance.max(0.02);

@@ -116,8 +116,13 @@ pub struct SetupData {
     pub offset_x: f64,
     pub offset_y: f64,
     pub offset_z: f64,
-    /// A built-in post's name.
+    /// The post's name: a built-in one's, or one of the user's.
     pub post: String,
+    /// The user's machine profile it posts with, as camcraft's TOML: a copy,
+    /// so it posts the same on a machine without it. `None` for a built-in
+    /// post.
+    #[serde(default)]
+    pub post_profile: Option<String>,
     /// Work offset, 54 for G54.
     pub wcs: f64,
     /// Chordal tolerance, millimetres.
@@ -146,6 +151,7 @@ impl SetupData {
             offset_y: 0.0,
             offset_z: 0.0,
             post: post.into(),
+            post_profile: None,
             wcs: 54.0,
             tolerance,
             tools: BTreeMap::new(),

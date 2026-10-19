@@ -31,6 +31,14 @@ pub struct Request {
     /// The most points to send back for drawing one operation's toolpath; a
     /// denser one is thinned to it. Zero sends none.
     pub max_points: usize,
+    /// The machine profile to post with, as camcraft's TOML, when it is not
+    /// one camcraft has built in: the setup carries its own copy.
+    #[serde(default)]
+    pub post: Option<String>,
+    /// Instead of running a setup, read this file and answer with its text
+    /// ([`Response::Read`]): what a package in printCAD's sandbox cannot do.
+    #[serde(default)]
+    pub read: Option<String>,
 }
 
 /// A body's solid, as printCAD keeps it.
@@ -62,6 +70,8 @@ pub enum Response {
         /// Why.
         why: String,
     },
+    /// The file [`Request::read`] named, as text.
+    Read { text: String },
 }
 
 /// A setup, run.
