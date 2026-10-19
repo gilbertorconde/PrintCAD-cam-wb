@@ -21,7 +21,7 @@ jobs:
     needs: helpers
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust (toolchain and target from rust-toolchain.toml)
         run: rustup toolchain install
@@ -31,7 +31,7 @@ jobs:
       - name: Tests
         run: cargo test --release --workspace
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: helper-*
           path: helpers
