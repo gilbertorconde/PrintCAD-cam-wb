@@ -77,7 +77,14 @@ fn a_native_solid_runs_and_posts() {
         max_points: 5000,
         ..Request::default()
     };
-    let run = answer(&request).unwrap();
+    let mut steps = Vec::new();
+    let run =
+        crate::answer_reporting(&request, &mut |done, total| steps.push((done, total))).unwrap();
+    // Every step told, in order, from none to all.
+    let total = steps[0].1;
+    assert_eq!(steps.first(), Some(&(0, total)));
+    assert_eq!(steps.last(), Some(&(total, total)));
+    assert!(steps.windows(2).all(|w| w[0].0 < w[1].0), "{steps:?}");
     for f in &run.findings {
         if f.level != Level::Pass {
             eprintln!("{f:?}");

@@ -21,13 +21,14 @@ use cam_protocol::{
 use camcraft_core::job::{HeightContext, Operation, Outline};
 use camcraft_core::path::toolpath::{MoveRole, Toolpath};
 use camcraft_core::run::Made;
+use camcraft_core::run::Stage;
 use camcraft_core::setup::frame::Frame;
 use camcraft_core::setup::{Bodies, Prepared, features, prepare};
 use camcraft_geom::mesh::Aabb;
 use camcraft_import::native::load_native;
 use camcraft_post::profile::Profile;
 use camcraft_session::checks::Level as CheckLevel;
-use camcraft_session::{Model, Models, Ran, load_profile, parse_job, program, run_setup};
+use camcraft_session::{Model, Models, Ran, load_profile, parse_job, program, run_setup_planned};
 use glam::{DAffine3, DMat4, DVec2, DVec3};
 
 /// How many columns a side the drawn material has, at most.
@@ -69,10 +70,25 @@ pub fn read(request: &Request, path: &str) -> Result<String, String> {
 
 /// Run `request`'s setup, or say why it cannot run.
 pub fn answer(request: &Request) -> Result<Run, String> {
+    answer_reporting(request, &mut |_, _| {})
+}
+
+/// [`answer`], telling `progress` how far it is as `(done, total)` steps: the
+/// solids read, laying the setup out, each operation, verifying, checking,
+/// and posting.
+pub fn answer_reporting(
+    request: &Request,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<Run, String> {
     speaks(request)?;
     let started = Instant::now();
     let job = parse_job(&request.job, "the setup").map_err(|e| e.to_string())?;
     let setup = job.setups.first().ok_or("the job has no setup")?;
+    let ops = setup.operations.len() as u64;
+    // Reading the solids, laying out, each operation, verifying, checking,
+    // posting.
+    let total = ops + 5;
+    progress(0, total);
 
     // A STEP file is tessellated to a quarter of the machining tolerance; a
     // native shape is the same B-rep, so it gets the same.
@@ -119,7 +135,17 @@ pub fn answer(request: &Request) -> Result<Run, String> {
         ));
     }
     let models: Models<'_> = loaded.iter().map(|(n, m)| (*n, m)).collect();
-    let ran = run_setup(&job, 0, &models).map_err(|e| e.to_string())?;
+    let ran = run_setup_planned(&job, 0, &models, &[], &mut |stage| {
+        let done = match stage {
+            Stage::Preparing => 1,
+            Stage::Operation(i) => 2 + i as u64,
+            Stage::Verifying => ops + 2,
+            Stage::Checking => ops + 3,
+        };
+        progress(done, total);
+    })
+    .map_err(|e| e.to_string())?;
+    progress(ops + 4, total);
     let profile = match &request.post {
         Some(text) => {
             Profile::from_toml(text).map_err(|e| format!("the post {}: {e}", setup.post))?
@@ -193,6 +219,7 @@ pub fn answer(request: &Request) -> Result<Run, String> {
     let stock = stock_box
         .map(|b| corners(&frame, b))
         .unwrap_or([[0.0; 3]; 2]);
+    progress(total, total);
     Ok(Run {
         version: VERSION,
         passed: ran.passed(),
@@ -458,6 +485,7 @@ fn material(ran: &Ran) -> Option<Material> {
     Some(Material { positions, indices })
 }
 
+pub mod cache;
 mod playback;
 #[cfg(test)]
 mod tests;

@@ -100,9 +100,13 @@ useful there.
 
 ## What it does not do yet
 
-- A setup's run is not kept in the document: opening a document runs its
-  setups again.
-- The helper reports no progress while it runs, only that it is running.
+- A setup's run is not kept in the document. The helper keeps the newest 64
+  runs in the user's cache folder (`printcad-cam`; `CAM_HELPER_CACHE` names
+  another, or `off`), so a document opened again on the same machine shows
+  its runs at once; elsewhere they run again.
+- The helper reports how far a run is (`progress <done> <total>` on its
+  standard error), but printCAD does not read a helper's output until it
+  ends, so the panel shows only that it is running.
 - Picked faces and edges follow camcraft's rules: a pick is a point on the
   face, found again on the solid by that point.
 - printCAD offers a package no dialog to open a file, so a Fusion CSV or a
