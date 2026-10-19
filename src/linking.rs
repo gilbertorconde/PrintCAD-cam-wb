@@ -21,14 +21,14 @@ pub struct Opt {
 }
 
 impl Opt {
-    fn of(v: Option<f64>) -> Self {
+    pub fn of(v: Option<f64>) -> Self {
         Self {
             value: v.unwrap_or(0.0),
             given: v.is_some(),
         }
     }
 
-    fn get(self) -> Option<f64> {
+    pub fn get(self) -> Option<f64> {
         self.given.then_some(self.value)
     }
 }
@@ -174,11 +174,12 @@ fn mm(v: f64) -> String {
     format!("{v:.2} mm")
 }
 
-/// An optional number of the group: unticked, what it is without one; ticked,
-/// its field.
+/// An optional number of a group whose ids start `prefix/`: unticked, what it
+/// is without one; ticked, its field.
 #[allow(clippy::too_many_arguments)]
-fn optional(
+pub fn optional_row(
     rows: &mut Vec<Widget>,
+    prefix: &str,
     field: &str,
     label: &str,
     absent: &str,
@@ -187,7 +188,7 @@ fn optional(
     feature: &str,
 ) {
     rows.push(Widget::Toggle {
-        id: format!("linking/{field}/given"),
+        id: format!("{prefix}/{field}/given"),
         label: if opt.given {
             format!("Set the {}", label.to_lowercase())
         } else {
@@ -197,7 +198,7 @@ fn optional(
     });
     if opt.given {
         rows.push(number(
-            &format!("linking/{field}/value"),
+            &format!("{prefix}/{field}/value"),
             label,
             opt.value,
             dim,
@@ -266,8 +267,9 @@ pub fn linking_group(data: &OperationData, tool: Option<&ToolSpec>, feature: &st
             Reach::Mm(v) => format!("up to {}", mm(f64::from(v))),
             Reach::Tools(k) => of_tool(f64::from(k), &format!("up to {k} × the tool")),
         };
-        optional(
+        optional_row(
             &mut rows,
+            "linking",
             "stay_down",
             "Stay-down distance",
             &absent,
@@ -277,8 +279,9 @@ pub fn linking_group(data: &OperationData, tool: Option<&ToolSpec>, feature: &st
         );
     }
     if uses.lead_radius {
-        optional(
+        optional_row(
             &mut rows,
+            "linking",
             "lead_radius",
             "Lead radius",
             &of_tool(0.1, "a tenth of the tool"),
@@ -296,8 +299,9 @@ pub fn linking_group(data: &OperationData, tool: Option<&ToolSpec>, feature: &st
             1,
             feature,
         ));
-        optional(
+        optional_row(
             &mut rows,
+            "linking",
             "ramp_feed",
             "Ramp feed",
             &format!("60% of cutting, {:.0} mm/min", op.ramp_feed()),
@@ -309,8 +313,9 @@ pub fn linking_group(data: &OperationData, tool: Option<&ToolSpec>, feature: &st
             Some(s) => format!("the stepdown, {}", mm(s)),
             None => of_tool(1.0, "the tool's diameter"),
         };
-        optional(
+        optional_row(
             &mut rows,
+            "linking",
             "ramp_stepdown",
             "Most down per lap",
             &absent,
@@ -338,8 +343,9 @@ pub fn linking_group(data: &OperationData, tool: Option<&ToolSpec>, feature: &st
                 ),
                 (HelixSize::Flat, None) => "0.95 × the tool less its corners".into(),
             };
-            optional(
+            optional_row(
                 &mut rows,
+                "linking",
                 "helix_diameter",
                 "Helix diameter",
                 &absent,
@@ -366,8 +372,9 @@ pub fn linking_group(data: &OperationData, tool: Option<&ToolSpec>, feature: &st
             // A pocket's finishing passes are entered level, beside the wall:
             // their leads have no vertical arc.
             if uses.leads {
-                optional(
+                optional_row(
                     &mut rows,
+                    "linking",
                     "lead_vertical",
                     "Vertical lead radius",
                     &tenth,
@@ -376,8 +383,9 @@ pub fn linking_group(data: &OperationData, tool: Option<&ToolSpec>, feature: &st
                     feature,
                 );
             }
-            optional(
+            optional_row(
                 &mut rows,
+                "linking",
                 "lead_straight",
                 "Lead straight",
                 &tenth,
@@ -385,8 +393,9 @@ pub fn linking_group(data: &OperationData, tool: Option<&ToolSpec>, feature: &st
                 Dim::Length,
                 feature,
             );
-            optional(
+            optional_row(
                 &mut rows,
+                "linking",
                 "lead_arc",
                 "Lead arc radius",
                 &tenth,

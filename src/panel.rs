@@ -13,6 +13,7 @@ use printcad_bench_sdk::host;
 
 use crate::data::{OperationData, Pick, STRATEGIES, SetupData, StockKind, Zero};
 use crate::linking::{linking_event, linking_group};
+use crate::passes::{finishing_group, passes_event, strategy_rows, tabs_group};
 use crate::runs::State;
 use crate::{Cam, operation_node, operations_of, setup_node, setups};
 
@@ -1083,9 +1084,10 @@ pub fn operation_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
             SIDES.iter().position(|(x, _)| *x == side).unwrap_or(0),
         ));
     }
-    if !passes.is_empty() {
-        panel.push(group("Passes", passes));
-    }
+    passes.extend(strategy_rows(&data, id));
+    panel.push(group("Passes", passes));
+    panel.extend(tabs_group(&data, id));
+    panel.extend(finishing_group(&data, spec, id));
 
     // What it machines.
     let mut geometry = Vec::new();
@@ -1194,6 +1196,23 @@ pub fn operation_event(cam: &mut Cam, id: &str, event: PanelEvent) {
         | PanelEvent::Choice { id, .. } => id.strip_prefix("linking/"),
         _ => None,
     };
+    let passes = match &event {
+        PanelEvent::Number { id, .. }
+        | PanelEvent::Toggle { id, .. }
+        | PanelEvent::Choice { id, .. } => id.strip_prefix("passes/"),
+        _ => None,
+    };
+    if let Some(field) = passes {
+        let tool = data
+            .operation
+            .tool
+            .as_ref()
+            .and_then(|t| setup.as_ref()?.1.tools.get(t).cloned());
+        if passes_event(&mut data, field, &event, tool.as_ref()) {
+            cam.write_operation(id, &data);
+        }
+        return;
+    }
     if let Some(field) = linking {
         let tool = data
             .operation

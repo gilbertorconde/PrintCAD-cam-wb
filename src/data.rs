@@ -20,6 +20,7 @@ use printcad_bench_sdk::serde_json;
 use serde::{Deserialize, Serialize};
 
 use crate::linking::LinkingData;
+use crate::passes::PassesData;
 
 /// Where a setup's stock comes from.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -327,6 +328,11 @@ pub struct OperationData {
     /// before they could be set.
     #[serde(default)]
     pub linking: LinkingData,
+    /// The rest of its passes: its strategy's own numbers, the deepest step,
+    /// tabs and finishing passes; camcraft's defaults for a document from
+    /// before they could be set.
+    #[serde(default)]
+    pub passes: PassesData,
     #[serde(default)]
     pub faces: Vec<Pick>,
     #[serde(default)]
@@ -354,6 +360,7 @@ impl OperationData {
             margin: 0.0,
             heights: HeightsData::default(),
             linking: LinkingData::default(),
+            passes: PassesData::default(),
             faces: Vec::new(),
             edges: Vec::new(),
         };
@@ -391,6 +398,7 @@ impl OperationData {
         self.margin = op.boundary.margin;
         self.heights = HeightsData::of(&op.heights);
         self.linking = LinkingData::of(&op.linking);
+        self.passes = PassesData::of(op);
     }
 
     /// The operation as it cuts: its numbers written in.
@@ -425,6 +433,7 @@ impl OperationData {
             }
             _ => {}
         }
+        self.passes.apply(&mut op);
         op.boundary.margin = self.margin;
         op.heights = self.heights.heights();
         op

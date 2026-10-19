@@ -46,6 +46,10 @@ panels, the drawing and the helper that runs camcraft.
   stay-down distances, ramps, the entry (helix, plunge or ramp), leads on and
   off each ring, and reordering. A value left unset is the strategy's own, and
   the panel says what that comes to for the tool.
+- **Passes**, as Fusion's Passes tab: besides the stepover, depths, feeds and
+  stock to leave, each strategy's own settings (slopes, order, centre and
+  radii, spokes, pass extension, peck and dwell, flat areas), the deepest step,
+  tabs to hold a profiled part, and finishing passes along a pocket's walls.
 - **Tools.** Preferences › CAM holds the tool library, which starts as
   camcraft's twenty common router bits, each with presets for the materials
   it suits. A setup takes a copy of a tool when an operation first cuts with
