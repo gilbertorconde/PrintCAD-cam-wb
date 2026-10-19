@@ -12,7 +12,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust (toolchain and target from rust-toolchain.toml)
         run: rustup toolchain install
@@ -38,14 +38,14 @@ jobs:
     needs: [check, helpers]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust (toolchain and target from rust-toolchain.toml)
         run: rustup toolchain install
 
       - uses: Swatinem/rust-cache@v2
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: helper-*
           path: helpers
@@ -54,7 +54,7 @@ jobs:
       - name: Pack
         run: HELPERS=helpers scripts/pack.sh
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: package
           path: dist/*.pcbench

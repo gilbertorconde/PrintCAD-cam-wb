@@ -22,7 +22,7 @@ jobs:
           - { runner: windows-latest,   folder: windows-x86_64, target: x86_64-pc-windows-msvc, exe: .exe }
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust (toolchain from rust-toolchain.toml)
         shell: bash
@@ -42,7 +42,7 @@ jobs:
           mkdir -p "out/${{ matrix.folder }}"
           cp "target/${{ matrix.target }}/release/camcraft-helper${{ matrix.exe }}" "out/${{ matrix.folder }}/"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: helper-${{ matrix.folder }}
           path: out/
