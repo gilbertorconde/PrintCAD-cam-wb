@@ -1,10 +1,14 @@
 //! The CAM package's native helper: a [`Request`] on standard input, a
 //! [`Response`] on standard output (see the library for what happens between).
+//!
+//! While a setup runs it writes `progress <done> <total>` lines to standard
+//! error, for a host that reads them. A run it has answered before, asked as
+//! it was, comes from its cache ([`camcraft_helper::cache`]).
 
 use std::io::{Read, Write};
 
 use cam_protocol::{Request, Response};
-use camcraft_helper::{answer, read};
+use camcraft_helper::{answer_reporting, cache, read};
 
 fn main() -> std::process::ExitCode {
     let mut text = String::new();
@@ -24,22 +28,52 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::FAILURE;
         }
     };
+    let kept = request
+        .read
+        .is_none()
+        .then(cache::folder)
+        .flatten()
+        .map(|folder| (folder, cache::key(&text)));
+    if let Some((folder, key)) = &kept
+        && let Some(answer) = cache::get(folder, key)
+    {
+        return write(&answer);
+    }
     let response = match &request.read {
         Some(path) => match read(&request, path) {
             Ok(text) => Response::Read { text },
             Err(why) => Response::Refused { why },
         },
-        None => match answer(&request) {
-            Ok(run) => Response::Ran(Box::new(run)),
-            Err(why) => Response::Refused { why },
-        },
-    };
-    let mut out = std::io::stdout().lock();
-    match serde_json::to_writer(&mut out, &response) {
-        Ok(()) if out.flush().is_ok() => std::process::ExitCode::SUCCESS,
-        _ => {
-            eprintln!("cannot write the answer");
-            std::process::ExitCode::FAILURE
+        None => {
+            let mut errors = std::io::stderr();
+            let mut progress = |done: u64, total: u64| {
+                let _ = writeln!(errors, "progress {done} {total}");
+                let _ = errors.flush();
+            };
+            match answer_reporting(&request, &mut progress) {
+                Ok(run) => Response::Ran(Box::new(run)),
+                Err(why) => Response::Refused { why },
+            }
         }
+    };
+    let Ok(answer) = serde_json::to_vec(&response) else {
+        eprintln!("cannot write the answer");
+        return std::process::ExitCode::FAILURE;
+    };
+    // Only a run is kept: a refusal may be put right outside the request (a
+    // helper reinstalled, a file written).
+    if let (Some((folder, key)), Response::Ran(_)) = (&kept, &response) {
+        cache::put(folder, key, &answer);
+    }
+    write(&answer)
+}
+
+fn write(answer: &[u8]) -> std::process::ExitCode {
+    let mut out = std::io::stdout().lock();
+    if out.write_all(answer).is_ok() && out.flush().is_ok() {
+        std::process::ExitCode::SUCCESS
+    } else {
+        eprintln!("cannot write the answer");
+        std::process::ExitCode::FAILURE
     }
 }
