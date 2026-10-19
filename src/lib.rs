@@ -22,6 +22,7 @@ mod data;
 mod draw;
 mod linking;
 mod panel;
+mod passes;
 mod runs;
 
 use std::collections::BTreeMap;
@@ -519,6 +520,18 @@ impl Bench for Cam {
                              lead_straight, lead_arc: {value, given}, the strategy's own \
                              unless given}",
                         ),
+                        param(
+                            "passes",
+                            ParamKind::Any,
+                            false,
+                            "{max_cut_step, slope_from, slope_to, centre_x, centre_y, \
+                             inner_radius, angle_from, angle_to, min_ring_length, \
+                             pass_extension, tab_width, tab_height, tab_spacing, \
+                             finishing_passes: numbers; centre, tabs, finishing, \
+                             finishing_repeat: booleans; tab_shape: rectangular|triangular; \
+                             outer_radius, peck, dwell, finishing_stepover, finishing_feed: \
+                             {value, given}}",
+                        ),
                         param("name", ParamKind::String, false, "the operation's name"),
                     ],
                     returns: "{feature}".into(),
@@ -651,7 +664,12 @@ impl Bench for Cam {
         ];
         let data = OperationData::from(&node.data);
         if let Some(d) = &data {
-            for (pointer, name, label, dim) in d.linking.parameters() {
+            let numbers = d
+                .linking
+                .parameters()
+                .into_iter()
+                .chain(d.passes.parameters(&d.operation));
+            for (pointer, name, label, dim) in numbers {
                 out.push(Parameter {
                     key: pointer.clone(),
                     name: Some(name.into()),
@@ -756,6 +774,9 @@ impl Bench for Cam {
                 if let Some(given) = args.get("heights") {
                     data.heights =
                         over(&data.heights, given).map_err(|e| format!("heights: {e}"))?;
+                }
+                if let Some(given) = args.get("passes") {
+                    data.passes = over(&data.passes, given).map_err(|e| format!("passes: {e}"))?;
                 }
                 if let Some(given) = args.get("linking") {
                     data.linking =
