@@ -86,8 +86,43 @@ pub struct Run {
     pub operations: Vec<OperationRun>,
     /// The material left when the setup is done, coarsely, for drawing.
     pub material: Option<Material>,
+    /// The material and the tool along the run, for playing it back.
+    #[serde(default)]
+    pub playback: Option<Playback>,
     /// How long it took, in seconds.
     pub seconds: f64,
+}
+
+/// The material and the tool at moments along a setup's run, coarsely: a
+/// grid over the stock whose heights change from moment to moment.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Playback {
+    /// Each point of the grid at height zero, in the model's coordinates.
+    pub base: Vec<[f32; 3]>,
+    /// One unit up the tool's axis, in the model's coordinates.
+    pub axis: [f32; 3],
+    /// The grid's triangles.
+    pub indices: Vec<u32>,
+    /// A height is `low + step * h`, for an `h` of a moment's.
+    pub low: f32,
+    pub step: f32,
+    pub moments: Vec<Moment>,
+}
+
+/// One moment of a [`Playback`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Moment {
+    /// Which operation is cutting, from zero.
+    pub op: usize,
+    /// How many of its moves it has made, and of how many.
+    pub moves: usize,
+    pub of: usize,
+    /// Where the tool's tip is, in the model's coordinates.
+    pub tool: [f32; 3],
+    /// How many of the operation's drawn points it has gone through.
+    pub drawn: usize,
+    /// The material's height at each point of the grid.
+    pub heights: Vec<u16>,
 }
 
 /// How bad a finding is.

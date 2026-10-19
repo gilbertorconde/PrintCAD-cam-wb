@@ -23,6 +23,7 @@ mod draw;
 mod linking;
 mod panel;
 mod passes;
+mod playback;
 mod runs;
 
 use std::collections::BTreeMap;
@@ -131,6 +132,10 @@ struct Cam {
     new_strategy: usize,
     /// Whether the open setup draws its finished material.
     show_material: bool,
+    /// The open setup's run, being played back.
+    playing: Option<playback::Playing>,
+    /// The tick job keeping it playing.
+    ticking: Option<u64>,
     /// A word for the task panel about the last thing tried.
     hint: Option<String>,
 }
@@ -229,6 +234,20 @@ fn request_for(node: &Node, setup: &SetupData) -> Result<String, String> {
 }
 
 impl Cam {
+    /// Keep a tick job going while a run plays back.
+    fn keep_playing(&mut self) {
+        let running = self.playing.as_ref().is_some_and(|p| p.running.is_some());
+        if running && self.ticking.is_none() {
+            match host::start_job(playback::TICK, &playback::TICK_MS.to_string()) {
+                Ok(job) => self.ticking = Some(job),
+                Err(e) => {
+                    host::warn(&format!("Playback stopped: {e}"));
+                    self.playing = None;
+                }
+            }
+        }
+    }
+
     /// Run setup `id` unless what it is run from is unchanged; `again` runs a
     /// stopped or failed one again too.
     fn refresh(&mut self, id: &str, again: bool) {
@@ -878,6 +897,21 @@ impl Bench for Cam {
                 }
                 true
             }
+            Event::JobFinished { job, .. } if self.ticking == Some(*job) => {
+                self.ticking = None;
+                if let Some(p) = &mut self.playing {
+                    match self
+                        .runs
+                        .get(&p.setup)
+                        .and_then(|c| c.shown()?.playback.as_ref())
+                    {
+                        Some(play) => p.tick(play),
+                        None => self.playing = None,
+                    }
+                }
+                self.keep_playing();
+                true
+            }
             Event::JobFinished { job, result } => {
                 if let Some(setup) = self.runs.finished(*job, result) {
                     match self.runs.get(&setup).map(|c| &c.state) {
@@ -904,6 +938,15 @@ impl Bench for Cam {
             && host::feature(&e.id).is_none()
         {
             self.editing = None;
+        }
+        // Playback is the open setup's.
+        let open = self
+            .editing
+            .as_ref()
+            .filter(|e| e.kind == Kind::Setup)
+            .map(|e| e.id.clone());
+        if self.playing.as_ref().map(|p| &p.setup) != open.as_ref() {
+            self.playing = None;
         }
         let mut frame = Frame::default();
         draw::draw(self, &mut frame);
@@ -1057,6 +1100,9 @@ impl Bench for Cam {
     }
 
     fn job(entry: &str, input: &str) -> Result<String, String> {
+        if entry == playback::TICK {
+            return Ok(playback::wait(input));
+        }
         if entry != JOB {
             return Err(format!("no job `{entry}`"));
         }

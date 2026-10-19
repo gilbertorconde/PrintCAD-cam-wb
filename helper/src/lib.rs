@@ -100,6 +100,7 @@ pub fn answer(request: &Request) -> Result<Run, String> {
     // Laid out again only for a height measured from the picks.
     let mut prepared: Option<Option<Prepared>> = None;
     let mut operations = Vec::new();
+    let mut draws = Vec::new();
     for (k, op) in ran.result.operations.iter().enumerate() {
         let heights = match (setup.operations.get(k), stock_box) {
             (Some(spec), Some(stock)) => {
@@ -122,8 +123,7 @@ pub fn answer(request: &Request) -> Result<Run, String> {
             Made::Skipped => "skipped",
             Made::Disabled => "disabled",
         };
-        let (strokes, points, cut_mm, rapid_mm) =
-            strokes(&op.path, &frame, tolerance, request.max_points);
+        let mut drawn = strokes(&op.path, &frame, tolerance, request.max_points);
         let program = if op.made.has_paths() {
             let name = camcraft_session::program_name(&setup.name, k, &op.name);
             let (text, report) =
@@ -146,13 +146,14 @@ pub fn answer(request: &Request) -> Result<Run, String> {
                 op.passes, op.links.stayed_down, op.sim.removed_mm3
             ),
             warnings: op.warnings.clone(),
-            strokes,
-            points,
-            cut_mm,
-            rapid_mm,
+            strokes: std::mem::take(&mut drawn.strokes),
+            points: drawn.points,
+            cut_mm: drawn.cut,
+            rapid_mm: drawn.rapid,
             program,
             heights,
         });
+        draws.push(drawn);
     }
 
     let stock = stock_box
@@ -172,6 +173,7 @@ pub fn answer(request: &Request) -> Result<Run, String> {
         origin: to_array(frame.to_model(DVec3::ZERO)),
         operations,
         material: material(&ran),
+        playback: playback::playback(&job, &ran, &draws),
         seconds: started.elapsed().as_secs_f64(),
     })
 }
@@ -274,25 +276,58 @@ fn to_f32(p: DVec3) -> [f32; 3] {
     [p.x as f32, p.y as f32, p.z as f32]
 }
 
+/// An operation's toolpath as drawn, and what playing it back needs to know
+/// of it.
+pub(crate) struct Drawn {
+    /// Its strokes in the model's coordinates, thinned to the budget.
+    pub strokes: Vec<Stroke>,
+    /// How many points the whole toolpath has, before thinning.
+    pub points: usize,
+    /// How far it cuts, and how far it moves at rapid, in millimetres.
+    pub cut: f64,
+    pub rapid: f64,
+    /// Where each move ends, in the setup's frame.
+    pub ends: Vec<DVec3>,
+    /// How many points, before thinning, the strokes have after each move.
+    pub after_move: Vec<usize>,
+    /// Which points, before thinning, were kept, in order; `None` for all.
+    pub kept: Option<Vec<usize>>,
+}
+
+impl Drawn {
+    /// How many of the drawn points come before the tool, after `moves` moves.
+    pub fn drawn_after(&self, moves: usize) -> usize {
+        let raw = match moves {
+            0 => 0,
+            m => self.after_move.get(m - 1).copied().unwrap_or(self.points),
+        };
+        match &self.kept {
+            Some(kept) => kept.partition_point(|&i| i < raw),
+            None => raw,
+        }
+    }
+}
+
 /// `path` as strokes in the model's coordinates, thinned to `budget` points,
 /// with how many points it has, how far it cuts and how far it rapids.
-fn strokes(
-    path: &Toolpath,
-    frame: &Frame,
-    tolerance: f64,
-    budget: usize,
-) -> (Vec<Stroke>, usize, f64, f64) {
+fn strokes(path: &Toolpath, frame: &Frame, tolerance: f64, budget: usize) -> Drawn {
     let mut out: Vec<Stroke> = Vec::new();
     let (mut cut, mut rapid) = (0.0, 0.0);
     let mut at: Option<DVec3> = None;
+    let mut ends = Vec::new();
+    let mut after_move = Vec::new();
+    let mut raw = 0;
     for m in path.moves() {
         let fast = m.role == MoveRole::Rapid;
+        ends.push(m.to);
         let Some(from) = at else {
             at = Some(m.to);
             out.push(Stroke {
                 rapid: fast,
                 points: vec![to_f32(frame.to_model(m.to))],
             });
+            raw += 1;
+            after_move.push(raw);
             continue;
         };
         let length = m.length(from);
@@ -306,35 +341,51 @@ fn strokes(
                 rapid: fast,
                 points: vec![to_f32(frame.to_model(from))],
             });
+            raw += 1;
         }
         if let Some(stroke) = out.last_mut() {
-            stroke.points.extend(
-                m.chords(from, tolerance)
-                    .into_iter()
-                    .map(|p| to_f32(frame.to_model(p))),
-            );
+            let chords = m.chords(from, tolerance);
+            raw += chords.len();
+            stroke
+                .points
+                .extend(chords.into_iter().map(|p| to_f32(frame.to_model(p))));
         }
+        after_move.push(raw);
         at = Some(m.to);
     }
     let points: usize = out.iter().map(|s| s.points.len()).sum();
+    let mut drawn = Drawn {
+        strokes: Vec::new(),
+        points,
+        cut,
+        rapid,
+        ends,
+        after_move,
+        kept: None,
+    };
     if budget == 0 {
-        return (Vec::new(), points, cut, rapid);
+        return drawn;
     }
     if points > budget {
         let every = points.div_ceil(budget);
+        let mut kept_all = Vec::with_capacity(budget + out.len());
+        let mut offset = 0;
         for stroke in &mut out {
             let last = stroke.points.len().saturating_sub(1);
-            let kept = stroke
-                .points
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| i % every == 0 || *i == last)
-                .map(|(_, p)| *p)
-                .collect();
+            let mut kept = Vec::new();
+            for (i, p) in stroke.points.iter().enumerate() {
+                if i % every == 0 || i == last {
+                    kept.push(*p);
+                    kept_all.push(offset + i);
+                }
+            }
+            offset += stroke.points.len();
             stroke.points = kept;
         }
+        drawn.kept = Some(kept_all);
     }
-    (out, points, cut, rapid)
+    drawn.strokes = out;
+    drawn
 }
 
 /// The finished material's top over the stock, as triangles in the model's
@@ -373,5 +424,6 @@ fn material(ran: &Ran) -> Option<Material> {
     Some(Material { positions, indices })
 }
 
+mod playback;
 #[cfg(test)]
 mod tests;
