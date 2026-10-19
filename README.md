@@ -42,6 +42,10 @@ panels, the drawing and the helper that runs camcraft.
   and bottom it cuts between, each measured from the stock, the part, the work
   zero or the picked faces and edges. The view shows them as planes across the
   stock while the operation is edited.
+- **Linking**, as Fusion's Linking tab: retract feed, retraction, safe and
+  stay-down distances, ramps, the entry (helix, plunge or ramp), leads on and
+  off each ring, and reordering. A value left unset is the strategy's own, and
+  the panel says what that comes to for the tool.
 - **Tools.** Preferences › CAM holds the tool library, which starts as
   camcraft's twenty common router bits, each with presets for the materials
   it suits. A setup takes a copy of a tool when an operation first cuts with
@@ -88,8 +92,6 @@ useful there.
 - The helper reports no progress while it runs, only that it is running.
 - Picked faces and edges follow camcraft's rules: a pick is a point on the
   face, found again on the solid by that point.
-- Linking and leads keep camcraft's defaults; the panel does not show them
-  yet.
 
 ## Install it
 

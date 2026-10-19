@@ -187,3 +187,32 @@ fn the_heights_hold_and_come_back_as_planes() {
         top - 2.0
     );
 }
+
+/// A profile's leads, which the package turns off as `linking = { leads =
+/// false }`, change its program.
+#[test]
+fn a_profile_posts_its_leads() {
+    let program = |linking: &str| {
+        let job = JOB.replace(
+            "strategy = \"pocket-clearing\"\ntool = \"flat-6\"\npasses = { stepdown = 3.0, stepover = 3.0 }",
+            &format!("strategy = \"profile\"\ntool = \"flat-6\"\npasses = {{ stepdown = 6.0 }}\n{linking}"),
+        );
+        let request = Request {
+            version: VERSION,
+            job,
+            shapes: BTreeMap::from([(
+                "part".to_string(),
+                Shape {
+                    text: native("hinge_jig.step"),
+                    placement: IDENTITY,
+                },
+            )]),
+            max_points: 0,
+        };
+        let run = answer(&request).unwrap();
+        let op = &run.operations[0];
+        assert_eq!(op.made, "generated", "{:?}", op.warnings);
+        op.program.as_ref().unwrap().text.clone()
+    };
+    assert_ne!(program(""), program("linking = { leads = false }"));
+}
