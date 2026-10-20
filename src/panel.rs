@@ -14,6 +14,7 @@ use printcad_bench_sdk::host;
 use crate::data::{OperationData, Pick, STRATEGIES, SetupData, StockKind, Zero};
 use crate::linking::{linking_event, linking_group};
 use crate::passes::{finishing_group, passes_event, strategy_rows, tabs_group};
+use crate::picking::Slot;
 use crate::runs::State;
 use crate::tools::{files_groups, open_post, open_tools, tool_editor, tool_event};
 use crate::{Cam, operation_node, operations_of, setup_node, setups};
@@ -416,6 +417,28 @@ pub fn setup_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
                 Zero::ALL.iter().map(|z| z.label().to_string()).collect(),
                 Zero::ALL.iter().position(|&z| z == setup.zero).unwrap_or(0),
             ),
+            Widget::Pick {
+                id: "zero_pick".into(),
+                label: "On the part".into(),
+                value: Some(match &setup.zero_point {
+                    Some(z) if setup.zero == Zero::Picked => format!(
+                        "{} at {:.2}, {:.2}, {:.2}",
+                        if z.snap == camcraft_core::job::Snap::Vertex {
+                            "Corner"
+                        } else {
+                            "Centre"
+                        },
+                        z.at[0],
+                        z.at[1],
+                        z.at[2]
+                    ),
+                    _ => "Nothing picked".into(),
+                }),
+                armed: cam
+                    .armed
+                    .as_ref()
+                    .is_some_and(|a| a.feature == id && a.slot == Slot::Zero),
+            },
             number("offset_x", "Offset X", setup.offset_x, Dim::Length, 2, id),
             number("offset_y", "Offset Y", setup.offset_y, Dim::Length, 2, id),
             number("offset_z", "Offset Z", setup.offset_z, Dim::Length, 2, id),
@@ -553,7 +576,13 @@ pub fn setup_event(cam: &mut Cam, id: &str, event: PanelEvent) {
                         setup.x_axis = x;
                     }
                 }
-                "zero" => setup.zero = Zero::ALL.get(index).copied().unwrap_or_default(),
+                "zero" => {
+                    setup.zero = Zero::ALL.get(index).copied().unwrap_or_default();
+                    // A zero to pick: pick it now.
+                    if setup.zero == Zero::Picked && setup.zero_point.is_none() {
+                        cam.arm(id, Some(Slot::Zero));
+                    }
+                }
                 "post" => {
                     let mut posts = posts(cam);
                     if !posts.contains(&setup.post) {
@@ -582,6 +611,7 @@ pub fn setup_event(cam: &mut Cam, id: &str, event: PanelEvent) {
                 cam.open(&op, false);
             }
         }
+        PanelEvent::Pick { id: pick } if pick == "zero_pick" => cam.arm(id, Some(Slot::Zero)),
         PanelEvent::Pick { id: pick } if pick == "body" => {
             match cam
                 .pointer
@@ -1182,21 +1212,26 @@ pub fn operation_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
         || (uses.boundary && data.operation.boundary.kind == Boundary::Selection)
         || (uses.outline && data.operation.outline == Outline::Selection);
     if picks {
+        let armed = |slot| {
+            cam.armed
+                .as_ref()
+                .is_some_and(|a| a.feature == id && a.slot == slot)
+        };
         geometry.push(Widget::Pick {
             id: "faces".into(),
-            label: "Add the selected faces".into(),
-            value: Some(format!("{} face(s)", data.faces.len())),
-            armed: false,
+            label: "Faces".into(),
+            value: Some(format!("{} picked", data.faces.len())),
+            armed: armed(Slot::Faces),
         });
         geometry.push(Widget::Pick {
             id: "edges".into(),
             label: if uses.holes {
-                "Add the selected hole rims".into()
+                "Hole rims".into()
             } else {
-                "Add the selected edges".into()
+                "Edge loops".into()
             },
-            value: Some(format!("{} edge(s)", data.edges.len())),
-            armed: false,
+            value: Some(format!("{} picked", data.edges.len())),
+            armed: armed(Slot::Edges),
         });
         geometry.push(button(
             "clear_picks",
@@ -1424,6 +1459,14 @@ pub fn operation_event(cam: &mut Cam, id: &str, event: PanelEvent) {
             }
             _ => return,
         },
+        PanelEvent::Pick { id: pick }
+            if (pick == "faces" && cam.pointer.faces.is_empty() && cam.pointer.face.is_none())
+                || (pick == "edges" && cam.pointer.edges.is_empty()) =>
+        {
+            // Nothing selected: pick in the view, camcraft's way.
+            cam.arm(id, Slot::named(&pick));
+            return;
+        }
         PanelEvent::Pick { id: pick } if pick == "faces" => {
             let body = cam
                 .pointer
@@ -1441,6 +1484,8 @@ pub fn operation_event(cam: &mut Cam, id: &str, event: PanelEvent) {
                         data.faces.push(Pick {
                             body: body.clone(),
                             at: f.point.map(f64::from),
+                            name: f.name,
+                            faces: None,
                         });
                     }
                 }
@@ -1459,6 +1504,8 @@ pub fn operation_event(cam: &mut Cam, id: &str, event: PanelEvent) {
                 data.edges.push(Pick {
                     body: e.body.clone(),
                     at: e.point.map(f64::from),
+                    name: None,
+                    faces: e.faces,
                 });
             }
         }
