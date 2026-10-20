@@ -73,6 +73,9 @@ panels, the drawing and the helper that runs camcraft.
   plays and pauses; J, K and L shuttle back, pause and forward (again for
   faster); Left and Right step (Shift: ten); Up and Down go to the operation
   before and after; Home and End; Minus and Equals change the speed.
+  Once playing, the material is swept again at full resolution by the helper
+  kept running for it (up to 600 points a side), and steps go a move at a
+  time; until then, and where it cannot, the run's coarse moments play.
 - **Drawn over the model.** The stock's box, the work zero, each operation's
   toolpath (rapids dashed while it is edited), and the material left.
 - **G-code through the save dialog,** one program per operation, or every

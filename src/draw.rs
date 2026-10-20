@@ -4,7 +4,7 @@
 use cam_protocol::{HeightPlane, Run};
 use printcad_bench_sdk::api::*;
 
-use crate::playback::{material_at, tool_at};
+use crate::playback::{material_at, tool_at, tool_tip};
 use crate::runs::State;
 use crate::{Cam, Kind, operations_of, setups};
 
@@ -63,7 +63,28 @@ pub fn draw(cam: &Cam, frame: &mut Frame) {
                 let play = run.playback.as_ref()?;
                 Some((play, p.moment(play)?))
             });
-        if let Some((play, m)) = moment {
+        // At full resolution once the playback session answers.
+        let exact = moment.and(
+            cam.session
+                .as_ref()
+                .filter(|s| s.setup == node.id)
+                .and_then(|s| Some((s.mesh()?, s.at.as_ref()?))),
+        );
+        // How far the tool has gone: which operation, and how many of its
+        // drawn points.
+        let gone = match (exact, moment) {
+            (Some((_, at)), _) => Some((at.op, at.drawn)),
+            (None, Some((_, m))) => Some((m.op, m.drawn)),
+            _ => None,
+        };
+        if let Some((mesh, _)) = exact {
+            frame.kept.push(KeptMesh {
+                handle: mesh,
+                color: crate::session::TINT,
+                opacity: 0.92,
+                ..Default::default()
+            });
+        } else if let Some((play, m)) = moment {
             frame.meshes.push(material_at(play, m));
         } else if edited_setup
             && cam.show_material
@@ -97,9 +118,9 @@ pub fn draw(cam: &Cam, frame: &mut Frame) {
             }
             let color = if this || edited_setup { ACCENT } else { MUTED };
             // Played back, as far as the tool has gone.
-            let mut left = match moment {
-                Some((_, m)) if i > m.op => continue,
-                Some((_, m)) if i == m.op => m.drawn,
+            let mut left = match gone {
+                Some((op, _)) if i > op => continue,
+                Some((op, drawn)) if i == op => drawn,
                 _ => usize::MAX,
             };
             for stroke in &op.strokes {
@@ -126,8 +147,10 @@ pub fn draw(cam: &Cam, frame: &mut Frame) {
                 ));
             }
         }
-        if let Some((play, m)) = moment {
-            tool_at(frame, play, m, STOCK);
+        match (exact, moment) {
+            (Some((_, at)), Some((play, _))) => tool_tip(frame, play, at.tool, STOCK),
+            (None, Some((play, m))) => tool_at(frame, play, m, STOCK),
+            _ => {}
         }
     }
 }
