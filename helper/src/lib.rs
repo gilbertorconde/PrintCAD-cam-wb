@@ -15,13 +15,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use cam_protocol::{
-    Finding, HeightPlane, IDENTITY, Level, Material, OperationRun, Program, Request, Run, Stroke,
-    VERSION,
+    Finding, HeightPlane, IDENTITY, Level, Mark, Material, OperationRun, Program, Request, Run,
+    Stroke, VERSION,
 };
 use camcraft_core::job::{HeightContext, Operation, Outline};
 use camcraft_core::path::toolpath::{MoveRole, Toolpath};
 use camcraft_core::run::Made;
-use camcraft_core::run::Stage;
+use camcraft_core::run::{PLUNGE_RATIO, Stage};
 use camcraft_core::setup::frame::Frame;
 use camcraft_core::setup::{Bodies, Prepared, features, prepare};
 use camcraft_geom::mesh::Aabb;
@@ -161,6 +161,8 @@ pub fn answer_reporting(
     let mut prepared: Option<Option<Prepared>> = None;
     let mut operations = Vec::new();
     let mut draws = Vec::new();
+    // Machining seconds before the operation under way.
+    let mut elapsed = 0.0;
     for (k, op) in ran.result.operations.iter().enumerate() {
         let heights = match (setup.operations.get(k), stock_box) {
             (Some(spec), Some(stock)) => {
@@ -212,7 +214,10 @@ pub fn answer_reporting(
             rapid_mm: drawn.rapid,
             program,
             heights,
+            seconds: drawn.times.last().copied().unwrap_or(0.0),
+            marks: marks(&ran, k, op, &drawn, elapsed),
         });
+        elapsed += drawn.times.last().copied().unwrap_or(0.0);
         draws.push(drawn);
     }
 
@@ -239,6 +244,56 @@ pub fn answer_reporting(
     })
 }
 
+/// Where operation `k`'s checks found something at a move, and its steep
+/// descents deeper than it may plunge, as camcraft's app marks its timeline:
+/// in order, a failure kept over a warning at the same place. `start` is
+/// when the operation starts, in the setup's machining seconds.
+fn marks(
+    ran: &Ran,
+    k: usize,
+    op: &camcraft_core::run::OperationResult,
+    drawn: &Drawn,
+    start: f64,
+) -> Vec<Mark> {
+    let at = |moves: usize, fail: bool| Mark {
+        moves,
+        seconds: start
+            + moves
+                .checked_sub(1)
+                .and_then(|i| drawn.times.get(i))
+                .copied()
+                .unwrap_or(0.0),
+        fail,
+    };
+    let mut out: Vec<Mark> = ran
+        .checks
+        .groups
+        .iter()
+        .filter(|g| g.op == Some(k))
+        .flat_map(|g| g.findings.iter())
+        .filter_map(|f| {
+            let fail = match f.level {
+                CheckLevel::Fail => true,
+                CheckLevel::Warn => false,
+                CheckLevel::Note | CheckLevel::Pass => return None,
+            };
+            Some(at(f.at_move?, fail))
+        })
+        .collect();
+    let moves = op.path.moves();
+    let first = moves.first().map_or(DVec3::ZERO, |m| m.to);
+    out.extend(
+        op.path
+            .steep_descents(first, PLUNGE_RATIO)
+            .into_iter()
+            .filter(|d| d.depth > op.max_cut_step)
+            .map(|d| at(d.last, false)),
+    );
+    out.sort_by_key(|m| (m.moves, !m.fail));
+    out.dedup_by_key(|m| m.moves);
+    out
+}
+
 /// The checks' findings, failures first, then warnings, notes and passes.
 fn findings(ran: &Ran) -> Vec<Finding> {
     let mut out: Vec<Finding> = ran
@@ -256,6 +311,7 @@ fn findings(ran: &Ran) -> Vec<Finding> {
                 code: f.code.to_string(),
                 text: f.line(group),
                 operation: group.op,
+                at_move: f.at_move,
             })
         })
         .collect();
@@ -349,6 +405,8 @@ pub(crate) struct Drawn {
     pub rapid: f64,
     /// Where each move ends, in the setup's frame.
     pub ends: Vec<DVec3>,
+    /// The machining seconds after each move, from the operation's start.
+    pub times: Vec<f64>,
     /// How many points, before thinning, the strokes have after each move.
     pub after_move: Vec<usize>,
     /// Which points, before thinning, were kept, in order; `None` for all.
@@ -369,6 +427,17 @@ impl Drawn {
     }
 }
 
+/// The rapid rate a program is timed at until a machine profile gives one,
+/// as camcraft's app times it, in mm/min.
+const ASSUMED_RAPID: f64 = 5000.0;
+
+/// How long a move `length` long takes, in seconds: at its feed, or the
+/// assumed rapid rate.
+fn duration(length: f64, feed: Option<f64>) -> f64 {
+    let rate = feed.filter(|f| *f > 0.0).unwrap_or(ASSUMED_RAPID);
+    length / rate * 60.0
+}
+
 /// `path` as strokes in the model's coordinates, thinned to `budget` points,
 /// with how many points it has, how far it cuts and how far it rapids.
 fn strokes(path: &Toolpath, frame: &Frame, tolerance: f64, budget: usize) -> Drawn {
@@ -377,11 +446,14 @@ fn strokes(path: &Toolpath, frame: &Frame, tolerance: f64, budget: usize) -> Dra
     let mut at: Option<DVec3> = None;
     let mut ends = Vec::new();
     let mut after_move = Vec::new();
+    let mut times = Vec::new();
+    let mut clock = 0.0;
     let mut raw = 0;
     for m in path.moves() {
         let fast = m.role == MoveRole::Rapid;
         ends.push(m.to);
         let Some(from) = at else {
+            times.push(clock);
             at = Some(m.to);
             out.push(Stroke {
                 rapid: fast,
@@ -392,6 +464,8 @@ fn strokes(path: &Toolpath, frame: &Frame, tolerance: f64, budget: usize) -> Dra
             continue;
         };
         let length = m.length(from);
+        clock += duration(length, m.feed);
+        times.push(clock);
         if fast {
             rapid += length;
         } else {
@@ -421,6 +495,7 @@ fn strokes(path: &Toolpath, frame: &Frame, tolerance: f64, budget: usize) -> Dra
         cut,
         rapid,
         ends,
+        times,
         after_move,
         kept: None,
     };

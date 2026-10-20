@@ -93,6 +93,7 @@ pub(crate) fn playback(job: &Job, ran: &Ran, draws: &[Drawn]) -> Option<Playback
     // among them so every operation ends on one.
     let mut moments = Vec::new();
     let mut done = 0;
+    let mut elapsed = 0.0;
     for (k, drawn) in draws.iter().enumerate() {
         let n = drawn.ends.len();
         let ran_op = r.operations.get(k)?;
@@ -147,10 +148,16 @@ pub(crate) fn playback(job: &Job, ran: &Ran, draws: &[Drawn]) -> Option<Playback
                 of: n,
                 tool,
                 drawn: drawn.drawn_after(i),
+                seconds: elapsed
+                    + i.checked_sub(1)
+                        .and_then(|j| drawn.times.get(j))
+                        .copied()
+                        .unwrap_or(0.0),
                 heights,
             });
         }
         done += n;
+        elapsed += drawn.times.last().copied().unwrap_or(0.0);
     }
     Some(Playback {
         base,
