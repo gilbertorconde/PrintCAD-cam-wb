@@ -30,7 +30,7 @@ pub(crate) fn number(
     decimals: usize,
     feature: &str,
 ) -> Widget {
-    Widget::Number {
+    crate::hints::with_hint(Widget::Number {
         id: id.into(),
         label: label.into(),
         value,
@@ -44,7 +44,7 @@ pub(crate) fn number(
         max: None,
         decimals,
         error: None,
-    }
+    })
 }
 
 pub(crate) fn choice(id: &str, label: &str, options: Vec<String>, selected: usize) -> Widget {
