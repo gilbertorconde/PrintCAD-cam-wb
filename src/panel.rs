@@ -14,7 +14,6 @@ use printcad_bench_sdk::host;
 use crate::data::{OperationData, Pick, STRATEGIES, SetupData, StockKind, Zero};
 use crate::linking::{linking_event, linking_group};
 use crate::passes::{finishing_group, passes_event, strategy_rows, tabs_group};
-use crate::playback::{playback_event, playback_group};
 use crate::runs::State;
 use crate::tools::{files_groups, open_post, open_tools, tool_editor, tool_event};
 use crate::{Cam, operation_node, operations_of, setup_node, setups};
@@ -509,22 +508,11 @@ pub fn setup_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
         label: "Show the material left".into(),
         on: cam.show_material,
     });
-    let playing = cam.playing.as_ref().filter(|p| p.setup == id);
-    if let Some(run) = cam.runs.get(id).and_then(|c| c.shown())
-        && let Some(group) = playback_group(run, playing)
-    {
-        panel.push(group);
-    }
     panel.extend(run_widgets(cam, id, None));
     panel
 }
 
 pub fn setup_event(cam: &mut Cam, id: &str, event: PanelEvent) {
-    let run = cam.runs.get(id).and_then(|c| c.shown());
-    if playback_event(&mut cam.playing, id, run, &event) {
-        cam.keep_playing();
-        return;
-    }
     let Some((_, mut setup)) = setup_node(id) else {
         return;
     };

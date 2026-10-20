@@ -58,7 +58,7 @@ pub fn draw(cam: &Cam, frame: &mut Frame) {
         let moment = cam
             .playing
             .as_ref()
-            .filter(|p| edited_setup && p.setup == node.id)
+            .filter(|p| mine && p.setup == node.id)
             .and_then(|p| {
                 let play = run.playback.as_ref()?;
                 Some((play, p.moment(play)?))

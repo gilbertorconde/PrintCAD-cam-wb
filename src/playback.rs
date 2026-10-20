@@ -1,152 +1,505 @@
-//! Playing a setup's run back while its panel is open: the material as it
-//! stood, the tool where it was, and the toolpath as far as it had gone, at
-//! moments the helper sent along the run.
+//! Playing a setup's run back while it or one of its operations is open, as
+//! camcraft's app does: a transport under the view (a timeline with a span
+//! per operation and its problems marked, buttons to go to the start, the
+//! operation before, a step back, play backwards, play, a step on, the next
+//! operation and the end, the speed, where playing stops by itself, and the
+//! machining clock), and keys for the same. The view draws the material as it
+//! stood, the tool where it was, and each toolpath as far as it had gone.
 //!
-//! A bench is drawn again only after something reached it, so playing keeps a
-//! short job going, [`TICK`], whose end moves it on and starts the next.
+//! The playhead is a time: machining seconds from the setup's start, which
+//! the helper works out for every move. The material is what the helper sent
+//! for the last moment at or before it.
 
 use std::time::Instant;
 
 use cam_protocol::{Moment, Playback, Run};
 use printcad_bench_sdk::api::*;
 
-use crate::panel::{button, group};
+use crate::panel::{button, choice};
 
-/// How many moments a second it plays.
-const MOMENTS_PER_SECOND: f64 = 8.0;
+/// How fast it plays, as many machining seconds a second: camcraft's app's.
+pub const SPEEDS: [f64; 15] = [
+    0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0,
+    10000.0,
+];
 
-/// The job that waits a moment while it plays: its input is how long, in
-/// milliseconds.
-pub const TICK: &str = "tick";
+/// The speed playing starts at.
+const FIRST_SPEED: f64 = 10.0;
 
-/// How long a [`TICK`] waits.
-pub const TICK_MS: u64 = 125;
+/// The longest step one frame may take, so a stall plays on rather than
+/// jumping.
+const LONGEST_FRAME: f64 = 1.0 / 15.0;
 
-/// What a [`TICK`] job does: wait.
-pub fn wait(input: &str) -> String {
-    let ms = input.trim().parse().unwrap_or(TICK_MS).min(1000);
-    std::thread::sleep(std::time::Duration::from_millis(ms));
-    String::new()
+/// How many moments Shift+Left and Shift+Right step.
+const BIG_STEP: usize = 10;
+
+/// The timeline's drawing size, in its own units.
+const WIDTH: f32 = 1000.0;
+const HEIGHT: f32 = 44.0;
+
+/// `speed` as a label: `¼×`, `½×`, `10×`.
+pub fn speed_label(speed: f64) -> String {
+    match speed {
+        0.25 => "¼×".into(),
+        0.5 => "½×".into(),
+        s => format!("{s}×"),
+    }
 }
 
-/// A setup being played back.
+/// The next speed up or down from `speed`, kept to [`SPEEDS`].
+pub fn faster(speed: f64, up: bool) -> f64 {
+    let i = SPEEDS
+        .iter()
+        .position(|s| *s >= speed)
+        .unwrap_or(SPEEDS.len() - 1);
+    let j = if up {
+        (i + 1).min(SPEEDS.len() - 1)
+    } else {
+        i.saturating_sub(1)
+    };
+    SPEEDS.get(j).copied().unwrap_or(speed)
+}
+
+/// Seconds as `m:ss`, or `h:mm:ss` past an hour.
+pub fn clock(seconds: f64) -> String {
+    let s = seconds.max(0.0).round() as u64;
+    let (h, m, s) = (s / 3600, s / 60 % 60, s % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
+}
+
+/// How the transport plays, kept while the package runs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Transport {
+    pub speed: f64,
+    /// Stop by itself at a failed check or a warning.
+    pub stop_at_problems: bool,
+    /// Stop by itself at the end of each operation.
+    pub stop_at_ops: bool,
+}
+
+impl Default for Transport {
+    fn default() -> Self {
+        Self {
+            speed: FIRST_SPEED,
+            stop_at_problems: true,
+            stop_at_ops: false,
+        }
+    }
+}
+
+/// A setup being played back: where, and whether it plays.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Playing {
     /// The setup, by id.
     pub setup: String,
-    /// Which moment, by its place.
-    pub at: usize,
-    /// While it plays: when it was last moved on, and how far between moments
-    /// it had got.
-    pub running: Option<(Instant, f64)>,
+    /// The playhead, in machining seconds from the setup's start.
+    pub at: f64,
+    /// While it plays: when it last moved on, and whether backwards.
+    pub running: Option<(Instant, bool)>,
+}
+
+/// What a run's timeline holds: when each operation starts, how long the
+/// whole is, and where its problems are.
+struct Timeline {
+    starts: Vec<f64>,
+    total: f64,
+    marks: Vec<(f64, bool)>,
+}
+
+impl Timeline {
+    fn of(run: &Run) -> Self {
+        let mut starts = Vec::new();
+        let mut total = 0.0;
+        for op in &run.operations {
+            starts.push(total);
+            total += op.seconds;
+        }
+        let marks = run
+            .operations
+            .iter()
+            .flat_map(|o| o.marks.iter().map(|m| (m.seconds, m.fail)))
+            .collect();
+        Self {
+            starts,
+            total,
+            marks,
+        }
+    }
+
+    /// The places playing stops by itself.
+    fn stops(&self, t: &Transport) -> Vec<f64> {
+        let mut out = Vec::new();
+        if t.stop_at_problems {
+            out.extend(self.marks.iter().map(|(s, _)| *s));
+        }
+        if t.stop_at_ops {
+            out.extend(self.starts.iter().skip(1));
+        }
+        out.sort_by(f64::total_cmp);
+        out
+    }
+
+    /// The operation under way at `at`.
+    fn op_at(&self, at: f64) -> usize {
+        self.starts
+            .iter()
+            .rposition(|s| *s <= at + 1e-9)
+            .unwrap_or(0)
+    }
+}
+
+/// The place in `moments` showing time `at`: the last at or before it.
+fn moment_index(play: &Playback, at: f64) -> usize {
+    play.moments
+        .iter()
+        .rposition(|m| m.seconds <= at + 1e-9)
+        .unwrap_or(0)
 }
 
 impl Playing {
-    /// Move on with the time passed. Stops at the last moment.
-    pub fn tick(&mut self, play: &Playback) {
-        let Some((then, part)) = self.running else {
-            return;
-        };
-        let now = Instant::now();
-        let part = part + now.duration_since(then).as_secs_f64() * MOMENTS_PER_SECOND;
-        let whole = part.floor();
-        let last = play.moments.len().saturating_sub(1);
-        self.at = (self.at + whole as usize).min(last);
-        self.running = (self.at < last).then_some((now, part - whole));
+    /// Played back from the end, where the run finished.
+    pub fn at_end(setup: &str, run: &Run) -> Self {
+        Self {
+            setup: setup.into(),
+            at: Timeline::of(run).total,
+            running: None,
+        }
     }
 
     pub fn moment<'a>(&self, play: &'a Playback) -> Option<&'a Moment> {
-        play.moments.get(self.at)
+        play.moments.get(moment_index(play, self.at))
+    }
+
+    /// Move on with the time passed, at `transport`'s speed, stopping where
+    /// it stops by itself and at either end.
+    pub fn tick(&mut self, run: &Run, transport: &Transport) {
+        let Some((then, back)) = self.running else {
+            return;
+        };
+        let now = Instant::now();
+        let real = now.duration_since(then).as_secs_f64().min(LONGEST_FRAME);
+        let line = Timeline::of(run);
+        let step = real * transport.speed * if back { -1.0 } else { 1.0 };
+        let to = (self.at + step).clamp(0.0, line.total);
+        let stops = line.stops(transport);
+        // The first stop passed, going either way; one the playhead stands
+        // on is not passed.
+        let stop = if back {
+            stops.iter().rev().find(|&&s| s < self.at && s >= to)
+        } else {
+            stops.iter().find(|&&s| s > self.at && s <= to)
+        };
+        match stop {
+            Some(&s) => {
+                self.at = s;
+                self.running = None;
+            }
+            None => {
+                self.at = to;
+                let ended = if back { to <= 0.0 } else { to >= line.total };
+                self.running = (!ended).then_some((now, back));
+            }
+        }
+    }
+
+    /// Play forward, or backwards; from the start again at the end, and from
+    /// the end at the start.
+    fn play(&mut self, total: f64, back: bool) {
+        if !back && self.at >= total {
+            self.at = 0.0;
+        }
+        if back && self.at <= 0.0 {
+            self.at = total;
+        }
+        self.running = Some((Instant::now(), back));
+    }
+
+    /// Stop, and stand at `at`.
+    fn stand(&mut self, at: f64, total: f64) {
+        self.at = at.clamp(0.0, total);
+        self.running = None;
     }
 }
 
-/// The Playback group of the setup panel, for a run that has one.
-pub fn playback_group(run: &Run, playing: Option<&Playing>) -> Option<Widget> {
-    let play = run.playback.as_ref()?;
-    let last = play.moments.len().checked_sub(1)?;
-    let at = playing.map_or(last, |p| p.at.min(last));
-    let running = playing.is_some_and(|p| p.running.is_some());
-    let mut rows = vec![Widget::Slider {
-        id: "playback".into(),
-        label: "Moment".into(),
-        value: at as f64,
-        min: 0.0,
-        max: last as f64,
-        step: Some(1.0),
-        decimals: 0,
-        show_value: false,
-    }];
-    if let Some(m) = play.moments.get(at) {
+/// A transport command, from its button, the timeline, or a key.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Command {
+    Start,
+    PreviousOp,
+    StepBack(usize),
+    PlayBack,
+    PlayPause,
+    StepOn(usize),
+    NextOp,
+    End,
+    /// Shuttle: play this way, faster if it already does.
+    Shuttle(bool),
+    Pause,
+    Faster(bool),
+    Seek(f64),
+}
+
+/// Do `command` to the playback of `setup`'s `run`.
+pub fn apply(
+    playing: &mut Option<Playing>,
+    transport: &mut Transport,
+    setup: &str,
+    run: &Run,
+    command: Command,
+) {
+    let Some(play) = run.playback.as_ref() else {
+        return;
+    };
+    let line = Timeline::of(run);
+    let p = playing.get_or_insert_with(|| Playing::at_end(setup, run));
+    let total = line.total;
+    let here = moment_index(play, p.at);
+    let moment_time = |i: usize| play.moments.get(i).map_or(total, |m| m.seconds);
+    match command {
+        Command::Start => p.stand(0.0, total),
+        Command::End => p.stand(total, total),
+        Command::PreviousOp => {
+            let op = line.op_at(p.at);
+            let start = line.starts.get(op).copied().unwrap_or(0.0);
+            // At an operation's start already, the one before's.
+            let to = if p.at - start < 1e-6 && op > 0 {
+                line.starts.get(op - 1).copied().unwrap_or(0.0)
+            } else {
+                start
+            };
+            p.stand(to, total);
+        }
+        Command::NextOp => {
+            let op = line.op_at(p.at);
+            let to = line.starts.get(op + 1).copied().unwrap_or(total);
+            p.stand(to, total);
+        }
+        Command::StepBack(n) => {
+            let to = if p.at > moment_time(here) + 1e-9 {
+                // Between moments: back to the one shown.
+                moment_time(here)
+            } else {
+                moment_time(here.saturating_sub(n))
+            };
+            p.stand(to, total);
+        }
+        Command::StepOn(n) => {
+            let last = play.moments.len().saturating_sub(1);
+            p.stand(moment_time((here + n).min(last)), total);
+        }
+        Command::PlayBack => match p.running {
+            Some((_, true)) => p.running = None,
+            _ => p.play(total, true),
+        },
+        Command::PlayPause => match p.running {
+            Some(_) => p.running = None,
+            None => p.play(total, false),
+        },
+        Command::Shuttle(back) => match p.running {
+            Some((_, b)) if b == back => transport.speed = faster(transport.speed, true),
+            _ => p.play(total, back),
+        },
+        Command::Pause => p.running = None,
+        Command::Faster(up) => transport.speed = faster(transport.speed, up),
+        Command::Seek(at) => p.stand(at, total),
+    }
+}
+
+/// The transport under the view for `run`'s playback.
+pub fn transport_widgets(run: &Run, playing: Option<&Playing>, t: &Transport) -> Vec<Widget> {
+    let Some(play) = run.playback.as_ref() else {
+        return Vec::new();
+    };
+    let line = Timeline::of(run);
+    let at = playing.map_or(line.total, |p| p.at);
+    let running = playing.and_then(|p| p.running);
+    let mut shapes = Vec::new();
+    let x = |s: f64| {
+        if line.total > 0.0 {
+            (s / line.total) as f32 * WIDTH
+        } else {
+            0.0
+        }
+    };
+    for (i, op) in run.operations.iter().enumerate() {
+        let (a, b) = (x(line.starts[i]), x(line.starts[i] + op.seconds));
+        shapes.push(DiagramShape::Path {
+            points: vec![[a, 12.0], [b, 12.0], [b, 32.0], [a, 32.0]],
+            closed: true,
+            stroke: DiagramStroke::Outline,
+            fill: false,
+        });
+        // A name where it fits.
+        if b - a > 9.0 * op.name.chars().count() as f32 {
+            shapes.push(DiagramShape::Text {
+                at: [(a + b) / 2.0, 22.0],
+                text: op.name.clone(),
+                mono: false,
+            });
+        }
+    }
+    for (s, fail) in &line.marks {
+        shapes.push(DiagramShape::Circle {
+            center: [x(*s), 6.0],
+            radius: 3.5,
+            stroke: if *fail {
+                DiagramStroke::Accent
+            } else {
+                DiagramStroke::Outline
+            },
+            fill: *fail,
+        });
+    }
+    let h = x(at);
+    shapes.push(DiagramShape::Path {
+        points: vec![[h, 2.0], [h, HEIGHT - 2.0]],
+        closed: false,
+        stroke: DiagramStroke::Accent,
+        fill: false,
+    });
+    shapes.push(DiagramShape::Path {
+        points: vec![[h - 5.0, HEIGHT], [h + 5.0, HEIGHT], [h, HEIGHT - 7.0]],
+        closed: true,
+        stroke: DiagramStroke::Accent,
+        fill: true,
+    });
+    let small = |id: &str, label: &str| button(id, label, ButtonStyle::Secondary, true);
+    let mut out = vec![
+        small("t_start", "⏮"),
+        small("t_previous_op", "⏪"),
+        small("t_step_back", "◀|"),
+        button(
+            "t_play_back",
+            if running.is_some_and(|(_, back)| back) {
+                "⏸"
+            } else {
+                "◀"
+            },
+            ButtonStyle::Secondary,
+            true,
+        ),
+        button(
+            "t_play",
+            if running.is_some_and(|(_, back)| !back) {
+                "⏸"
+            } else {
+                "▶"
+            },
+            ButtonStyle::Primary,
+            true,
+        ),
+        small("t_step_on", "|▶"),
+        small("t_next_op", "⏩"),
+        small("t_end", "⏭"),
+        Widget::Value {
+            label: String::new(),
+            value: format!("{} / {}", clock(at), clock(line.total)),
+            mono: true,
+        },
+        choice(
+            "t_speed",
+            "",
+            SPEEDS.iter().map(|s| speed_label(*s)).collect(),
+            SPEEDS.iter().position(|s| *s == t.speed).unwrap_or(0),
+        ),
+        Widget::Toggle {
+            id: "t_stop_problems".into(),
+            label: "Stop at problems".into(),
+            on: t.stop_at_problems,
+        },
+        Widget::Toggle {
+            id: "t_stop_ops".into(),
+            label: "Stop after each operation".into(),
+            on: t.stop_at_ops,
+        },
+    ];
+    if let Some(m) = play.moments.get(moment_index(play, at)) {
         let name = run.operations.get(m.op).map_or("", |o| o.name.as_str());
-        rows.push(Widget::Value {
-            label: "At".into(),
+        out.push(Widget::Value {
+            label: String::new(),
             value: format!("{name}, move {} of {}", m.moves, m.of),
             mono: false,
         });
     }
-    rows.push(Widget::Row {
-        children: vec![
-            button(
-                "play",
-                if running { "Pause" } else { "Play" },
-                ButtonStyle::Secondary,
-                true,
-            ),
-            button(
-                "play_done",
-                "Show it finished",
-                ButtonStyle::Small,
-                playing.is_some(),
-            ),
-        ],
+    // Last, so it takes the strip's width on a line of its own.
+    out.push(Widget::Diagram {
+        id: "timeline".into(),
+        width: WIDTH,
+        height: HEIGHT,
+        shapes,
+        dimensions: Vec::new(),
+        callouts: Vec::new(),
     });
-    Some(group("Playback", rows))
+    out
 }
 
-/// What a playback widget of `setup`'s panel does to `playing`. Whether it was
-/// one.
-pub fn playback_event(
+/// What a transport widget did. Whether it was one.
+pub fn transport_event(
     playing: &mut Option<Playing>,
+    transport: &mut Transport,
     setup: &str,
-    run: Option<&Run>,
+    run: &Run,
     event: &PanelEvent,
 ) -> bool {
-    let Some(play) = run.and_then(|r| r.playback.as_ref()) else {
-        return false;
-    };
-    let last = play.moments.len().saturating_sub(1);
-    let mine = playing.take().filter(|p| p.setup == setup);
-    *playing = match event {
-        PanelEvent::Number { id, value } if id == "playback" => Some(Playing {
-            setup: setup.into(),
-            at: (value.round().max(0.0) as usize).min(last),
-            running: None,
-        }),
-        PanelEvent::Button { id } if id == "play" => {
-            let mut p = mine.unwrap_or(Playing {
-                setup: setup.into(),
-                at: 0,
-                running: None,
-            });
-            p.running = match p.running {
-                Some(_) => None,
-                None => {
-                    // From the start again once it has played through.
-                    if p.at >= last {
-                        p.at = 0;
-                    }
-                    Some((Instant::now(), 0.0))
-                }
-            };
-            Some(p)
+    let command = match event {
+        PanelEvent::Button { id } => match id.as_str() {
+            "t_start" => Command::Start,
+            "t_previous_op" => Command::PreviousOp,
+            "t_step_back" => Command::StepBack(1),
+            "t_play_back" => Command::PlayBack,
+            "t_play" => Command::PlayPause,
+            "t_step_on" => Command::StepOn(1),
+            "t_next_op" => Command::NextOp,
+            "t_end" => Command::End,
+            _ => return false,
+        },
+        PanelEvent::DiagramPress { id, x, .. } if id == "timeline" => {
+            Command::Seek(f64::from(x.clamp(0.0, WIDTH) / WIDTH) * Timeline::of(run).total)
         }
-        PanelEvent::Button { id } if id == "play_done" => None,
-        _ => {
-            *playing = mine;
-            return false;
+        PanelEvent::Choice { id, index } if id == "t_speed" => {
+            transport.speed = SPEEDS.get(*index).copied().unwrap_or(transport.speed);
+            return true;
         }
+        PanelEvent::Toggle { id, on } if id == "t_stop_problems" => {
+            transport.stop_at_problems = *on;
+            return true;
+        }
+        PanelEvent::Toggle { id, on } if id == "t_stop_ops" => {
+            transport.stop_at_ops = *on;
+            return true;
+        }
+        _ => return false,
     };
+    apply(playing, transport, setup, run, command);
     true
+}
+
+/// The transport's command for key `key` going down, camcraft's keys: Space
+/// plays and pauses; J, K and L shuttle back, pause and forward; Left and
+/// Right step (with Shift held, ten moments); Up and Down go to the
+/// operation before and after; Home and End; Minus and Equals change the
+/// speed.
+pub fn key_command(key: &str, shift: bool) -> Option<Command> {
+    let step = if shift { BIG_STEP } else { 1 };
+    Some(match key {
+        "Space" => Command::PlayPause,
+        "J" => Command::Shuttle(true),
+        "K" => Command::Pause,
+        "L" => Command::Shuttle(false),
+        "ArrowLeft" => Command::StepBack(step),
+        "ArrowRight" => Command::StepOn(step),
+        "ArrowUp" => Command::PreviousOp,
+        "ArrowDown" => Command::NextOp,
+        "Home" => Command::Start,
+        "End" => Command::End,
+        "Minus" => Command::Faster(false),
+        "Equals" => Command::Faster(true),
+        _ => return None,
+    })
 }
 
 /// The material at `m`, as a mesh over the grid.
@@ -196,20 +549,42 @@ pub fn tool_at(frame: &mut Frame, play: &Playback, m: &Moment, color: Rgb) {
 
 #[cfg(test)]
 mod tests {
+    use cam_protocol::{Mark as Problem, OperationRun};
+
     use super::*;
 
-    fn run(moments: usize) -> Run {
+    /// Two operations of 10 s and 30 s, a failure at 25 s, and a moment
+    /// every 5 s.
+    fn run() -> Run {
+        let op = |name: &str, seconds: f64, marks: Vec<Problem>| OperationRun {
+            name: name.into(),
+            seconds,
+            marks,
+            ..OperationRun::default()
+        };
         Run {
+            operations: vec![
+                op("Face", 10.0, Vec::new()),
+                op(
+                    "Profile",
+                    30.0,
+                    vec![Problem {
+                        moves: 7,
+                        seconds: 25.0,
+                        fail: true,
+                    }],
+                ),
+            ],
             playback: Some(Playback {
                 base: vec![[0.0; 3]],
                 axis: [0.0, 0.0, 1.0],
                 indices: Vec::new(),
                 low: -10.0,
                 step: 0.5,
-                moments: (0..moments)
+                moments: (0..=8)
                     .map(|i| Moment {
-                        moves: i,
-                        of: moments,
+                        op: usize::from(i > 2),
+                        seconds: f64::from(i) * 5.0,
                         heights: vec![20],
                         ..Moment::default()
                     })
@@ -220,36 +595,68 @@ mod tests {
     }
 
     #[test]
-    fn the_slider_and_play_move_it() {
-        let run = run(5);
-        let mut playing = None;
-        let slide = PanelEvent::Number {
-            id: "playback".into(),
-            value: 9.0,
+    fn the_buttons_go_where_camcrafts_do() {
+        let run = run();
+        let (mut p, mut t) = (None, Transport::default());
+        let mut go = |c| {
+            apply(&mut p, &mut t, "s", &run, c);
+            p.as_ref().unwrap().at
         };
-        assert!(playback_event(&mut playing, "s", Some(&run), &slide));
-        assert_eq!(playing.as_ref().unwrap().at, 4, "kept to the last");
-        // Played through, Play starts again.
-        let play = PanelEvent::Button { id: "play".into() };
-        assert!(playback_event(&mut playing, "s", Some(&run), &play));
-        let p = playing.as_ref().unwrap();
-        assert_eq!(p.at, 0);
-        assert!(p.running.is_some());
-        assert!(playback_event(&mut playing, "s", Some(&run), &play));
-        assert!(playing.as_ref().unwrap().running.is_none(), "paused");
-        let done = PanelEvent::Button {
-            id: "play_done".into(),
+        assert_eq!(go(Command::End), 40.0);
+        assert_eq!(go(Command::PreviousOp), 10.0, "the operation's start");
+        assert_eq!(go(Command::PreviousOp), 0.0, "then the one before's");
+        assert_eq!(go(Command::NextOp), 10.0);
+        assert_eq!(go(Command::StepOn(1)), 15.0);
+        assert_eq!(go(Command::StepOn(100)), 40.0, "held to the last moment");
+        assert_eq!(go(Command::Seek(12.0)), 12.0);
+        assert_eq!(go(Command::StepBack(1)), 10.0, "to the moment shown first");
+        assert_eq!(go(Command::StepBack(1)), 5.0);
+        assert_eq!(go(Command::Start), 0.0);
+        assert_eq!(go(Command::Faster(true)), 0.0);
+        assert_eq!(t.speed, 20.0);
+    }
+
+    #[test]
+    fn playing_stops_at_a_problem_and_at_the_end() {
+        let run = run();
+        let t = Transport {
+            speed: 10_000.0,
+            ..Transport::default()
         };
-        assert!(playback_event(&mut playing, "s", Some(&run), &done));
-        assert_eq!(playing, None);
-        // Not the playback's.
-        let other = PanelEvent::Button { id: "stop".into() };
-        assert!(!playback_event(&mut playing, "s", Some(&run), &other));
+        let mut p = Playing {
+            setup: "s".into(),
+            at: 20.0,
+            running: Some((Instant::now() - std::time::Duration::from_millis(50), false)),
+        };
+        p.tick(&run, &t);
+        assert_eq!((p.at, p.running), (25.0, None), "at the failure");
+        p.running = Some((Instant::now() - std::time::Duration::from_millis(50), false));
+        p.tick(&run, &t);
+        assert_eq!((p.at, p.running), (40.0, None), "on past it, to the end");
+        // Backwards, from the end, it stops at the failure again.
+        p.running = Some((Instant::now() - std::time::Duration::from_millis(50), true));
+        p.tick(&run, &t);
+        assert_eq!(p.at, 25.0);
+    }
+
+    #[test]
+    fn camcrafts_keys_and_speeds() {
+        assert_eq!(key_command("Space", false), Some(Command::PlayPause));
+        assert_eq!(
+            key_command("ArrowLeft", true),
+            Some(Command::StepBack(BIG_STEP))
+        );
+        assert_eq!(key_command("Q", false), None);
+        assert_eq!(faster(10_000.0, true), 10_000.0);
+        assert_eq!(faster(0.25, false), 0.25);
+        assert_eq!(speed_label(0.25), "¼×");
+        assert_eq!(clock(3725.0), "1:02:05");
+        assert_eq!(clock(65.0), "1:05");
     }
 
     #[test]
     fn the_material_stands_where_the_heights_say() {
-        let run = run(2);
+        let run = run();
         let play = run.playback.as_ref().unwrap();
         let mesh = material_at(play, &play.moments[0]);
         assert_eq!(mesh.positions, vec![[0.0, 0.0, 0.0]]);

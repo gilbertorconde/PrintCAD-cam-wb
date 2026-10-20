@@ -141,8 +141,10 @@ struct Cam {
     show_material: bool,
     /// The open setup's run, being played back.
     playing: Option<playback::Playing>,
-    /// The tick job keeping it playing.
-    ticking: Option<u64>,
+    /// How the transport plays.
+    transport: playback::Transport,
+    /// Whether Shift is held, for the transport's keys.
+    shift: bool,
     /// The settings page's chosen preset of the chosen tool, and chosen post.
     chosen_preset: Option<usize>,
     chosen_post: Option<usize>,
@@ -294,17 +296,13 @@ fn run_status(run: &cam_protocol::Run, index: Option<usize>) -> FeatureStatus {
 }
 
 impl Cam {
-    /// Keep a tick job going while a run plays back.
-    fn keep_playing(&mut self) {
-        let running = self.playing.as_ref().is_some_and(|p| p.running.is_some());
-        if running && self.ticking.is_none() {
-            match host::start_job(playback::TICK, &playback::TICK_MS.to_string()) {
-                Ok(job) => self.ticking = Some(job),
-                Err(e) => {
-                    host::warn(&format!("Playback stopped: {e}"));
-                    self.playing = None;
-                }
-            }
+    /// The setup whose run plays back: the open setup, or the open
+    /// operation's.
+    fn played_setup(&self) -> Option<String> {
+        let e = self.editing.as_ref()?;
+        match e.kind {
+            Kind::Setup => Some(e.id.clone()),
+            Kind::Operation => operation_node(&e.id)?.1.setup,
         }
     }
 
@@ -1037,21 +1035,6 @@ impl Bench for Cam {
                 }
                 true
             }
-            Event::JobFinished { job, .. } if self.ticking == Some(*job) => {
-                self.ticking = None;
-                if let Some(p) = &mut self.playing {
-                    match self
-                        .runs
-                        .get(&p.setup)
-                        .and_then(|c| c.shown()?.playback.as_ref())
-                    {
-                        Some(play) => p.tick(play),
-                        None => self.playing = None,
-                    }
-                }
-                self.keep_playing();
-                true
-            }
             Event::FileOpened { id, files } => {
                 let opened = tools::files_opened(
                     id,
@@ -1080,6 +1063,29 @@ impl Bench for Cam {
                 }
                 true
             }
+            Event::Key { key, down } if key == "Shift" => {
+                self.shift = *down;
+                false
+            }
+            Event::Key { key, down: true }
+                if let Some(command) = playback::key_command(key, self.shift)
+                    && let Some(setup) = self.played_setup() =>
+            {
+                let Some(run) = self.runs.get(&setup).and_then(|c| c.shown()).cloned() else {
+                    return false;
+                };
+                if run.playback.is_none() {
+                    return false;
+                }
+                playback::apply(
+                    &mut self.playing,
+                    &mut self.transport,
+                    &setup,
+                    &run,
+                    command,
+                );
+                true
+            }
             Event::Key { key, down: true } if key == "Escape" && self.editing.is_some() => {
                 self.task_close(false);
                 true
@@ -1095,17 +1101,27 @@ impl Bench for Cam {
         {
             self.editing = None;
         }
-        // Playback is the open setup's.
-        let open = self
-            .editing
-            .as_ref()
-            .filter(|e| e.kind == Kind::Setup)
-            .map(|e| e.id.clone());
+        // Playback is the open setup's, or the open operation's setup's.
+        let open = self.played_setup();
         if self.playing.as_ref().map(|p| &p.setup) != open.as_ref() {
             self.playing = None;
         }
+        let run = open
+            .as_ref()
+            .and_then(|s| self.runs.get(s))
+            .and_then(|c| c.shown())
+            .filter(|r| r.playback.is_some())
+            .cloned();
+        if let (Some(p), Some(run)) = (&mut self.playing, &run) {
+            p.tick(run, &self.transport);
+        }
         let mut frame = Frame::default();
         draw::draw(self, &mut frame);
+        if let Some(run) = &run {
+            frame.transport =
+                playback::transport_widgets(run, self.playing.as_ref(), &self.transport);
+            frame.animating = self.playing.as_ref().is_some_and(|p| p.running.is_some());
+        }
         let Some(editing) = self.editing.clone() else {
             return frame;
         };
@@ -1144,6 +1160,20 @@ impl Bench for Cam {
     fn panel_event(&mut self, slot: PanelSlot, event: PanelEvent) {
         if slot == PanelSlot::Settings {
             panel::settings_event(self, event);
+            return;
+        }
+        if slot == PanelSlot::Transport {
+            if let Some(setup) = self.played_setup()
+                && let Some(run) = self.runs.get(&setup).and_then(|c| c.shown()).cloned()
+            {
+                playback::transport_event(
+                    &mut self.playing,
+                    &mut self.transport,
+                    &setup,
+                    &run,
+                    &event,
+                );
+            }
             return;
         }
         let Some(editing) = self.editing.clone() else {
@@ -1256,9 +1286,6 @@ impl Bench for Cam {
     }
 
     fn job(entry: &str, input: &str) -> Result<String, String> {
-        if entry == playback::TICK {
-            return Ok(playback::wait(input));
-        }
         if entry != JOB {
             return Err(format!("no job `{entry}`"));
         }
@@ -1372,6 +1399,7 @@ mod tests {
             code: "CC1".into(),
             text: format!("{level:?} at {operation:?}"),
             operation,
+            at_move: None,
         };
         let op = |made: &str| OperationRun {
             made: made.into(),
