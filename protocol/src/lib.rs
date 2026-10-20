@@ -259,3 +259,158 @@ pub struct Material {
     /// Three corners a triangle.
     pub indices: Vec<u32>,
 }
+
+// ------------------------------------------------------------- session
+
+/// What the package says to a helper kept running for playback, one line
+/// each: the setup to play back, then where to stand.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionIn {
+    /// Run this setup and keep it, to play back.
+    Open(Box<Request>),
+    /// The material, tool and toolpath at this many machining seconds from
+    /// the setup's start.
+    Seek { seconds: f64 },
+}
+
+/// What a playback session answers, one line each.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionOut {
+    /// The setup ran and is kept: the material's grid, and when each move
+    /// ends.
+    Ready(Box<SessionReady>),
+    /// It could not run, and why.
+    Refused { why: String },
+    /// Where a seek stands, and the material that changed.
+    Stock(Box<StockPatch>),
+}
+
+/// A playback session's material grid and timing.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SessionReady {
+    /// Points across and along.
+    pub cols: u32,
+    pub rows: u32,
+    /// Point `(c, r)` at height `h` sits at `origin + c * across + r *
+    /// along + h * up`, in the model's coordinates.
+    pub origin: [f32; 3],
+    pub across: [f32; 3],
+    pub along: [f32; 3],
+    pub up: [f32; 3],
+    /// A height is `low + step * h` for a packed `h`.
+    pub low: f32,
+    pub step: f32,
+    /// When each move of each operation ends, in machining seconds from
+    /// the setup's start.
+    pub times: Vec<Vec<f32>>,
+}
+
+/// How a point of the material stands against the part.
+pub mod class {
+    /// Stock still on it.
+    pub const STOCK: u8 = 0;
+    /// Cut to the part, within the tolerance.
+    pub const FINISHED: u8 = 1;
+    /// Cut below the part.
+    pub const GOUGE: u8 = 2;
+    /// No part under it.
+    pub const CLEAR: u8 = 3;
+}
+
+/// A seek's answer: where it stands, and a rectangle of the material grid
+/// that changed (none when nothing did).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct StockPatch {
+    /// The machining seconds it stands at.
+    pub seconds: f64,
+    /// The operation under way, and how many of its moves are made, of how
+    /// many.
+    pub op: usize,
+    pub moves: usize,
+    pub of: usize,
+    /// Where the tool's tip is, in the model's coordinates.
+    pub tool: [f32; 3],
+    /// How many of the operation's drawn points come before the tool.
+    pub drawn: usize,
+    pub col: u32,
+    pub row: u32,
+    pub width: u32,
+    pub height: u32,
+    /// The rectangle's heights, row by row, 16 bits each, little-endian,
+    /// in base64.
+    pub heights: String,
+    /// Each point's [`class`], a byte each, in base64.
+    pub classes: String,
+}
+
+const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// `bytes` in base64, padded.
+pub fn base64(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(char::from(BASE64[(n >> (18 - 6 * i) & 63) as usize]));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// The bytes of base64 `text`; `None` when it is not base64.
+pub fn unbase64(text: &str) -> Option<Vec<u8>> {
+    let value = |c: u8| BASE64.iter().position(|&x| x == c).map(|v| v as u32);
+    let bytes = text.as_bytes();
+    if !bytes.len().is_multiple_of(4) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+    for chunk in bytes.chunks(4) {
+        let pad = chunk.iter().rev().take_while(|&&c| c == b'=').count();
+        let mut n = 0u32;
+        for &c in &chunk[..4 - pad] {
+            n = (n << 6) | value(c)?;
+        }
+        n <<= 6 * pad as u32;
+        let got = [(n >> 16) as u8, (n >> 8) as u8, n as u8];
+        out.extend_from_slice(&got[..3 - pad]);
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base64_reads_back() {
+        for n in 0..8 {
+            let bytes: Vec<u8> = (0..n).map(|i| (i * 37 + 5) as u8).collect();
+            assert_eq!(unbase64(&base64(&bytes)).as_deref(), Some(&bytes[..]));
+        }
+        assert_eq!(base64(b"Man"), "TWFu");
+        assert_eq!(base64(b"Ma"), "TWE=");
+        assert_eq!(unbase64("TWE"), None);
+    }
+
+    #[test]
+    fn a_session_line_reads_back() {
+        let line = serde_json::to_string(&SessionIn::Seek { seconds: 1.5 }).unwrap();
+        assert_eq!(line, r#"{"seek":{"seconds":1.5}}"#);
+        assert_eq!(
+            serde_json::from_str::<SessionIn>(&line).unwrap(),
+            SessionIn::Seek { seconds: 1.5 }
+        );
+    }
+}

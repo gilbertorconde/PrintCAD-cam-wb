@@ -391,3 +391,72 @@ fn a_post_of_ones_own_writes_the_program() {
     assert_eq!(program.post, "My mill");
     assert_eq!(program.extension, "mine");
 }
+
+/// A playback session runs the setup once, then answers each seek with the
+/// material that changed: all of it first, finished against the part at
+/// the end, and as it was at the start again going back.
+#[test]
+fn a_session_plays_back_at_full_resolution() {
+    use cam_protocol::{SessionIn, SessionOut, class, unbase64};
+    let request = Request {
+        version: VERSION,
+        job: JOB.into(),
+        shapes: BTreeMap::from([(
+            "part".to_string(),
+            Shape {
+                text: native("hinge_jig.step"),
+                placement: IDENTITY,
+            },
+        )]),
+        max_points: 2000,
+        ..Request::default()
+    };
+    let seek = |s: f64| serde_json::to_string(&SessionIn::Seek { seconds: s }).unwrap();
+    let lines = format!("{}\n{}\n{}\n", seek(0.0), seek(1e9), seek(0.0));
+    let mut out = Vec::new();
+    crate::session::serve(
+        SessionIn::Open(Box::new(request)),
+        std::io::Cursor::new(lines),
+        &mut out,
+    )
+    .unwrap();
+    let said: Vec<SessionOut> = String::from_utf8(out)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let SessionOut::Ready(ready) = &said[0] else {
+        panic!("{:?}", said[0]);
+    };
+    assert!(ready.cols > 100 && ready.cols <= 600, "{}", ready.cols);
+    assert_eq!(ready.times.len(), 1);
+    let patch = |i: usize| match &said[i] {
+        SessionOut::Stock(p) => p.clone(),
+        other => panic!("{other:?}"),
+    };
+    let (start, end, back) = (patch(1), patch(2), patch(3));
+    assert_eq!(
+        (start.width, start.height),
+        (ready.cols, ready.rows),
+        "all of it first"
+    );
+    let heights = |p: &cam_protocol::StockPatch| -> Vec<u16> {
+        unbase64(&p.heights)
+            .unwrap()
+            .chunks(2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]))
+            .collect()
+    };
+    assert_eq!(heights(&start).len(), (start.width * start.height) as usize);
+    assert_eq!((end.moves, end.of), (end.of, ready.times[0].len()));
+    assert!(end.width > 0, "the run changed the material");
+    let finished = unbase64(&end.classes).unwrap();
+    assert!(
+        finished.contains(&class::FINISHED),
+        "cut down to the part somewhere"
+    );
+    assert!(!finished.contains(&class::GOUGE), "and nowhere below it");
+    // Back at the start the block is whole again where it changed.
+    let top = heights(&start).into_iter().max().unwrap();
+    assert!(heights(&back).iter().all(|h| *h == top));
+}

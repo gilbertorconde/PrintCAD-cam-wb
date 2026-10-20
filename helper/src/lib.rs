@@ -80,6 +80,24 @@ pub fn answer_reporting(
     request: &Request,
     progress: &mut dyn FnMut(u64, u64),
 ) -> Result<Run, String> {
+    execute(request, progress).map(|done| done.run)
+}
+
+/// A setup run, with what the answer was made from: the job, camcraft's
+/// run, and each operation as drawn, which a playback session keeps to
+/// sweep the run again.
+pub(crate) struct Executed {
+    pub run: Run,
+    pub job: camcraft_core::job::Job,
+    pub ran: Ran,
+    pub draws: Vec<Drawn>,
+}
+
+/// [`answer_reporting`], keeping what the answer was made from.
+pub(crate) fn execute(
+    request: &Request,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<Executed, String> {
     speaks(request)?;
     let started = Instant::now();
     let job = parse_job(&request.job, "the setup").map_err(|e| e.to_string())?;
@@ -225,7 +243,7 @@ pub fn answer_reporting(
         .map(|b| corners(&frame, b))
         .unwrap_or([[0.0; 3]; 2]);
     progress(total, total);
-    Ok(Run {
+    let run = Run {
         version: VERSION,
         passed: ran.passed(),
         findings: findings(&ran),
@@ -241,6 +259,12 @@ pub fn answer_reporting(
         material: material(&ran),
         playback: playback::playback(&job, &ran, &draws),
         seconds: started.elapsed().as_secs_f64(),
+    };
+    Ok(Executed {
+        run,
+        job,
+        ran,
+        draws,
     })
 }
 
@@ -562,5 +586,6 @@ fn material(ran: &Ran) -> Option<Material> {
 
 pub mod cache;
 mod playback;
+pub mod session;
 #[cfg(test)]
 mod tests;
