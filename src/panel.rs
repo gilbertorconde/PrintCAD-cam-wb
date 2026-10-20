@@ -16,7 +16,7 @@ use crate::linking::{linking_event, linking_group};
 use crate::passes::{finishing_group, passes_event, strategy_rows, tabs_group};
 use crate::playback::{playback_event, playback_group};
 use crate::runs::State;
-use crate::tools::{READ, Reading, files_groups, tool_editor, tool_event};
+use crate::tools::{files_groups, open_post, open_tools, tool_editor, tool_event};
 use crate::{Cam, operation_node, operations_of, setup_node, setups};
 
 /// The most findings a panel lists.
@@ -278,6 +278,19 @@ fn verdict(run: &Run, only: Option<usize>) -> Vec<Widget> {
             }
         }
         None => {
+            let programs = run
+                .operations
+                .iter()
+                .filter(|o| o.program.is_some())
+                .count();
+            if programs > 1 {
+                out.push(button(
+                    "save_all",
+                    "Save every program…",
+                    ButtonStyle::Primary,
+                    run.passed,
+                ));
+            }
             for (i, op) in run.operations.iter().enumerate() {
                 if op.program.is_some() {
                     out.push(button(
@@ -618,6 +631,20 @@ pub fn setup_event(cam: &mut Cam, id: &str, event: PanelEvent) {
         PanelEvent::Toggle { id: t, on } if t == "show_material" => cam.show_material = on,
         PanelEvent::Button { id: b } if b == "generate" => cam.refresh(id, true),
         PanelEvent::Button { id: b } if b == "stop" => cam.runs.stop(id),
+        PanelEvent::Button { id: b } if b == "save_all" => {
+            let programs: Result<Vec<_>, String> = operations_of(id)
+                .iter()
+                .filter_map(|(op, _)| match cam.program_of(&op.id, false) {
+                    Err(e) if e.ends_with("made no toolpath.") => None,
+                    other => Some(other),
+                })
+                .collect();
+            match programs {
+                Ok(p) if !p.is_empty() => Cam::save_all(&p),
+                Ok(_) => cam.hint = Some("No operation made a program.".into()),
+                Err(e) => cam.hint = Some(e),
+            }
+        }
         PanelEvent::Button { id: b } => {
             if let Some(i) = b
                 .strip_prefix("save:")
@@ -1499,24 +1526,11 @@ pub fn settings_panel(cam: &Cam) -> Vec<Widget> {
     {
         editor.push(tool_editor(name, tool, cam.chosen_preset));
     }
-    editor.extend(files_groups(
-        &cam.settings.posts,
-        &cam.import_path,
-        &cam.post_path,
-        cam.chosen_post,
-        cam.reading.is_some(),
-    ));
+    editor.extend(files_groups(&cam.settings.posts, cam.chosen_post));
     match &cam.settings_note {
         Some(Ok(said)) => editor.push(note(NoteKind::Info, said.clone())),
         Some(Err(why)) => editor.push(note(NoteKind::Error, why.clone())),
         None => {}
-    }
-    if cam.reading.is_some() {
-        editor.push(note(
-            NoteKind::Info,
-            "Reading the file… printCAD hands it over while the CAM workbench is open, \
-             and this page shows it after the next change on it.",
-        ));
     }
     let mut page = vec![
         Widget::Heading {
@@ -1604,14 +1618,6 @@ pub fn settings_event(cam: &mut Cam, event: PanelEvent) {
         return;
     }
     match &event {
-        PanelEvent::Text { id, value } if id == "import_path" => {
-            cam.import_path = value.clone();
-            return;
-        }
-        PanelEvent::Text { id, value } if id == "post_path" => {
-            cam.post_path = value.clone();
-            return;
-        }
         PanelEvent::Select { id, index } if id == "posts" => {
             cam.chosen_post = Some(*index);
             return;
@@ -1627,16 +1633,12 @@ pub fn settings_event(cam: &mut Cam, event: PanelEvent) {
             return;
         }
         PanelEvent::Button { id } if id == "import_tools" || id == "add_post" => {
-            let (path, reading) = if id == "import_tools" {
-                (cam.import_path.clone(), Reading::Tools)
-            } else {
-                (cam.post_path.clone(), Reading::Post)
-            };
             cam.settings_note = None;
-            match host::start_job(READ, path.trim()) {
-                Ok(job) => cam.reading = Some((job, reading)),
-                Err(e) => cam.settings_note = Some(Err(e)),
-            }
+            host::request(if id == "import_tools" {
+                open_tools()
+            } else {
+                open_post()
+            });
             return;
         }
         _ => {}

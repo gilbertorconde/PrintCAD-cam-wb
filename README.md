@@ -56,6 +56,8 @@ panels, the drawing and the helper that runs camcraft.
   and a Fusion tool library exported as CSV imports into it. A setup takes a
   copy of a tool when an operation first cuts with it, so a document never
   depends on the machine it is opened on.
+- **Status in the tree.** Each setup and operation shows how its run went:
+  running (with how far), done, warnings, failed, or out of date.
 - **Checked against the material.** Every setup is simulated: a gouge, a rapid
   through material and the other failures camcraft checks for are listed in
   the setup's and the operation's panels, and a setup that fails is not
@@ -65,7 +67,8 @@ panels, the drawing and the helper that runs camcraft.
   to stop at any moment.
 - **Drawn over the model.** The stock's box, the work zero, each operation's
   toolpath (rapids dashed while it is edited), and the material left.
-- **G-code through the save dialog,** one program per operation, for GRBL,
+- **G-code through the save dialog,** one program per operation, or every
+  program of a setup into a folder at once, for GRBL,
   Masso or Centroid CNC12 (Avid), in millimetres or inches, or through a
   machine profile of your own in camcraft's TOML, which a setup carries a
   copy of.
@@ -104,15 +107,12 @@ useful there.
   runs in the user's cache folder (`printcad-cam`; `CAM_HELPER_CACHE` names
   another, or `off`), so a document opened again on the same machine shows
   its runs at once; elsewhere they run again.
-- The helper reports how far a run is (`progress <done> <total>` on its
-  standard error), but printCAD does not read a helper's output until it
-  ends, so the panel shows only that it is running.
 - Picked faces and edges follow camcraft's rules: a pick is a point on the
   face, found again on the solid by that point.
-- printCAD offers a package no dialog to open a file, so a Fusion CSV or a
-  machine profile is named by its path, and the helper reads it.
 
 ## Install it
+
+It needs printCAD 0.11 or later.
 
 - From a release: download the `.pcbench` file from the
   [releases](https://github.com/gilbertorconde/PrintCAD-cam-wb/releases)

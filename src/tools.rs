@@ -1,53 +1,71 @@
 //! The tool library's editor, its import from Fusion, and the machine
 //! profiles of the user's own, on the CAM preferences page.
-//!
-//! A package in printCAD's sandbox reads no files, and printCAD offers it no
-//! dialog to open one, so a file is named by its path and the package's
-//! helper reads it ([`READ`]).
 
 use std::collections::BTreeMap;
 
-use cam_protocol::{HELPER, Request, Response, VERSION};
 use camcraft_core::job::{Preset, ToolKind, ToolSpec};
 use camcraft_post::profile::Profile;
 use camcraft_session::library::fusion_csv;
 use printcad_bench_sdk::api::*;
-use printcad_bench_sdk::{host, serde_json};
 
 use crate::panel::{button, choice, group};
 
-/// The job that reads a file through the helper: its input is the path.
-pub const READ: &str = "read";
+/// The open dialogs the page asks for, by the id their files come back
+/// under.
+pub const OPEN_TOOLS: &str = "fusion-tools";
+pub const OPEN_POST: &str = "machine-profile";
 
-/// What a file being read is for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Reading {
-    /// A Fusion tool library, exported as CSV, to add to the library.
-    Tools,
-    /// A machine profile, as camcraft's TOML.
-    Post,
-}
-
-/// What the [`READ`] job does: ask the helper for the file at `path`.
-pub fn read_job(path: &str) -> Result<String, String> {
-    let request = Request {
-        version: VERSION,
-        read: Some(path.to_string()),
-        ..Request::default()
-    };
-    let input = serde_json::to_string(&request).map_err(|e| e.to_string())?;
-    let out = host::helper(HELPER, input.as_bytes())?;
-    String::from_utf8(out).map_err(|_| "the helper's answer is not text".into())
-}
-
-/// The text a [`READ`] job's result holds, or why there is none.
-pub fn read_text(result: &Result<String, String>) -> Result<String, String> {
-    let answer = result.as_ref().map_err(Clone::clone)?;
-    match serde_json::from_str(answer).map_err(|e| format!("the helper's answer: {e}"))? {
-        Response::Read { text } => Ok(text),
-        Response::Refused { why } => Err(why),
-        Response::Ran(_) => Err("the helper ran a setup instead".into()),
+/// The dialog asking for a Fusion tool library.
+pub fn open_tools() -> Request {
+    Request::OpenFile {
+        id: OPEN_TOOLS.into(),
+        kinds: vec![FileKind {
+            label: "Fusion tool library (CSV)".into(),
+            extensions: vec!["csv".into()],
+        }],
+        multiple: true,
     }
+}
+
+/// The dialog asking for a machine profile.
+pub fn open_post() -> Request {
+    Request::OpenFile {
+        id: OPEN_POST.into(),
+        kinds: vec![FileKind {
+            label: "camcraft machine profile (TOML)".into(),
+            extensions: vec!["toml".into()],
+        }],
+        multiple: true,
+    }
+}
+
+/// What the files picked for dialog `id` did to `tools` and `posts`, in
+/// words; `None` for a dialog not the page's.
+pub fn files_opened(
+    id: &str,
+    files: &[OpenedFile],
+    tools: &mut BTreeMap<String, ToolSpec>,
+    posts: &mut BTreeMap<String, String>,
+) -> Option<Result<String, String>> {
+    if id != OPEN_TOOLS && id != OPEN_POST {
+        return None;
+    }
+    let mut said = Vec::new();
+    for f in files {
+        let Ok(text) = std::str::from_utf8(&f.contents) else {
+            return Some(Err(format!("{} is not text.", f.name)));
+        };
+        let done = if id == OPEN_TOOLS {
+            import_tools(tools, text)
+        } else {
+            add_post(posts, text).map(|name| format!("Added the post '{name}'."))
+        };
+        match done {
+            Ok(s) => said.push(s),
+            Err(e) => return Some(Err(format!("{}: {e}", f.name))),
+        }
+    }
+    (!said.is_empty()).then(|| Ok(said.join(" ")))
 }
 
 /// `base`, or `base 2`, `base 3`… where `taken` already has it.
@@ -371,32 +389,21 @@ pub fn tool_event(
 }
 
 /// The groups for importing tools and keeping posts.
-pub fn files_groups(
-    posts: &BTreeMap<String, String>,
-    import_path: &str,
-    post_path: &str,
-    chosen_post: Option<usize>,
-    reading: bool,
-) -> Vec<Widget> {
+pub fn files_groups(posts: &BTreeMap<String, String>, chosen_post: Option<usize>) -> Vec<Widget> {
     let mut out = vec![group(
         "Import tools from Fusion",
         vec![
             Widget::Text {
                 text: "In Fusion's Tool Library, right-click a library and Export it as \
-                       CSV, then give the file's full path here."
+                       CSV, then import that file here."
                     .into(),
                 mono: false,
             },
-            Widget::TextField {
-                id: "import_path".into(),
-                label: "CSV file".into(),
-                value: import_path.into(),
-            },
             button(
                 "import_tools",
-                "Import the tools",
+                "Import from Fusion…",
                 ButtonStyle::Secondary,
-                !reading && !import_path.trim().is_empty(),
+                true,
             ),
         ],
     )];
@@ -421,16 +428,11 @@ pub fn files_groups(
             chosen_post.is_some(),
         ));
     }
-    rows.push(Widget::TextField {
-        id: "post_path".into(),
-        label: "Profile file".into(),
-        value: post_path.into(),
-    });
     rows.push(button(
         "add_post",
-        "Add the post",
+        "Add a post…",
         ButtonStyle::Secondary,
-        !reading && !post_path.trim().is_empty(),
+        true,
     ));
     out.push(group("Posts", rows));
     out
@@ -523,5 +525,24 @@ mod tests {
         assert!(posts.contains_key("My mill"));
         assert!(add_post(&mut posts, grbl).unwrap_err().contains("built-in"));
         assert!(add_post(&mut posts, "not toml").is_err());
+    }
+
+    #[test]
+    fn files_picked_are_imported_by_their_dialog() {
+        let (mut tools, mut posts) = (library(), BTreeMap::new());
+        let csv = OpenedFile {
+            name: "mill.csv".into(),
+            contents: b"Type (tool_type),Diameter (tool_diameter),Description (tool_description)\nflat end mill,4,Flat 4\n".to_vec(),
+        };
+        let said = files_opened(OPEN_TOOLS, &[csv], &mut tools, &mut posts).unwrap();
+        assert!(said.unwrap().starts_with("Added 1 tool"));
+        assert_eq!(tools.len(), 2);
+        let bad = OpenedFile {
+            name: "x.toml".into(),
+            contents: b"nope".to_vec(),
+        };
+        let said = files_opened(OPEN_POST, &[bad], &mut tools, &mut posts).unwrap();
+        assert!(said.unwrap_err().starts_with("x.toml: "));
+        assert_eq!(files_opened("other", &[], &mut tools, &mut posts), None);
     }
 }

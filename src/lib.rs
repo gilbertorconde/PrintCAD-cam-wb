@@ -29,7 +29,7 @@ mod tools;
 
 use std::collections::BTreeMap;
 
-use cam_protocol::{HELPER, IDENTITY, Request as HelperRequest, Shape, VERSION};
+use cam_protocol::{HELPER, IDENTITY, Level, Request as HelperRequest, Shape, VERSION};
 use camcraft_core::job::{StrategySpec, ToolSpec};
 use printcad_bench_sdk::api::*;
 use printcad_bench_sdk::{Bench, Value, bench, host, json, serde_json};
@@ -146,12 +146,6 @@ struct Cam {
     /// The settings page's chosen preset of the chosen tool, and chosen post.
     chosen_preset: Option<usize>,
     chosen_post: Option<usize>,
-    /// The paths typed on the settings page, of a Fusion tool library and of
-    /// a machine profile.
-    import_path: String,
-    post_path: String,
-    /// A file being read for the settings page, by its job.
-    reading: Option<(u64, tools::Reading)>,
     /// What the settings page last did with a file.
     settings_note: Option<Result<String, String>>,
     /// A word for the task panel about the last thing tried.
@@ -253,6 +247,52 @@ fn request_for(node: &Node, setup: &SetupData) -> Result<String, String> {
     serde_json::to_string(&request).map_err(|e| e.to_string())
 }
 
+fn status(state: FeatureState, note: &str) -> FeatureStatus {
+    FeatureStatus {
+        state,
+        note: Some(note.to_string()),
+        ..Default::default()
+    }
+}
+
+/// What a finished run says of a setup, or of its operation `index`: failed
+/// when a check failed, warnings when one warned or camcraft did, done when
+/// all passed.
+fn run_status(run: &cam_protocol::Run, index: Option<usize>) -> FeatureStatus {
+    let op = index.and_then(|i| run.operations.get(i));
+    match op.map(|o| o.made.as_str()) {
+        Some("disabled") => return status(FeatureState::NotRun, "Turned off"),
+        Some("skipped") => return status(FeatureState::NotRun, "Skipped: nothing to cut"),
+        _ => {}
+    }
+    let findings: Vec<&cam_protocol::Finding> = run
+        .findings
+        .iter()
+        .filter(|f| index.is_none() || f.operation == index)
+        .collect();
+    let first = |level: Level| findings.iter().find(|f| f.level == level);
+    if let Some(f) = first(Level::Fail) {
+        return status(FeatureState::Failed, &f.text);
+    }
+    if index.is_none() && !run.passed {
+        return status(FeatureState::Failed, "It failed its checks");
+    }
+    let warning = first(Level::Warn)
+        .map(|f| f.text.clone())
+        .or_else(|| match op {
+            Some(o) => o.warnings.first().cloned(),
+            None => run.warnings.first().cloned(),
+        });
+    match (warning, op) {
+        (Some(w), _) => status(FeatureState::Warnings, &w),
+        (None, Some(o)) => status(FeatureState::Done, &o.summary),
+        (None, None) => status(
+            FeatureState::Done,
+            &format!("Every check passed ({:.1} s)", run.seconds),
+        ),
+    }
+}
+
 impl Cam {
     /// Keep a tick job going while a run plays back.
     fn keep_playing(&mut self) {
@@ -278,6 +318,35 @@ impl Cam {
         match request_for(&node, &setup) {
             Ok(request) => self.runs.want(id, request, again),
             Err(why) => self.runs.refuse(id, why),
+        }
+        // The tree's badges follow the run.
+        host::redraw();
+    }
+
+    /// How a setup's or an operation's work stands, for its badge in the
+    /// tree: its setup's run, and of that run, what is the operation's.
+    fn status_of(&self, node: &Node) -> FeatureStatus {
+        let (setup, index) = if node.kind == SETUP_KIND {
+            (Some(node.id.clone()), None)
+        } else {
+            let setup = OperationData::from(&node.data).and_then(|d| d.setup);
+            let index = setup
+                .as_ref()
+                .and_then(|s| operations_of(s).iter().position(|(n, _)| n.id == node.id));
+            (setup, index)
+        };
+        let Some(computed) = setup.and_then(|s| self.runs.get(&s)) else {
+            return status(FeatureState::NotRun, "Not run yet");
+        };
+        match &computed.state {
+            State::Queued => status(FeatureState::Running, "Waiting for another setup to finish"),
+            State::Running(job) => FeatureStatus {
+                job: Some(*job),
+                ..status(FeatureState::Running, "Working out the toolpaths")
+            },
+            State::Stopped => status(FeatureState::OutOfDate, "Its run was stopped"),
+            State::Failed(why) => status(FeatureState::Failed, why),
+            State::Ready(run) => run_status(run, index),
         }
     }
 
@@ -413,6 +482,19 @@ impl Cam {
             kind: "G-code".into(),
             extension: program.extension.clone(),
             contents: program.text.clone().into_bytes(),
+        });
+    }
+
+    /// Every program of a setup, written into a folder the user picks.
+    fn save_all(programs: &[cam_protocol::Program]) {
+        host::request(Request::SaveFiles {
+            files: programs
+                .iter()
+                .map(|p| FileToWrite {
+                    name: format!("{}.{}", p.name, p.extension),
+                    contents: p.text.clone().into_bytes(),
+                })
+                .collect(),
         });
     }
 
@@ -673,11 +755,13 @@ impl Bench for Cam {
     }
 
     fn feature_info(&self, node: &Node) -> FeatureInfo {
+        let status = Some(self.status_of(node));
         if node.kind == SETUP_KIND {
             return FeatureInfo {
                 icon: "setup".into(),
                 kind_label: "CAM setup".into(),
                 family_label: "CAM".into(),
+                status,
                 ..Default::default()
             };
         }
@@ -687,6 +771,7 @@ impl Bench for Cam {
             icon: "operation".into(),
             kind_label: label.into(),
             family_label: "CAM".into(),
+            status,
             ..Default::default()
         }
     }
@@ -967,20 +1052,23 @@ impl Bench for Cam {
                 self.keep_playing();
                 true
             }
-            Event::JobFinished { job, result } if self.reading.is_some_and(|(j, _)| j == *job) => {
-                let for_what = self.reading.take().map(|(_, r)| r);
-                self.settings_note = Some(tools::read_text(result).and_then(|text| {
-                    match for_what {
-                        Some(tools::Reading::Tools) => {
-                            tools::import_tools(&mut self.settings.tools, &text)
-                        }
-                        _ => tools::add_post(&mut self.settings.posts, &text)
-                            .map(|name| format!("Added the post '{name}'.")),
-                    }
-                }));
+            Event::FileOpened { id, files } => {
+                let opened = tools::files_opened(
+                    id,
+                    files,
+                    &mut self.settings.tools,
+                    &mut self.settings.posts,
+                );
+                let Some(said) = opened else {
+                    return false;
+                };
+                self.settings_note = Some(said);
+                // The preferences page shows what came of it.
+                host::redraw();
                 true
             }
             Event::JobFinished { job, result } => {
+                host::redraw();
                 if let Some(setup) = self.runs.finished(*job, result) {
                     match self.runs.get(&setup).map(|c| &c.state) {
                         Some(State::Failed(e)) => host::warn(&format!("Setup not run: {e}")),
@@ -1171,9 +1259,6 @@ impl Bench for Cam {
         if entry == playback::TICK {
             return Ok(playback::wait(input));
         }
-        if entry == tools::READ {
-            return tools::read_job(input);
-        }
         if entry != JOB {
             return Err(format!("no job `{entry}`"));
         }
@@ -1277,5 +1362,37 @@ mod tests {
         for (name, _) in STRATEGIES {
             assert!(StrategySpec::named(name).is_some(), "{name}");
         }
+    }
+
+    #[test]
+    fn a_run_shows_in_the_tree_as_it_went() {
+        use cam_protocol::{Finding, OperationRun, Run};
+        let finding = |level, operation| Finding {
+            level,
+            code: "CC1".into(),
+            text: format!("{level:?} at {operation:?}"),
+            operation,
+        };
+        let op = |made: &str| OperationRun {
+            made: made.into(),
+            summary: "2 passes".into(),
+            ..OperationRun::default()
+        };
+        let mut run = Run {
+            passed: false,
+            findings: vec![finding(Level::Fail, Some(1)), finding(Level::Warn, Some(0))],
+            operations: vec![op("generated"), op("generated"), op("disabled")],
+            ..Run::default()
+        };
+        assert_eq!(run_status(&run, None).state, FeatureState::Failed);
+        assert_eq!(run_status(&run, Some(0)).state, FeatureState::Warnings);
+        assert_eq!(run_status(&run, Some(1)).state, FeatureState::Failed);
+        assert_eq!(run_status(&run, Some(2)).state, FeatureState::NotRun);
+        run.findings.clear();
+        run.passed = true;
+        let done = run_status(&run, Some(0));
+        assert_eq!(done.state, FeatureState::Done);
+        assert_eq!(done.note.as_deref(), Some("2 passes"));
+        assert_eq!(run_status(&run, None).state, FeatureState::Done);
     }
 }
