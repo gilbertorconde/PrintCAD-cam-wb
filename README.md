@@ -38,6 +38,14 @@ panels, the drawing and the helper that runs camcraft.
   profiles and pockets; facing; drilling. An operation
   (`io.github.gilbertorconde.cam.operation`) belongs to a setup and runs in the
   document's order, each against what the one before left.
+- **Picking in the view,** as camcraft's: a pick row in the panel arms it,
+  and while it is armed, hovering shows what a click takes. An operation
+  takes faces, and edges by the loop they go round at their height (an edge
+  that is not level, alone); a click on a picked one takes it out. A setup's
+  work zero can be a corner or a round edge's centre picked on the part.
+- **What an operation machines, drawn** while it is edited: its boundary as
+  chosen, where the tool's centre may go against it, and, hatched, what the
+  tool cuts outside the part or beside a 2D outline.
 - **Heights**, as Fusion's Heights tab: the clearance, the retract, and the top
   and bottom it cuts between, each measured from the stock, the part, the work
   zero or the picked faces and edges. The view shows them as planes across the

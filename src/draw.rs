@@ -14,6 +14,10 @@ const STOCK: Rgb = [0.9, 0.62, 0.25];
 const RAPID: Rgb = [0.9, 0.3, 0.25];
 const ZERO: Rgb = [0.35, 0.8, 0.4];
 const MATERIAL: Rgb = [0.78, 0.66, 0.5];
+/// camcraft's colours for a boundary, and for the hatching over what the
+/// tool cuts outside the part: amber, the darkest for the hatch.
+const BOUNDARY: Rgb = [0.95, 0.65, 0.2];
+const HATCH: Rgb = [0.75, 0.45, 0.1];
 const CLEARANCE: Rgb = [0.35, 0.8, 0.4];
 const RETRACT: Rgb = [0.3, 0.75, 0.75];
 const TOP: Rgb = [0.31, 0.64, 0.9];
@@ -115,6 +119,9 @@ pub fn draw(cam: &Cam, frame: &mut Frame) {
                 for plane in &op.heights {
                     height_plane(frame, plane);
                 }
+                if let Some(o) = &op.outlines {
+                    outlines(frame, o);
+                }
             }
             let color = if this || edited_setup { ACCENT } else { MUTED };
             // Played back, as far as the tool has gone.
@@ -185,6 +192,40 @@ fn height_plane(frame: &mut Frame, plane: &HeightPlane) {
         pill: true,
         mono: false,
     });
+}
+
+/// What the edited operation machines, as camcraft's app draws it: the
+/// boundary as chosen, wide; where the tool's centre may go against it,
+/// thin; what the tool cuts outside the part, hatched.
+fn outlines(frame: &mut Frame, o: &cam_protocol::Outlines) {
+    for ring in &o.boundary {
+        frame.lines.push(Polyline {
+            points: ring.clone(),
+            color: BOUNDARY,
+            width: 2.5,
+            ..Default::default()
+        });
+    }
+    for ring in &o.limit {
+        frame.lines.push(Polyline {
+            points: ring.clone(),
+            color: BOUNDARY,
+            width: 1.0,
+            dashed: true,
+            ..Default::default()
+        });
+    }
+    for piece in &o.cut {
+        frame.regions.push(Region {
+            outline: piece.outline.clone(),
+            holes: piece.holes.clone(),
+            color: HATCH,
+            opacity: 0.12,
+            hatch: Some(2.0),
+            hatch_angle: 45.0,
+            on_top: false,
+        });
+    }
 }
 
 /// The stock's box, as twelve edges.

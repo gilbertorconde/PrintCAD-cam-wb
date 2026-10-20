@@ -23,6 +23,7 @@ mod draw;
 mod linking;
 mod panel;
 mod passes;
+mod picking;
 mod playback;
 mod runs;
 mod session;
@@ -148,6 +149,8 @@ struct Cam {
     shift: bool,
     /// The played-back setup's run, kept in a helper at full resolution.
     session: Option<session::Session>,
+    /// A slot picking in the view.
+    armed: Option<picking::Armed>,
     /// The settings page's chosen preset of the chosen tool, and chosen post.
     chosen_preset: Option<usize>,
     chosen_post: Option<usize>,
@@ -306,6 +309,119 @@ impl Cam {
         match e.kind {
             Kind::Setup => Some(e.id.clone()),
             Kind::Operation => operation_node(&e.id)?.1.setup,
+        }
+    }
+
+    /// Arm `slot` for `feature`, or disarm it if it is armed already.
+    fn arm(&mut self, feature: &str, slot: Option<picking::Slot>) {
+        let Some(slot) = slot else {
+            return;
+        };
+        let again = self
+            .armed
+            .as_ref()
+            .is_some_and(|a| a.feature == feature && a.slot == slot);
+        self.armed = (!again).then(|| picking::Armed {
+            feature: feature.into(),
+            slot,
+            hover: None,
+        });
+    }
+
+    /// The tool's axis of the setup `feature` is, or is in: what an edge
+    /// loop is flat along.
+    fn axis_of(&self, feature: &str) -> [f32; 3] {
+        let setup = self.setup_of(feature).and_then(|s| setup_node(&s));
+        setup.map_or([0.0, 0.0, 1.0], |(_, d)| {
+            let v = d.z_axis.vector();
+            [v.x as f32, v.y as f32, v.z as f32]
+        })
+    }
+
+    /// An armed slot's share of `input`: what a click would take as the
+    /// pointer moves, and taking it on a click. `None` for input it leaves.
+    fn pick_input(&mut self, input: &Input) -> Option<bool> {
+        let armed = self.armed.clone()?;
+        match &input.event {
+            Event::Move => {
+                let up = self.axis_of(&armed.feature);
+                let hover = picking::hover(armed.slot, &input.pointer, up);
+                if let Some(a) = &mut self.armed {
+                    a.hover = hover;
+                }
+                host::redraw();
+                Some(false)
+            }
+            Event::Press {
+                button: Button::Left,
+            } => {
+                let hover = armed.hover?;
+                self.take(&armed.feature, hover);
+                Some(true)
+            }
+            Event::Key { key, down: true } if key == "Escape" => {
+                self.armed = None;
+                Some(true)
+            }
+            _ => None,
+        }
+    }
+
+    /// What an armed slot's click takes, into `feature`'s data: a face or an
+    /// edge loop for an operation, taken out again when it is in already; a
+    /// work zero for a setup, which disarms it.
+    fn take(&mut self, feature: &str, hover: picking::Hover) {
+        use picking::Hover;
+        match hover {
+            Hover::Point { body, snap, at, .. } => {
+                if let Some((_, mut setup)) = setup_node(feature) {
+                    setup.zero = data::Zero::Picked;
+                    setup.zero_point = Some(data::ZeroPoint {
+                        body,
+                        snap,
+                        at: at.map(f64::from),
+                    });
+                    let _ = host::set_feature_data(feature, setup.to_value());
+                    self.refresh(feature, false);
+                }
+                self.armed = None;
+            }
+            Hover::Face { body, at, .. } => {
+                let Some((_, mut op)) = operation_node(feature) else {
+                    return;
+                };
+                let name = self.pointer.hover_face.as_ref().and_then(|f| f.name);
+                let had = op.faces.len();
+                op.faces
+                    .retain(|p| !(p.body == body && name.is_some() && p.name == name));
+                if op.faces.len() == had {
+                    op.faces.push(data::Pick {
+                        body,
+                        at: at.map(f64::from),
+                        name,
+                        faces: None,
+                    });
+                }
+                self.write_operation(feature, &op);
+            }
+            Hover::Edge { body, at, .. } => {
+                let Some((_, mut op)) = operation_node(feature) else {
+                    return;
+                };
+                let faces = self.pointer.hover_edge.as_ref().and_then(|e| e.faces);
+                let had = op.edges.len();
+                op.edges
+                    .retain(|p| !(p.body == body && faces.is_some() && p.faces == faces));
+                if op.edges.len() == had {
+                    op.edges.push(data::Pick {
+                        body,
+                        at: at.map(f64::from),
+                        name: None,
+                        faces,
+                    });
+                }
+                self.write_operation(feature, &op);
+            }
         }
     }
 
@@ -1035,6 +1151,11 @@ impl Bench for Cam {
     }
 
     fn input(&mut self, input: &Input) -> bool {
+        if self.armed.is_some()
+            && let Some(taken) = self.pick_input(input)
+        {
+            return taken;
+        }
         match &input.event {
             Event::ToolActivated => {
                 match input.tool.as_deref().and_then(suffix) {
@@ -1170,8 +1291,19 @@ impl Bench for Cam {
             p.tick(run, &self.transport);
         }
         self.keep_session(open.as_deref());
+        // A slot is armed only while its feature is open.
+        if self
+            .armed
+            .as_ref()
+            .is_some_and(|a| self.editing.as_ref().is_none_or(|e| e.id != a.feature))
+        {
+            self.armed = None;
+        }
         let mut frame = Frame::default();
         draw::draw(self, &mut frame);
+        if let Some(armed) = &self.armed {
+            picking::draw(&mut frame, armed, [0.31, 0.64, 0.9]);
+        }
         if let Some(run) = &run {
             let exact = self
                 .session

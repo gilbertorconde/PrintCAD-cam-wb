@@ -66,7 +66,12 @@ passes = { stepdown = 3.0, stepover = 3.0 }
 fn a_native_solid_runs_and_posts() {
     let request = Request {
         version: VERSION,
-        job: JOB.into(),
+        // Kept round the part's silhouette, so it has a boundary to draw.
+        job: JOB.replace(
+            "passes = { stepdown = 3.0, stepover = 3.0 }",
+            "passes = { stepdown = 3.0, stepover = 3.0 }\n\
+             boundary = { kind = \"silhouette\", containment = \"outside\", margin = 6.0 }",
+        ),
         shapes: BTreeMap::from([(
             "part".to_string(),
             Shape {
@@ -99,6 +104,14 @@ fn a_native_solid_runs_and_posts() {
     assert!(program.text.contains("G21"), "millimetres");
     assert!(run.material.is_some());
     assert!(run.stock[1][2] > run.stock[0][2]);
+    // Its boundary, the part's silhouette, drawn with where the tool may go
+    // and what it cuts outside the part, at the stock's top.
+    let drawn = op.outlines.as_ref().expect("a 3D operation's outlines");
+    assert!(!drawn.boundary.is_empty() && !drawn.limit.is_empty());
+    assert!(!drawn.cut.is_empty());
+    let ring = &drawn.boundary[0];
+    assert_eq!(ring.first(), ring.last(), "a ring closes");
+    assert!((f64::from(ring[0][2]) - run.stock[1][2]).abs() < 1e-3);
 }
 
 #[test]

@@ -12,8 +12,8 @@ use std::collections::BTreeMap;
 
 use camcraft_core::job::{
     Along, Boundary, BoxOf, Containment, Depths, FeatureRef, FixedBox, Height, HeightRef, Heights,
-    Job, Leave, MachiningBoundary, ModelDef, Operation, Origin, Outline, Preset, Selection, Setup,
-    StockDef, StockSpec, StockToLeave, StrategySpec, ToolSpec,
+    Job, Leave, MachiningBoundary, ModelDef, Operation, Origin, Outline, PointRef, Preset,
+    Selection, Setup, Snap, StockDef, StockSpec, StockToLeave, StrategySpec, ToolSpec,
 };
 use camcraft_core::setup::frame::{Axis, Orientation};
 use printcad_bench_sdk::serde_json;
@@ -48,15 +48,28 @@ pub enum Zero {
     ModelTopCentre,
     /// The document's origin.
     Document,
+    /// A point picked on a body: a corner, or a round edge's centre.
+    Picked,
+}
+
+/// A work zero picked on a body, by its point in document coordinates: what
+/// camcraft finds it by again.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ZeroPoint {
+    pub body: String,
+    /// A corner, or a round edge's centre.
+    pub snap: Snap,
+    pub at: [f64; 3],
 }
 
 impl Zero {
-    pub const ALL: [Zero; 5] = [
+    pub const ALL: [Zero; 6] = [
         Zero::StockCorner,
         Zero::StockTopCentre,
         Zero::StockBottomCorner,
         Zero::ModelTopCentre,
         Zero::Document,
+        Zero::Picked,
     ];
 
     pub fn label(self) -> &'static str {
@@ -66,6 +79,7 @@ impl Zero {
             Zero::StockBottomCorner => "Stock bottom, front-left corner",
             Zero::ModelTopCentre => "Bodies' top, centre",
             Zero::Document => "Document origin",
+            Zero::Picked => "A point picked on the part",
         }
     }
 
@@ -83,6 +97,8 @@ impl Zero {
             Zero::StockBottomCorner => on(BoxOf::Stock, Along::Min, Along::Min, Along::Min),
             Zero::ModelTopCentre => on(BoxOf::Model, Along::Center, Along::Center, Along::Max),
             Zero::Document => Origin::ModelOrigin { offset },
+            // Until one is picked, where a new setup's is.
+            Zero::Picked => Zero::StockCorner.origin(offset),
         }
     }
 }
@@ -112,6 +128,9 @@ pub struct SetupData {
     pub x_axis: Axis,
     #[serde(default)]
     pub zero: Zero,
+    /// The point picked for [`Zero::Picked`].
+    #[serde(default)]
+    pub zero_point: Option<ZeroPoint>,
     /// The work zero moved along the setup's axes.
     pub offset_x: f64,
     pub offset_y: f64,
@@ -147,6 +166,7 @@ impl SetupData {
             z_axis: Axis::PosZ,
             x_axis: Axis::PosX,
             zero: Zero::StockCorner,
+            zero_point: None,
             offset_x: 0.0,
             offset_y: 0.0,
             offset_z: 0.0,
@@ -224,6 +244,9 @@ impl SetupData {
         if !positive(self.tolerance) {
             return Some("The tolerance must be more than 0.".into());
         }
+        if self.zero == Zero::Picked && self.zero_point.is_none() {
+            return Some("Pick the work zero on the part: a corner or a hole's centre.".into());
+        }
         if self.stock == StockKind::Fixed
             && ![self.size_x, self.size_y, self.size_z]
                 .into_iter()
@@ -247,6 +270,14 @@ impl SetupData {
 pub struct Pick {
     pub body: String,
     pub at: [f64; 3],
+    /// The face's name, for a face picked in the view: what a second click
+    /// on it takes it out by.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<u64>,
+    /// The names of the faces an edge runs between, for an edge picked in
+    /// the view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub faces: Option<[u64; 2]>,
 }
 
 /// An operation's heights, Fusion's Heights tab: each an offset in millimetres
@@ -725,9 +756,20 @@ pub fn job(
     camcraft.wcs = setup.wcs.round().clamp(1.0, 99.0) as u8;
     camcraft.post = setup.post.clone();
     camcraft.orientation = setup.orientation();
-    camcraft.origin = setup
-        .zero
-        .origin([setup.offset_x, setup.offset_y, setup.offset_z]);
+    let offset = [setup.offset_x, setup.offset_y, setup.offset_z];
+    camcraft.origin = match (&setup.zero, &setup.zero_point) {
+        (Zero::Picked, Some(z)) if let Some(model) = model_of(&z.body) => Origin::Point {
+            point: PointRef {
+                model,
+                snap: z.snap,
+                // Found again by its point, as a pick is.
+                index: u32::MAX,
+                at: z.at,
+            },
+            offset,
+        },
+        (zero, _) => zero.origin(offset),
+    };
     camcraft.operations = operations
         .iter()
         .map(|(name, data)| data.picked(name, model_of))
@@ -805,6 +847,8 @@ mod tests {
         op.faces.push(Pick {
             body: "b2".into(),
             at: [1.0, 2.0, 3.0],
+            name: None,
+            faces: None,
         });
         let models = models_of(&setup, |_| Some("Part".into()));
         assert_eq!(models[1].name, "Part (2)");
@@ -883,6 +927,8 @@ mod tests {
         op.faces.push(Pick {
             body: "b".into(),
             at: [0.0; 3],
+            name: None,
+            faces: None,
         });
         assert!(op.can_measure_from_picks());
         assert_eq!(op.problem(&tools), None);
@@ -891,7 +937,34 @@ mod tests {
         drill.edges.push(Pick {
             body: "b".into(),
             at: [0.0; 3],
+            name: None,
+            faces: None,
         });
         assert!(!drill.can_measure_from_picks());
+    }
+
+    #[test]
+    fn a_picked_zero_is_camcrafts_point() {
+        let mut setup = SetupData::new(vec!["b1".into()], "grbl", 0.05);
+        setup.zero = Zero::Picked;
+        assert!(setup.problem().unwrap().contains("Pick the work zero"));
+        setup.zero_point = Some(ZeroPoint {
+            body: "b1".into(),
+            snap: Snap::Vertex,
+            at: [0.0, 0.0, 15.0],
+        });
+        assert_eq!(setup.problem(), None);
+        let models = models_of(&setup, |_| Some("Part".into()));
+        let job = job("S", &setup, &models, &[]);
+        let Origin::Point { point, .. } = &job.setups[0].origin else {
+            panic!("{:?}", job.setups[0].origin);
+        };
+        assert_eq!(
+            (point.model.as_str(), point.snap, point.at),
+            ("Part", Snap::Vertex, [0.0, 0.0, 15.0])
+        );
+        let text = camcraft_session::job_text(&job).unwrap();
+        assert_eq!(camcraft_session::parse_job(&text, "t").unwrap(), job);
+        assert_eq!(SetupData::from(&setup.to_value()).unwrap(), setup);
     }
 }
