@@ -20,6 +20,7 @@
 
 mod data;
 mod draw;
+mod hints;
 mod linking;
 mod panel;
 mod passes;
@@ -310,6 +311,53 @@ impl Cam {
             Kind::Setup => Some(e.id.clone()),
             Kind::Operation => operation_node(&e.id)?.1.setup,
         }
+    }
+
+    /// An operation dropped in the tree just before or after `target`, as
+    /// camcraft's app drops one: in its setup or another, at that place,
+    /// the setups it left and joined run again. Whether it was one this
+    /// takes: a setup's place is the host's to change.
+    fn move_operation(&mut self, feature: &str, target: &str, before: bool) -> bool {
+        let Some((_, mut op)) = operation_node(feature) else {
+            return false;
+        };
+        // Into the target's setup: the target, or the setup it is in.
+        let joins = match operation_node(target) {
+            Some((_, t)) => t.setup,
+            None => setup_node(target).map(|(n, _)| n.id),
+        };
+        let Some(joins) = joins else {
+            return false;
+        };
+        // After the feature before the target, or after the target; first
+        // of all when nothing comes before it.
+        // Counted without the one moved, which leaves its place.
+        let mut order = host::features();
+        order.retain(|n| n.id != feature);
+        let at = order.iter().position(|n| n.id == target);
+        let after = match (at, before) {
+            (Some(i), true) => i.checked_sub(1).and_then(|j| order.get(j)),
+            (Some(i), false) => order.get(i),
+            (None, _) => return false,
+        }
+        .map(|n| n.id.clone());
+        let mut args = json!({ "id": feature });
+        if let Some(after) = &after {
+            args["after"] = json!(after);
+        }
+        if let Err(e) = host::call(calls::MOVE_FEATURE, args) {
+            host::warn(&format!("Not moved: {e}"));
+            return true;
+        }
+        let left = op.setup.replace(joins.clone());
+        if left.as_deref() != Some(joins.as_str()) {
+            let _ = host::set_feature_data(feature, op.to_value());
+        }
+        if let Some(left) = left.filter(|l| *l != joins) {
+            self.refresh(&left, false);
+        }
+        self.refresh(&joins, false);
+        true
     }
 
     /// Arm `slot` for `feature`, or disarm it if it is armed already.
@@ -1208,6 +1256,11 @@ impl Bench for Cam {
                 }
                 true
             }
+            Event::FeatureMoved {
+                feature,
+                target,
+                before,
+            } => self.move_operation(feature, target, *before),
             Event::FileOpened { id, files } => {
                 let opened = tools::files_opened(
                     id,

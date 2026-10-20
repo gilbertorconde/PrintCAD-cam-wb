@@ -37,7 +37,8 @@ panels, the drawing and the helper that runs camcraft.
   scallop, contour, flat, spiral, radial and morphed spiral finishing; 2D
   profiles and pockets; facing; drilling. An operation
   (`io.github.gilbertorconde.cam.operation`) belongs to a setup and runs in the
-  document's order, each against what the one before left.
+  document's order, each against what the one before left. Drag one in the
+  tree to run it sooner or later, or under another setup.
 - **Picking in the view,** as camcraft's: a pick row in the panel arms it,
   and while it is armed, hovering shows what a click takes. An operation
   takes faces, and edges by the loop they go round at their height (an edge
@@ -58,6 +59,8 @@ panels, the drawing and the helper that runs camcraft.
   stock to leave, each strategy's own settings (slopes, order, centre and
   radii, spokes, pass extension, peck and dwell, flat areas), the deepest step,
   tabs to hold a profiled part, and finishing passes along a pocket's walls.
+  Hovering the stepover, stepdown, stock to leave or a height shows a sketch
+  of what it measures, as camcraft's hints do.
 - **Tools.** Preferences › CAM holds the tool library, which starts as
   camcraft's twenty common router bits, each with presets for the materials
   it suits. The chosen tool's kind, dimensions and presets can be edited,
