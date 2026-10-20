@@ -212,6 +212,31 @@ pub struct OperationRun {
     /// Where its checks found something, in order.
     #[serde(default)]
     pub marks: Vec<Mark>,
+    /// What it machines, to draw while it is edited, as camcraft's app
+    /// draws it: none for an operation that keeps to no boundary.
+    #[serde(default)]
+    pub outlines: Option<Outlines>,
+}
+
+/// An operation's boundary as drawn over the stock, in the model's
+/// coordinates: each ring closed, its last point back to its first.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Outlines {
+    /// The boundary as chosen: a 3D operation's machining boundary, a 2D
+    /// operation's outline.
+    pub boundary: Vec<Vec<[f32; 3]>>,
+    /// Where the tool's centre may go against it (3D).
+    pub limit: Vec<Vec<[f32; 3]>>,
+    /// What the tool cuts outside the part, or beside the outline, each
+    /// piece an outer ring with its holes: drawn hatched.
+    pub cut: Vec<CutPiece>,
+}
+
+/// A piece of what a tool cuts: an outer ring and the holes inside it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CutPiece {
+    pub outline: Vec<[f32; 3]>,
+    pub holes: Vec<Vec<[f32; 3]>>,
 }
 
 /// One of an operation's heights: clearance, retract, top or bottom.

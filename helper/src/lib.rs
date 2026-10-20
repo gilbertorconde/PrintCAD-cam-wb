@@ -234,6 +234,23 @@ pub(crate) fn execute(
             heights,
             seconds: drawn.times.last().copied().unwrap_or(0.0),
             marks: marks(&ran, k, op, &drawn, elapsed),
+            outlines: setup.operations.get(k).and_then(|spec| {
+                let uses = spec.strategy.uses();
+                if !(uses.boundary || uses.outline) {
+                    return None;
+                }
+                let laid = prepared
+                    .get_or_insert_with(|| prepare(&job, 0, &bodies).ok())
+                    .as_ref()?;
+                outlines::Ground {
+                    job: &job,
+                    prepared: laid,
+                    bodies: &bodies,
+                    frame: &frame,
+                    top: ran.result.heights.stock_top,
+                }
+                .outlines(spec)
+            }),
         });
         elapsed += drawn.times.last().copied().unwrap_or(0.0);
         draws.push(drawn);
@@ -585,6 +602,7 @@ fn material(ran: &Ran) -> Option<Material> {
 }
 
 pub mod cache;
+mod outlines;
 mod playback;
 pub mod session;
 #[cfg(test)]
