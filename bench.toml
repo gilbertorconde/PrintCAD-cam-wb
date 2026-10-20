@@ -7,6 +7,8 @@ feature_kinds = ["io.github.gilbertorconde.cam.setup", "io.github.gilbertorconde
 
 [capabilities]
 save_dialog = true
+# Fusion tool libraries and machine profiles to import.
+open_dialog = true
 # The machining runs in camcraft-helper, a native program the package ships
 # for each system, on every core.
 helper = true
