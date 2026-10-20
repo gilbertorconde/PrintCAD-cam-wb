@@ -25,6 +25,7 @@ mod panel;
 mod passes;
 mod playback;
 mod runs;
+mod session;
 mod tools;
 
 use std::collections::BTreeMap;
@@ -145,6 +146,8 @@ struct Cam {
     transport: playback::Transport,
     /// Whether Shift is held, for the transport's keys.
     shift: bool,
+    /// The played-back setup's run, kept in a helper at full resolution.
+    session: Option<session::Session>,
     /// The settings page's chosen preset of the chosen tool, and chosen post.
     chosen_preset: Option<usize>,
     chosen_post: Option<usize>,
@@ -303,6 +306,55 @@ impl Cam {
         match e.kind {
             Kind::Setup => Some(e.id.clone()),
             Kind::Operation => operation_node(&e.id)?.1.setup,
+        }
+    }
+
+    /// Keep a session playing back `setup`'s current run while it plays
+    /// back, and let it answer; none otherwise.
+    fn keep_session(&mut self, setup: Option<&str>) {
+        let wanted = setup.filter(|_| self.playing.is_some()).and_then(|setup| {
+            let c = self.runs.get(setup)?;
+            matches!(c.state, State::Ready(_)).then_some((setup.to_string(), c.key))
+        });
+        let Some((setup, key)) = wanted else {
+            self.session = None;
+            return;
+        };
+        let current = self
+            .session
+            .as_ref()
+            .is_some_and(|s| s.setup == setup && s.key == key);
+        if !current {
+            self.session = None;
+            let request = setup_node(&setup)
+                .ok_or_else(|| "the setup is gone".to_string())
+                .and_then(|(node, data)| request_for(&node, &data));
+            match request.and_then(|r| session::Session::open(&setup, key, &r)) {
+                Ok(s) => self.session = Some(s),
+                Err(e) => host::warn(&format!("Playback stays coarse: {e}")),
+            }
+        }
+        if let (Some(s), Some(p)) = (&mut self.session, &self.playing) {
+            s.pump(p.at);
+        }
+    }
+
+    /// Where the transport steps for `setup`'s `run`: every move once the
+    /// session knows them, else the run's moments.
+    fn steps(&self, setup: &str, run: &cam_protocol::Run) -> Vec<f64> {
+        let times = self
+            .session
+            .as_ref()
+            .filter(|s| s.setup == setup)
+            .and_then(|s| s.times());
+        playback::steps(run, times)
+    }
+
+    /// How many steps Shift and an arrow take.
+    fn big_step(&self) -> usize {
+        match self.session.as_ref().and_then(|s| s.times()) {
+            Some(_) => playback::BIG_STEP_MOVES,
+            None => playback::BIG_STEP_MOMENTS,
         }
     }
 
@@ -1068,7 +1120,7 @@ impl Bench for Cam {
                 false
             }
             Event::Key { key, down: true }
-                if let Some(command) = playback::key_command(key, self.shift)
+                if let Some(command) = playback::key_command(key, self.shift, self.big_step())
                     && let Some(setup) = self.played_setup() =>
             {
                 let Some(run) = self.runs.get(&setup).and_then(|c| c.shown()).cloned() else {
@@ -1077,12 +1129,14 @@ impl Bench for Cam {
                 if run.playback.is_none() {
                     return false;
                 }
+                let steps = self.steps(&setup, &run);
                 playback::apply(
                     &mut self.playing,
                     &mut self.transport,
                     &setup,
                     &run,
                     command,
+                    &steps,
                 );
                 true
             }
@@ -1115,12 +1169,23 @@ impl Bench for Cam {
         if let (Some(p), Some(run)) = (&mut self.playing, &run) {
             p.tick(run, &self.transport);
         }
+        self.keep_session(open.as_deref());
         let mut frame = Frame::default();
         draw::draw(self, &mut frame);
         if let Some(run) = &run {
+            let exact = self
+                .session
+                .as_ref()
+                .and_then(|s| s.at.as_ref())
+                .map(|a| (a.op, a.moves, a.of));
             frame.transport =
-                playback::transport_widgets(run, self.playing.as_ref(), &self.transport);
-            frame.animating = self.playing.as_ref().is_some_and(|p| p.running.is_some());
+                playback::transport_widgets(run, self.playing.as_ref(), &self.transport, exact);
+            // Playing, or waiting on the session's answer to a seek.
+            let waiting = self
+                .session
+                .as_ref()
+                .is_some_and(|s| s.failed.is_none() && self.playing.is_some());
+            frame.animating = self.playing.as_ref().is_some_and(|p| p.running.is_some()) || waiting;
         }
         let Some(editing) = self.editing.clone() else {
             return frame;
@@ -1166,12 +1231,14 @@ impl Bench for Cam {
             if let Some(setup) = self.played_setup()
                 && let Some(run) = self.runs.get(&setup).and_then(|c| c.shown()).cloned()
             {
+                let steps = self.steps(&setup, &run);
                 playback::transport_event(
                     &mut self.playing,
                     &mut self.transport,
                     &setup,
                     &run,
                     &event,
+                    &steps,
                 );
             }
             return;

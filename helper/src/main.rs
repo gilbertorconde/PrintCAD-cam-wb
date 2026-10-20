@@ -5,14 +5,29 @@
 //! error, for a host that reads them. A run it has answered before, asked as
 //! it was, comes from its cache ([`camcraft_helper::cache`]).
 
-use std::io::{Read, Write};
+use std::io::{BufRead, Read, Write};
 
-use cam_protocol::{Request, Response};
-use camcraft_helper::{answer_reporting, cache, read};
+use cam_protocol::{Request, Response, SessionIn};
+use camcraft_helper::{answer_reporting, cache, read, session};
 
 fn main() -> std::process::ExitCode {
+    // A session's first line opens it; a request is the whole of the input.
+    let mut input = std::io::stdin().lock();
     let mut text = String::new();
-    if let Err(e) = std::io::stdin().read_to_string(&mut text) {
+    if let Err(e) = input.read_line(&mut text) {
+        eprintln!("cannot read the request: {e}");
+        return std::process::ExitCode::FAILURE;
+    }
+    if let Ok(first) = serde_json::from_str::<SessionIn>(text.trim_end()) {
+        return match session::serve(first, input, std::io::stdout().lock()) {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("the session ended: {e}");
+                std::process::ExitCode::FAILURE
+            }
+        };
+    }
+    if let Err(e) = input.read_to_string(&mut text) {
         eprintln!("cannot read the request: {e}");
         return std::process::ExitCode::FAILURE;
     }

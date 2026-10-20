@@ -30,8 +30,10 @@ const FIRST_SPEED: f64 = 10.0;
 /// jumping.
 const LONGEST_FRAME: f64 = 1.0 / 15.0;
 
-/// How many moments Shift+Left and Shift+Right step.
-const BIG_STEP: usize = 10;
+/// How many steps Shift+Left and Shift+Right take: moves, as camcraft's
+/// app steps, or moments while only the run's coarse moments are known.
+pub const BIG_STEP_MOVES: usize = 100;
+pub const BIG_STEP_MOMENTS: usize = 10;
 
 /// The timeline's drawing size, in its own units.
 const WIDTH: f32 = 1000.0;
@@ -250,15 +252,17 @@ pub fn apply(
     setup: &str,
     run: &Run,
     command: Command,
+    steps: &[f64],
 ) {
-    let Some(play) = run.playback.as_ref() else {
+    if run.playback.is_none() {
         return;
-    };
+    }
     let line = Timeline::of(run);
     let p = playing.get_or_insert_with(|| Playing::at_end(setup, run));
     let total = line.total;
-    let here = moment_index(play, p.at);
-    let moment_time = |i: usize| play.moments.get(i).map_or(total, |m| m.seconds);
+    // The step shown: the last at or before the playhead.
+    let here = steps.iter().rposition(|s| *s <= p.at + 1e-9).unwrap_or(0);
+    let moment_time = |i: usize| steps.get(i).copied().unwrap_or(total);
     match command {
         Command::Start => p.stand(0.0, total),
         Command::End => p.stand(total, total),
@@ -288,7 +292,7 @@ pub fn apply(
             p.stand(to, total);
         }
         Command::StepOn(n) => {
-            let last = play.moments.len().saturating_sub(1);
+            let last = steps.len().saturating_sub(1);
             p.stand(moment_time((here + n).min(last)), total);
         }
         Command::PlayBack => match p.running {
@@ -310,7 +314,12 @@ pub fn apply(
 }
 
 /// The transport under the view for `run`'s playback.
-pub fn transport_widgets(run: &Run, playing: Option<&Playing>, t: &Transport) -> Vec<Widget> {
+pub fn transport_widgets(
+    run: &Run,
+    playing: Option<&Playing>,
+    t: &Transport,
+    exact: Option<(usize, usize, usize)>,
+) -> Vec<Widget> {
     let Some(play) = run.playback.as_ref() else {
         return Vec::new();
     };
@@ -417,11 +426,16 @@ pub fn transport_widgets(run: &Run, playing: Option<&Playing>, t: &Transport) ->
             on: t.stop_at_ops,
         },
     ];
-    if let Some(m) = play.moments.get(moment_index(play, at)) {
-        let name = run.operations.get(m.op).map_or("", |o| o.name.as_str());
+    let under_way = exact.or_else(|| {
+        play.moments
+            .get(moment_index(play, at))
+            .map(|m| (m.op, m.moves, m.of))
+    });
+    if let Some((op, moves, of)) = under_way {
+        let name = run.operations.get(op).map_or("", |o| o.name.as_str());
         out.push(Widget::Value {
             label: String::new(),
-            value: format!("{name}, move {} of {}", m.moves, m.of),
+            value: format!("{name}, move {moves} of {of}"),
             mono: false,
         });
     }
@@ -437,6 +451,25 @@ pub fn transport_widgets(run: &Run, playing: Option<&Playing>, t: &Transport) ->
     out
 }
 
+/// The places the transport steps between: every move's end where the
+/// moves are known (`times`, from a playback session), else the run's
+/// moments.
+pub fn steps(run: &Run, times: Option<&[Vec<f32>]>) -> Vec<f64> {
+    let mut out: Vec<f64> = match times {
+        Some(times) => std::iter::once(0.0)
+            .chain(times.iter().flatten().map(|t| f64::from(*t)))
+            .collect(),
+        None => run
+            .playback
+            .iter()
+            .flat_map(|p| p.moments.iter().map(|m| m.seconds))
+            .collect(),
+    };
+    out.sort_by(f64::total_cmp);
+    out.dedup();
+    out
+}
+
 /// What a transport widget did. Whether it was one.
 pub fn transport_event(
     playing: &mut Option<Playing>,
@@ -444,6 +477,7 @@ pub fn transport_event(
     setup: &str,
     run: &Run,
     event: &PanelEvent,
+    steps: &[f64],
 ) -> bool {
     let command = match event {
         PanelEvent::Button { id } => match id.as_str() {
@@ -474,7 +508,7 @@ pub fn transport_event(
         }
         _ => return false,
     };
-    apply(playing, transport, setup, run, command);
+    apply(playing, transport, setup, run, command, steps);
     true
 }
 
@@ -483,8 +517,8 @@ pub fn transport_event(
 /// Right step (with Shift held, ten moments); Up and Down go to the
 /// operation before and after; Home and End; Minus and Equals change the
 /// speed.
-pub fn key_command(key: &str, shift: bool) -> Option<Command> {
-    let step = if shift { BIG_STEP } else { 1 };
+pub fn key_command(key: &str, shift: bool, big: usize) -> Option<Command> {
+    let step = if shift { big } else { 1 };
     Some(match key {
         "Space" => Command::PlayPause,
         "J" => Command::Shuttle(true),
@@ -528,7 +562,11 @@ pub fn material_at(play: &Playback, m: &Moment) -> Mesh {
 
 /// The tool at `m`: its tip, and its shank up the tool's axis.
 pub fn tool_at(frame: &mut Frame, play: &Playback, m: &Moment, color: Rgb) {
-    let tip = m.tool;
+    tool_tip(frame, play, m.tool, color);
+}
+
+/// The tool with its tip at `tip`, and its shank up the tool's axis.
+pub fn tool_tip(frame: &mut Frame, play: &Playback, tip: [f32; 3], color: Rgb) {
     let top = [
         tip[0] + play.axis[0] * 25.0,
         tip[1] + play.axis[1] * 25.0,
@@ -599,7 +637,8 @@ mod tests {
         let run = run();
         let (mut p, mut t) = (None, Transport::default());
         let mut go = |c| {
-            apply(&mut p, &mut t, "s", &run, c);
+            let steps = steps(&run, None);
+            apply(&mut p, &mut t, "s", &run, c, &steps);
             p.as_ref().unwrap().at
         };
         assert_eq!(go(Command::End), 40.0);
@@ -641,12 +680,12 @@ mod tests {
 
     #[test]
     fn camcrafts_keys_and_speeds() {
-        assert_eq!(key_command("Space", false), Some(Command::PlayPause));
+        assert_eq!(key_command("Space", false, 100), Some(Command::PlayPause));
         assert_eq!(
-            key_command("ArrowLeft", true),
-            Some(Command::StepBack(BIG_STEP))
+            key_command("ArrowLeft", true, 100),
+            Some(Command::StepBack(100))
         );
-        assert_eq!(key_command("Q", false), None);
+        assert_eq!(key_command("Q", false, 100), None);
         assert_eq!(faster(10_000.0, true), 10_000.0);
         assert_eq!(faster(0.25, false), 0.25);
         assert_eq!(speed_label(0.25), "¼×");
