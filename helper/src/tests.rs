@@ -311,6 +311,22 @@ fn a_run_plays_back_as_it_cut() {
     }
     let end = last.unwrap();
     assert_eq!((end.op, end.moves), (1, end.of));
+    // The clock runs on with the moves, and ends with the operations' time.
+    assert!(
+        play.moments
+            .windows(2)
+            .all(|w| w[0].seconds <= w[1].seconds)
+    );
+    let total: f64 = run.operations.iter().map(|o| o.seconds).sum();
+    assert!(run.operations.iter().all(|o| o.seconds > 0.0));
+    assert!(
+        (end.seconds - total).abs() < 1e-6,
+        "{} of {total}",
+        end.seconds
+    );
+    for o in &run.operations {
+        assert!(o.marks.windows(2).all(|w| w[0].moves < w[1].moves));
+    }
     let first = &play.moments[0];
     assert!(
         first.heights.iter().zip(&end.heights).any(|(a, b)| b < a),

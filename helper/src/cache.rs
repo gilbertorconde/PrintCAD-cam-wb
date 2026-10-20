@@ -39,14 +39,37 @@ fn user_cache() -> Option<PathBuf> {
     }
 }
 
-/// The name a request is kept under: a digest of its text and of this
-/// helper's version, so a new helper never answers with an old one's run.
+/// The name a request is kept under: a digest of its text and of which
+/// helper answers it, so a helper built again never answers with an old
+/// build's run, whose answer may lack what the package now reads.
 pub fn key(request: &str) -> String {
+    key_for(request, &build())
+}
+
+/// Which helper this is: its version, and its own file's size and time,
+/// which change with every build.
+fn build() -> String {
+    let file = std::env::current_exe()
+        .ok()
+        .and_then(|p| fs::metadata(p).ok())
+        .map(|m| {
+            let at = m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_nanos());
+            format!("{}:{at}", m.len())
+        })
+        .unwrap_or_default();
+    format!("{}:{file}", env!("CARGO_PKG_VERSION"))
+}
+
+fn key_for(request: &str, build: &str) -> String {
     // FNV-1a, 64 bits, twice over different seeds: no dependency, stable
-    // across builds and systems, and wide enough for a few dozen runs.
+    // across systems, and wide enough for a few dozen runs.
     let fnv = |seed: u64| {
         let mut h = seed;
-        for b in env!("CARGO_PKG_VERSION").bytes().chain(request.bytes()) {
+        for b in build.bytes().chain([0]).chain(request.bytes()) {
             h ^= u64::from(b);
             h = h.wrapping_mul(0x0100_0000_01b3);
         }
@@ -118,6 +141,8 @@ mod tests {
         let _ = fs::remove_dir_all(&folder);
         let (a, b) = (key("{\"job\":\"a\"}"), key("{\"job\":\"b\"}"));
         assert_ne!(a, b);
+        // Another build of the helper asks again.
+        assert_ne!(key_for("x", "0.2.0:1:2"), key_for("x", "0.2.0:1:3"));
         assert_eq!(a, key("{\"job\":\"a\"}"));
         assert_eq!(get(&folder, &a), None);
         put(&folder, &a, b"ran a");

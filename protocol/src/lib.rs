@@ -131,6 +131,9 @@ pub struct Moment {
     pub tool: [f32; 3],
     /// How many of the operation's drawn points it has gone through.
     pub drawn: usize,
+    /// When, in machining seconds from the setup's start.
+    #[serde(default)]
+    pub seconds: f64,
     /// The material's height at each point of the grid.
     pub heights: Vec<u16>,
 }
@@ -160,6 +163,22 @@ pub struct Finding {
     pub text: String,
     /// The operation it is about, by its place in the setup.
     pub operation: Option<usize>,
+    /// How many of that operation's moves had been made when it happened,
+    /// for one found at a move.
+    #[serde(default)]
+    pub at_move: Option<usize>,
+}
+
+/// A place on an operation's timeline worth marking: a failed check, or a
+/// warning or a steep descent.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Mark {
+    /// How many of the operation's moves had been made.
+    pub moves: usize,
+    /// When, in machining seconds from the setup's start.
+    pub seconds: f64,
+    /// A failure; a warning otherwise.
+    pub fail: bool,
 }
 
 /// One operation, run.
@@ -186,6 +205,13 @@ pub struct OperationRun {
     /// Its heights as camcraft resolved them, each a plane across the stock.
     #[serde(default)]
     pub heights: Vec<HeightPlane>,
+    /// How long it machines, in seconds: its moves at their feeds, rapids at
+    /// an assumed 5000 mm/min.
+    #[serde(default)]
+    pub seconds: f64,
+    /// Where its checks found something, in order.
+    #[serde(default)]
+    pub marks: Vec<Mark>,
 }
 
 /// One of an operation's heights: clearance, retract, top or bottom.
