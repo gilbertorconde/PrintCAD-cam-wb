@@ -22,6 +22,8 @@ pub(super) struct Clearing<'a> {
     /// where the tool is.
     pub(super) trail: Vec<DVec2>,
     pub(super) trail_length: f64,
+    /// Area of material taken out since a pass last asked.
+    pub(super) taken: f64,
     /// Room for the trail and the step being tried, kept from step to step.
     pub(super) trying: Vec<DVec2>,
     pub(super) window: Option<Window>,
@@ -96,6 +98,7 @@ impl<'a> Clearing<'a> {
             uncut: uncut?,
             trail: Vec::new(),
             trail_length: 0.0,
+            taken: 0.0,
             trying: Vec::new(),
             window: None,
             passes: Vec::new(),
@@ -448,7 +451,9 @@ impl<'a> Clearing<'a> {
             let lines = vec![std::mem::take(&mut self.trail)];
             let swept = Region::around_polylines(&lines, self.p.radius, self.p.swept_arc);
             if let Some(w) = &mut self.window {
+                let before = w.uncut.area();
                 w.uncut = w.uncut.difference(&swept)?;
+                self.taken += (before - w.uncut.area()).max(0.0);
             }
             self.uncut.subtract(&swept)?;
             self.trail = last.into_iter().collect();
@@ -492,6 +497,7 @@ impl<'a> Clearing<'a> {
         entered: bool,
     ) -> Result<Vec<DVec2>, StrategyError> {
         self.flush()?;
+        self.taken = 0.0;
         self.trail = vec![start];
         self.trail_length = 0.0;
         let mut points = vec![start];
@@ -500,6 +506,12 @@ impl<'a> Clearing<'a> {
         let mut step = self.p.shortest;
         let mut air = 0.0;
         let mut last_cut = 0;
+        // How far it has gone since material last came away, and where that
+        // was: a pass can circle a speck it touches and never takes, which the
+        // engagement alone never ends.
+        let mut idle = 0.0;
+        let mut last_took = 0;
+        let mut idle_from = start;
         let mut lenient = if entered { 2.0 * self.p.radius } else { 0.0 };
         while self.steps < MAX_STEPS {
             self.steps += 1;
@@ -525,6 +537,7 @@ impl<'a> Clearing<'a> {
             points.push(at);
             self.trail.push(at);
             self.trail_length += step;
+            idle += step;
             lenient -= step;
             if chosen.engagement < self.p.air {
                 air += step;
@@ -545,6 +558,17 @@ impl<'a> Clearing<'a> {
             };
             if self.trail_length > self.p.radius || self.trail.len() > 48 {
                 self.flush()?;
+                // Less than a sliver's width along the way is nothing taken.
+                if std::mem::take(&mut self.taken) > self.p.sliver * idle {
+                    idle = 0.0;
+                    last_took = points.len() - 1;
+                    idle_from = at;
+                } else if idle > self.p.radius && at.distance(idle_from) < 0.25 * idle {
+                    // Round and round, not along: one shaving a wall thinly
+                    // goes on to what it reaches.
+                    last_cut = last_cut.min(last_took);
+                    break;
+                }
             }
         }
         self.flush()?;

@@ -23,6 +23,14 @@ Only `camcraft-import`:
   and `step::weld_faces` are what `step` did inline, split out so both use
   them.
 
+And one fix, in `camcraft-core`'s adaptive clearing
+(`strategy/adaptive/clearing.rs`): a pass that circles a speck it touches
+every lap but never takes used to go round until the level's steps ran out;
+now a pass that goes a tool's radius taking less than a sliver, and ends up
+close to where it last took some, ends there. The test
+`a_pass_that_takes_nothing_ends` replays one such pass from
+`strategy/adaptive/circling.txt`.
+
 And one test: ogeom is 0.11.1 here, which printCAD's shapes need, and it
 meshes `round_edge_loose_fit.step`'s seam that 0.11.0 drew off the torus, so
 `a_loose_fit_is_refused_for_ogeoms_seam` became
