@@ -341,3 +341,51 @@ fn a_flat_face_between_levels_gets_a_level_of_its_own() {
         .count();
     assert!(over > 0, "{report:?}");
 }
+
+/// Where `circling.txt` was taken: a pass on a fillet's flat level whose
+/// every lap touched a speck of material, a little over what counts as air,
+/// that the sweep never took. It went round a half-millimetre octagon until
+/// the steps ran out, some twenty million of them.
+#[test]
+fn a_pass_that_takes_nothing_ends() {
+    fn point(s: &str) -> DVec2 {
+        let (x, y) = s.split_once(',').unwrap();
+        dvec2(x.parse().unwrap(), y.parse().unwrap())
+    }
+    fn region(lines: &[&str]) -> Region {
+        let rings = lines
+            .iter()
+            .filter_map(|l| Contour::new(l.split(' ').map(point).collect()))
+            .collect();
+        Region::new(rings)
+    }
+    let text = include_str!("circling.txt");
+    let lines: Vec<&str> = text.lines().collect();
+    let words: Vec<&str> = lines[0].split(' ').collect();
+    let (start, dir) = (point(words[1]), point(words[3]));
+    let split = lines.iter().position(|l| *l == "uncut").unwrap();
+    let allowed = region(&lines[2..split]);
+    let uncut = region(&lines[split + 1..]);
+    let level = LevelParams {
+        radius: 3.175,
+        target: 0.6435011087932843,
+        within: 0.019305033263798527,
+        limit: 0.9272952180016123,
+        air: 0.012870022175865685,
+        longest: 0.635,
+        shortest: 0.0635,
+        sliver: 0.05,
+        arc: 0.005,
+        swept_arc: 0.025,
+        coarse: 0.025,
+        side: Side::Right,
+        both_ways: false,
+        helix_radius: 3.01625,
+        stay_down: 31.75,
+    };
+    let mut c = Clearing::new(&allowed, &uncut, &level).unwrap();
+    let points = c.pass(start, dir, Side::Right, false).unwrap();
+    // A lap of the octagon is eight steps; a tool's radius of them is ample.
+    assert!(c.steps < 1_000, "{} steps", c.steps);
+    assert!(points.len() < 100, "{} points", points.len());
+}
