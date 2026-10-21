@@ -6,6 +6,8 @@ operations, and each setup's toolpaths are worked out, simulated against the
 material, checked, and saved as G-code. The machining is
 [camcraft](https://github.com/dan335/camcraft)'s, run natively on every core.
 
+![Adaptive clearing played back in printCAD: the material cut so far, the toolpath, and the operation's heights](docs/screenshots/playback.png)
+
 > [!WARNING]
 > **Use at your own risk.** camcraft is pre-alpha and has not been proven on a
 > real machine. Its G-code can be wrong in ways that crash the machine, break
@@ -51,6 +53,9 @@ panels, the drawing and the helper that runs camcraft.
   and bottom it cuts between, each measured from the stock, the part, the work
   zero or the picked faces and edges. The view shows them as planes across the
   stock while the operation is edited.
+
+  ![An adaptive clearing open for editing: its toolpath, its heights as planes, and its settings](docs/screenshots/operation.png)
+
 - **Linking**, as Fusion's Linking tab: retract feed, retraction, safe and
   stay-down distances, ramps, the entry (helix, plunge or ramp), leads on and
   off each ring, and reordering. A value left unset is the strategy's own, and
@@ -61,6 +66,8 @@ panels, the drawing and the helper that runs camcraft.
   tabs to hold a profiled part, and finishing passes along a pocket's walls.
   Hovering the stepover, stepdown, stock to leave or a height shows a sketch
   of what it measures, as camcraft's hints do.
+
+  ![The stepover's hint: two passes side by side, the stepover between their centres](docs/screenshots/hint.png)
 - **Tools.** Preferences › CAM holds the tool library, which starts as
   camcraft's twenty common router bits, each with presets for the materials
   it suits. The chosen tool's kind, dimensions and presets can be edited,
@@ -87,6 +94,9 @@ panels, the drawing and the helper that runs camcraft.
   Once playing, the material is swept again at full resolution by the helper
   kept running for it (up to 600 points a side), and steps go a move at a
   time; until then, and where it cannot, the run's coarse moments play.
+
+  ![3D finishing half way: the passes still to run, over the material roughing left](docs/screenshots/finishing.png)
+
 - **Drawn over the model.** The stock's box, the work zero, each operation's
   toolpath (rapids dashed while it is edited), and the material left.
 - **G-code through the save dialog,** one program per operation, or every
