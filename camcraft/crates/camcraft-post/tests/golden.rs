@@ -25,12 +25,13 @@
 
 mod common;
 
+use camcraft_core::job::ThreadHand;
 use camcraft_core::path::toolpath::Toolpath;
 use camcraft_post::op::{ProgramSpec, lower};
 use camcraft_post::profile::Profile;
 use camcraft_post::readback;
 use camcraft_post::render::render;
-use common::{drilling, fixture, spec};
+use common::{chip_breaking, drilling, fixture, spec, tapping};
 
 fn check(profile_name: &str) {
     let profile = Profile::builtin(profile_name)
@@ -147,6 +148,19 @@ fn drilling_cycles_are_stable() {
         &Toolpath::new(),
         &drilling(None, Some(0.5)),
         "masso-dwell",
+    );
+    check_against(&p, &Toolpath::new(), &chip_breaking(), "masso-chip-break");
+    check_against(
+        &p,
+        &Toolpath::new(),
+        &tapping(ThreadHand::Right),
+        "masso-tap",
+    );
+    check_against(
+        &p,
+        &Toolpath::new(),
+        &tapping(ThreadHand::Left),
+        "masso-tap-left",
     );
 }
 

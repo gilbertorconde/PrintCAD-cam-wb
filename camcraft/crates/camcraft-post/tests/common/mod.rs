@@ -3,10 +3,10 @@
 
 #![allow(dead_code, clippy::unwrap_used)]
 
-use camcraft_core::job::{Coolant, SpindleDirection};
+use camcraft_core::job::{Coolant, SpindleDirection, ThreadHand};
 use camcraft_core::path::toolpath::Arc;
 use camcraft_core::path::toolpath::{MoveRole, Toolpath};
-use camcraft_core::strategy::drilling::Hole;
+use camcraft_core::strategy::drilling::{Hole, Tap};
 use camcraft_post::op::{DrillCycles, ProgramSpec};
 use camcraft_post::profile::ProgramUnits;
 use glam::{DVec3, dvec2, dvec3};
@@ -80,6 +80,7 @@ pub fn spec() -> ProgramSpec {
         coolant: Coolant::Flood,
         units: ProgramUnits::Mm,
         drill: None,
+        taps: false,
     }
 }
 
@@ -102,10 +103,41 @@ pub fn drilling(peck: Option<f64>, dwell: Option<f64>) -> ProgramSpec {
         drill: Some(DrillCycles {
             holes: vec![hole(10.0, 10.0), hole(30.0, 10.0), hole(-12.345, 40.0)],
             peck,
+            chip_break: None,
             dwell,
+            tap: None,
             feed: 250.0,
             clearance: 20.0,
         }),
         ..spec()
     }
+}
+
+/// The three holes drilled in pecks of 2 mm, backing off 0.3 mm between to
+/// break the chip.
+pub fn chip_breaking() -> ProgramSpec {
+    let mut spec = drilling(Some(2.0), None);
+    if let Some(d) = &mut spec.drill {
+        d.chip_break = Some(0.3);
+    }
+    spec
+}
+
+/// The three holes tapped M8 × 1.25 at 500 rev/min, so fed at 625 mm/min, the
+/// spindle turning the thread's way.
+pub fn tapping(hand: ThreadHand) -> ProgramSpec {
+    let tap = Tap { pitch: 1.25, hand };
+    let mut spec = ProgramSpec {
+        op_name: "threads".into(),
+        tool_comment: "M8 tap".into(),
+        rpm: 500,
+        spin: hand.spindle(),
+        taps: true,
+        ..drilling(None, None)
+    };
+    if let Some(d) = &mut spec.drill {
+        d.tap = Some(tap);
+        d.feed = tap.feed(500.0);
+    }
+    spec
 }

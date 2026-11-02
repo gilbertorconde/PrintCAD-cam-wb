@@ -273,6 +273,17 @@ fn kept_to_plateau(keep: &str, containment: crate::job::Containment) -> (Job, Bo
 /// 8 mm drill in pecks: one hole, drilled to the model's bottom, each peck
 /// backing out, and the result verifies.
 fn drilled(peck: Option<f64>) -> (SetupResult, Job) {
+    drilled_as(StrategySpec::Drill {
+        peck,
+        dwell: None,
+        chip_break: None,
+        pitch: None,
+        hand: Default::default(),
+    })
+}
+
+/// The plate's hole, drilled or tapped as `strategy` says.
+fn drilled_as(strategy: StrategySpec) -> (SetupResult, Job) {
     use crate::job::{FeatureRef, ToolSpec};
     use crate::setup::features::find_edge;
     let body = Body::derived(synthetic::plate_with_hole(20.0, 5.0, 4.0, 48));
@@ -285,7 +296,7 @@ fn drilled(peck: Option<f64>) -> (SetupResult, Job) {
     let op = &mut job.setups[0].operations[0];
     op.name = "holes".into();
     op.tool = Some("drill".into());
-    op.strategy = StrategySpec::Drill { peck, dwell: None };
+    op.strategy = strategy;
     let pick = FeatureRef {
         model: "dome".into(),
         index: 0,
@@ -330,6 +341,54 @@ fn a_hole_is_drilled_through_in_pecks() {
     assert!(retracts >= 3, "{retracts} retracts");
     assert!(result.is_clean(), "{:?}", result.warnings());
     assert!(result.verify.gouged == 0);
+}
+
+/// Breaking the chip, or tapping, the material taken is the hole drilled to
+/// its depth, as drilling it at once takes; and it verifies. A tap is fed at
+/// its pitch a turn, both ways, its spindle turning the thread's way.
+#[test]
+fn chip_breaking_and_tapping_take_the_hole() {
+    let strategy = |text: &str| toml::from_str::<StrategySpec>(text).unwrap();
+    let (once, _) = drilled(None);
+    let removed = once.operations[0].sim.removed_mm3;
+    assert!(removed > 0.0);
+    for text in [
+        "strategy = \"drill\"\npeck = 1.5\nchip_break = 0.3",
+        "strategy = \"drill\"\npitch = 1.25",
+        "strategy = \"drill\"\npitch = 1.0\nhand = \"left\"",
+    ] {
+        let (result, job) = drilled_as(strategy(text));
+        let op = &result.operations[0];
+        let r = op.sim.removed_mm3;
+        assert!(
+            (r - removed).abs() <= 0.01 * removed,
+            "{text}: {r} of {removed}"
+        );
+        assert!(result.is_clean(), "{text}: {:?}", result.warnings());
+        assert!(result.verify.gouged == 0, "{text}");
+        let StrategyDetail::Drill(report) = &op.detail else {
+            panic!("reported {:?}", op.detail);
+        };
+        let rpm = f64::from(op.rpm);
+        assert_eq!(rpm, f64::from(job.tools["drill"].rpm));
+        if let Some(tap) = report.tap {
+            assert_eq!(report.feed, tap.pitch * rpm, "{text}");
+            assert_eq!(op.spindle, tap.hand.spindle(), "{text}");
+            // Down from the R plane and back up to it at the tap's feed; the
+            // linker's moves above it are its own.
+            let hole = report.holes[0];
+            let tapped: Vec<_> = op
+                .path
+                .moves()
+                .iter()
+                .filter(|m| m.feed == Some(report.feed))
+                .map(|m| m.to.z)
+                .collect();
+            assert_eq!(tapped, [hole.bottom, hole.retract()], "{text}");
+        } else {
+            assert_eq!(report.chip_break, Some(0.3));
+        }
+    }
 }
 
 /// A drill too small for its hole is drilled, and said.

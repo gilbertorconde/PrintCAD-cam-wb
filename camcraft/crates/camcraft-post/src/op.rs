@@ -17,9 +17,10 @@
 //! turns in. The engine only makes arcs a three-axis machine can cut
 //! ([`principal`]), and one that is not is refused rather than guessed at.
 
+use camcraft_core::job::ThreadHand;
 use camcraft_core::job::{Coolant, SpindleDirection};
 use camcraft_core::path::toolpath::{Arc, MoveKind, MoveRole, Toolpath, principal};
-use camcraft_core::strategy::drilling::Hole;
+use camcraft_core::strategy::drilling::{Hole, Tap};
 use glam::{DVec2, DVec3, dvec3};
 
 use crate::profile::ProgramUnits;
@@ -33,6 +34,13 @@ pub enum CycleKind {
     DrillDwell,
     /// Peck drill (`G83`).
     Peck,
+    /// Peck drill, backing off only a little between pecks to break the chip
+    /// (`G73`).
+    ChipBreak,
+    /// Tap a right-hand thread, the spindle reversing at the bottom (`G84`).
+    Tap,
+    /// Tap a left-hand thread, the spindle reversing at the bottom (`G74`).
+    TapLeft,
 }
 
 /// One machine-independent instruction.
@@ -158,6 +166,14 @@ pub struct ProgramSpec {
     /// The holes of a drilling operation, to write as canned cycles instead of
     /// its moves; only for a profile that takes them.
     pub drill: Option<DrillCycles>,
+    /// Whether the path taps threads. A tap must go one pitch a turn all the
+    /// way, as the spindle slows, stops and reverses at the bottom, and only a
+    /// controller's tapping cycle keeps the feed to the spindle through that:
+    /// as moves, the axis stops while the spindle still turns, and the thread
+    /// is stripped or the tap snapped. So it is posted only in [`drill`].
+    ///
+    /// [`drill`]: Self::drill
+    pub taps: bool,
 }
 
 /// A drilling operation's holes, as canned cycles.
@@ -167,9 +183,15 @@ pub struct DrillCycles {
     pub holes: Vec<Hole>,
     /// Depth of each peck (`G83`), if it pecks.
     pub peck: Option<f64>,
+    /// How far it backs off between pecks to break the chip (`G73`), if it
+    /// does rather than backing out. The controller backs off as far as it is
+    /// set to: the cycle has no word for it.
+    pub chip_break: Option<f64>,
     /// Seconds to pause at the bottom (`G82`), if it does and does not peck.
     pub dwell: Option<f64>,
-    /// Feed down into each hole, in mm/min.
+    /// The thread, if it taps (`G84`, `G74` left-hand); then it does not peck.
+    pub tap: Option<Tap>,
+    /// Feed down into each hole, in mm/min: a tap's, its pitch a turn.
     pub feed: f64,
     /// The height the tool crosses between holes at, and returns to (`G98`).
     pub clearance: f64,
@@ -188,6 +210,7 @@ impl Default for ProgramSpec {
             coolant: Coolant::Off,
             units: ProgramUnits::Mm,
             drill: None,
+            taps: false,
         }
     }
 }
@@ -208,6 +231,18 @@ pub enum LowerError {
     /// machine can cut as an arc.
     #[error("the arc to {0:?} is not in the XY, XZ or YZ plane")]
     ArcOutOfPlane(DVec3),
+    /// A path that taps, for a controller without the tapping cycle, which is
+    /// the only way to keep the feed to the spindle as it reverses at the
+    /// bottom ([`ProgramSpec::taps`]).
+    #[error(
+        "tapping is posted only as the controller's tapping cycle (G84, G74), which keeps \
+         the feed to the spindle as it reverses: as plain moves the tap would strip its \
+         thread or snap. Post it with a profile that has drill_cycles = true"
+    )]
+    TapsAsMoves,
+    /// A tap whose spindle turns against its thread.
+    #[error("a {0:?}-hand tap goes in with the spindle turning the other way")]
+    TapTurnsAgainstThread(ThreadHand),
 }
 
 /// Turn a linked toolpath into an instruction stream.
@@ -246,6 +281,15 @@ pub fn lower_counted(
         .find(|m| matches!(m.kind, MoveKind::Arc(a) if !principal(a.axis)))
     {
         return Err(LowerError::ArcOutOfPlane(m.to));
+    }
+    let tap = spec.drill.as_ref().and_then(|d| d.tap);
+    if spec.taps && tap.is_none() {
+        return Err(LowerError::TapsAsMoves);
+    }
+    if let Some(t) = tap
+        && t.hand.spindle() != spec.spin
+    {
+        return Err(LowerError::TapTurnsAgainstThread(t.hand));
     }
 
     // The profile header owns the program name via `{name}`; repeating it here
@@ -309,10 +353,15 @@ fn cycles(d: &DrillCycles, path: &Toolpath, out: &mut Vec<Op>, made: &mut Vec<us
     out.push(Op::CycleStart);
     let mut count = made.last().copied().unwrap_or(0);
     made.resize(out.len(), count);
-    let kind = match (d.peck, d.dwell) {
-        (Some(_), _) => CycleKind::Peck,
-        (None, Some(_)) => CycleKind::DrillDwell,
-        (None, None) => CycleKind::Drill,
+    let kind = match (d.tap, d.peck, d.chip_break, d.dwell) {
+        (Some(t), ..) => match t.hand {
+            ThreadHand::Right => CycleKind::Tap,
+            ThreadHand::Left => CycleKind::TapLeft,
+        },
+        (None, Some(_), Some(_), _) => CycleKind::ChipBreak,
+        (None, Some(_), None, _) => CycleKind::Peck,
+        (None, None, _, Some(_)) => CycleKind::DrillDwell,
+        (None, None, _, None) => CycleKind::Drill,
     };
     let moves = path.moves();
     let over = |i: usize, at: DVec2| {
@@ -335,7 +384,11 @@ fn cycles(d: &DrillCycles, path: &Toolpath, out: &mut Vec<Op>, made: &mut Vec<us
             at: h.at,
             depth: h.bottom,
             retract: h.retract(),
-            peck: d.peck,
+            peck: if matches!(kind, CycleKind::Peck | CycleKind::ChipBreak) {
+                d.peck
+            } else {
+                None
+            },
             dwell: if kind == CycleKind::DrillDwell {
                 d.dwell
             } else {
@@ -489,7 +542,9 @@ mod tests {
             drill: Some(DrillCycles {
                 holes: vec![hole(0.0), hole(10.0)],
                 peck: None,
+                chip_break: None,
                 dwell: None,
+                tap: None,
                 feed: 100.0,
                 clearance: 5.0,
             }),
@@ -503,6 +558,131 @@ mod tests {
             .map(|(_, n)| *n)
             .collect();
         assert_eq!(cycles, vec![3, 6]);
+    }
+
+    /// Holes drilled by the engine, each way it drills them, linked across at
+    /// the clearance height as the linker links them: the path, and the
+    /// cycles that stand for it.
+    fn drilled(
+        peck: Option<f64>,
+        chip_break: Option<f64>,
+        tap: Option<Tap>,
+    ) -> (Toolpath, ProgramSpec) {
+        use camcraft_core::strategy::drilling::{DrillParams, drill};
+        let hole = |x: f64| Hole {
+            at: DVec2::new(x, 0.0),
+            top: 0.0,
+            bottom: -7.0,
+            radius: 2.0,
+        };
+        let holes = [hole(0.0), hole(10.0), hole(25.0)];
+        let params = DrillParams {
+            peck,
+            chip_break,
+            feed: 150.0,
+            retract_feed: 600.0,
+            tap,
+        };
+        let drilled = drill(&holes, &params).unwrap();
+        let mut path = Toolpath::new();
+        for m in drilled.moves() {
+            if m.role == MoveRole::Link {
+                path.rapid_to(dvec3(m.to.x, m.to.y, 15.0)).unwrap();
+                path.rapid_to(m.to).unwrap();
+            } else {
+                path.feed_to(m.to, m.role, m.feed.unwrap()).unwrap();
+            }
+        }
+        let spec = ProgramSpec {
+            drill: Some(DrillCycles {
+                holes: holes.to_vec(),
+                peck,
+                chip_break,
+                dwell: None,
+                tap,
+                feed: 150.0,
+                clearance: 15.0,
+            }),
+            taps: tap.is_some(),
+            spin: tap.map_or(SpindleDirection::Clockwise, |t| t.hand.spindle()),
+            ..ProgramSpec::default()
+        };
+        (path, spec)
+    }
+
+    /// Whatever the cycle, each counts the moves down its hole and back out:
+    /// the last of them out of each hole, and all the path's by the end.
+    #[test]
+    fn every_cycle_counts_the_moves_of_its_hole() {
+        let right = Tap {
+            pitch: 1.25,
+            hand: ThreadHand::Right,
+        };
+        let left = Tap {
+            hand: ThreadHand::Left,
+            ..right
+        };
+        for (peck, chip_break, tap, want) in [
+            (None, None, None, CycleKind::Drill),
+            (Some(2.0), None, None, CycleKind::Peck),
+            (Some(2.0), Some(0.3), None, CycleKind::ChipBreak),
+            (None, None, Some(right), CycleKind::Tap),
+            (None, None, Some(left), CycleKind::TapLeft),
+        ] {
+            let (path, spec) = drilled(peck, chip_break, tap);
+            let (ops, made) = lower_counted(&path, &spec).unwrap();
+            let cycles: Vec<(CycleKind, usize)> = ops
+                .iter()
+                .zip(&made)
+                .filter_map(|(o, n)| match o {
+                    Op::Cycle { kind, .. } => Some((*kind, *n)),
+                    _ => None,
+                })
+                .collect();
+            assert!(cycles.iter().all(|(k, _)| *k == want), "{cycles:?}");
+            // Each hole's last move is its way out, up to its R plane.
+            let outs: Vec<usize> = path
+                .moves()
+                .iter()
+                .enumerate()
+                .filter(|(i, m)| {
+                    m.role == MoveRole::Retract
+                        && path
+                            .moves()
+                            .get(i + 1)
+                            .is_none_or(|n| n.role == MoveRole::Rapid)
+                })
+                .map(|(i, _)| i + 1)
+                .collect();
+            let counts: Vec<usize> = cycles.iter().map(|(_, n)| *n).collect();
+            assert_eq!(counts, outs, "{want:?}");
+            assert_eq!(counts.last(), Some(&path.len()), "{want:?}");
+        }
+    }
+
+    /// Tapping is refused as moves, and with the spindle turning against
+    /// the thread.
+    #[test]
+    fn a_tap_is_posted_only_as_its_cycle_and_its_way_round() {
+        let tap = Tap {
+            pitch: 1.0,
+            hand: ThreadHand::Left,
+        };
+        let (path, spec) = drilled(None, None, Some(tap));
+        assert!(lower(&path, &spec).is_ok());
+        let moves = ProgramSpec {
+            drill: None,
+            ..spec.clone()
+        };
+        assert_eq!(lower(&path, &moves), Err(LowerError::TapsAsMoves));
+        let backwards = ProgramSpec {
+            spin: SpindleDirection::Clockwise,
+            ..spec
+        };
+        assert_eq!(
+            lower(&path, &backwards),
+            Err(LowerError::TapTurnsAgainstThread(ThreadHand::Left))
+        );
     }
 
     #[test]

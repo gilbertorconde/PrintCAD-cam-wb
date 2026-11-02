@@ -519,12 +519,35 @@ impl Operation {
                 ));
             }
         }
-        if let StrategySpec::Drill { peck, dwell } = self.strategy {
+        if let StrategySpec::Drill {
+            peck,
+            dwell,
+            chip_break,
+            pitch,
+            ..
+        } = self.strategy
+        {
             if let Some(p) = peck {
                 positive(&field("peck"), p)?;
             }
             if let Some(d) = dwell {
                 at_least_zero(&field("dwell"), d)?;
+            }
+            if let Some(c) = chip_break {
+                positive(&field("chip_break"), c)?;
+                if peck.is_none() {
+                    return Err(bad(field("chip_break"), c, "given only with a peck"));
+                }
+            }
+            // A tap goes in and back out in one: a peck, or a pause at the
+            // bottom with the spindle turning, would cut the thread again.
+            if let Some(p) = pitch {
+                positive(&field("pitch"), p)?;
+                for (name, v) in [("peck", peck), ("chip_break", chip_break), ("dwell", dwell)] {
+                    if let Some(v) = v {
+                        return Err(bad(field(name), v, "left out when tapping"));
+                    }
+                }
             }
         }
         Ok(())

@@ -95,6 +95,11 @@ impl Operation {
             return Some("a drill only drills; use a drilling operation");
         }
         if drilling && !matches!(tool.kind, ToolKind::Drill | ToolKind::Flat) {
+            if let StrategySpec::Drill { pitch: Some(_), .. } = self.strategy {
+                // The library has no kind for a tap: it cuts a hole its size
+                // straight down, as a flat end mill does.
+                return Some("tap with a tap, kept in the library as a flat end mill its size");
+            }
             return Some("drill holes with a drill, or a flat end mill that plunges");
         }
         if matches!(self.strategy, StrategySpec::Face { .. }) && tool.kind == ToolKind::Ball {
@@ -179,6 +184,8 @@ impl Operation {
             // Multiple depths stay as they were chosen, on or off.
             let depths = self.strategy.uses().depths;
             match (&mut self.strategy, depths) {
+                // A tap does not peck.
+                (StrategySpec::Drill { pitch: Some(_), .. }, _) => {}
                 (StrategySpec::Drill { peck, .. }, _) => *peck = Some(d),
                 (_, Depths::Required) => self.passes.stepdown = Some(d),
                 (_, Depths::Optional) if self.passes.stepdown.is_some() => {

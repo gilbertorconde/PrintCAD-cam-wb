@@ -29,7 +29,7 @@ use crate::setup::features::{Chain, FeatureError, Picking, picked_chains};
 use crate::setup::{Bodies, Prepared};
 use crate::strategy::StrategyError;
 use crate::strategy::adaptive::{AdaptiveParams, adaptive_rough, flat_heights};
-use crate::strategy::drilling::{DrillParams, DrillReport, Hole, drill, holes, nearest_first};
+use crate::strategy::drilling::{DrillParams, DrillReport, Hole, Tap, drill, holes, nearest_first};
 use crate::strategy::face::{FaceParams, LevelsAsked, face};
 use crate::strategy::flat::{FlatParams, flat_finish};
 use crate::strategy::morph::{MorphParams, MorphedSpiralReport, morphed_spiral};
@@ -237,9 +237,18 @@ pub(super) fn run_operation(
             (pass_extension, stock_offset),
             &mut warnings,
         )?,
-        StrategySpec::Drill { peck, dwell } => {
-            drill_paths(work, peck, dwell, holes, &mut warnings)?
-        }
+        StrategySpec::Drill {
+            peck,
+            dwell,
+            chip_break,
+            ..
+        } => drill_paths(
+            work,
+            (peck, chip_break, dwell),
+            op.strategy.tap(),
+            holes,
+            &mut warnings,
+        )?,
     };
 
     // Ordering is a Toolpath -> Toolpath transform, applied before linking so the
@@ -385,10 +394,17 @@ pub(super) fn not_made(op: &Operation, spec: Option<&ToolSpec>, made: Made) -> O
         StrategySpec::Profile { .. } => StrategyDetail::Profile(Default::default()),
         StrategySpec::Pocket { .. } => StrategyDetail::Pocket(Default::default()),
         StrategySpec::Face { .. } => StrategyDetail::Face(Default::default()),
-        StrategySpec::Drill { peck, dwell } => StrategyDetail::Drill(DrillReport {
-            holes: Vec::new(),
+        StrategySpec::Drill {
             peck,
             dwell,
+            chip_break,
+            ..
+        } => StrategyDetail::Drill(DrillReport {
+            holes: Vec::new(),
+            peck,
+            chip_break,
+            dwell,
+            tap: op.strategy.tap(),
             feed: op.linking.plunge_feed,
         }),
     };
@@ -399,7 +415,11 @@ pub(super) fn not_made(op: &Operation, spec: Option<&ToolSpec>, made: Made) -> O
         tool_number: spec.map_or(0, |t| t.number),
         rpm: op.passes.rpm.or(spec.map(|t| t.rpm)).unwrap_or(0),
         tool_comment: spec.map(|t| t.comment.clone()).unwrap_or_default(),
-        spindle: spec.map(|t| t.spindle).unwrap_or_default(),
+        // A tap turns the way its thread does, whichever way its tool says.
+        spindle: match op.strategy.tap() {
+            Some(t) => t.hand.spindle(),
+            None => spec.map(|t| t.spindle).unwrap_or_default(),
+        },
         coolant: spec.map(|t| t.coolant).unwrap_or_default(),
         sim: SimReport::default(),
         passes: 0,

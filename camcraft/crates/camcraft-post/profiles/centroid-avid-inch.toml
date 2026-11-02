@@ -28,6 +28,8 @@ tool_change = "m6"
 length_offset = true
 # Avid's post writes G81, G82 and G83 with G98. Off until they have been dry-run
 # on the machine; off, a drilling operation is posted as plain moves instead.
+# On, chip breaking is G73 and tapping G84 (G74 left-hand); off, tapping is
+# refused, as no plain move keeps the feed to the spindle as it reverses.
 drill_cycles = false
 
 units = "inch"

@@ -10,12 +10,13 @@ mod common;
 
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
+use camcraft_core::job::ThreadHand;
 use camcraft_core::path::toolpath::{Arc, MoveRole, Toolpath};
 use camcraft_post::op::{ProgramSpec, lower};
 use camcraft_post::profile::{ArcStyle, Profile, ProgramUnits, ToolChangeStyle};
 use camcraft_post::readback::check;
 use camcraft_post::render::render;
-use common::{drilling, fixture, spec};
+use common::{chip_breaking, drilling, fixture, spec, tapping};
 use glam::{DVec3, dvec3};
 
 fn post(path: &Toolpath, spec: &ProgramSpec, profile: &Profile) -> String {
@@ -129,23 +130,29 @@ fn every_post_reads_back_to_its_path() {
     }
 }
 
-/// Holes as canned cycles, plain, with a pause and pecked, read back as the
-/// holes they drill, in every profile that is set to take cycles.
+/// Holes as canned cycles, plain, with a pause, pecked, breaking the chip and
+/// tapped either hand, read back as the holes they drill, in every profile
+/// that is set to take cycles.
 #[test]
 fn drilling_cycles_read_back_to_their_holes() {
     for (name, mut profile) in profiles() {
         profile.drill_cycles = true;
         for units in [ProgramUnits::Mm, ProgramUnits::Inch] {
-            for (peck, dwell) in [(None, None), (Some(2.0), None), (None, Some(0.5))] {
-                let spec = ProgramSpec {
-                    units,
-                    ..drilling(peck, dwell)
-                };
+            let specs = [
+                ("plain", drilling(None, None)),
+                ("pecked", drilling(Some(2.0), None)),
+                ("with a pause", drilling(None, Some(0.5))),
+                ("chip breaking", chip_breaking()),
+                ("tapped", tapping(ThreadHand::Right)),
+                ("tapped left-hand", tapping(ThreadHand::Left)),
+            ];
+            for (what, spec) in specs {
+                let spec = ProgramSpec { units, ..spec };
                 reads_back(
                     &Toolpath::new(),
                     &spec,
                     &profile,
-                    &format!("holes ({peck:?}, {dwell:?}) for {name} in {units:?}"),
+                    &format!("holes {what} for {name} in {units:?}"),
                 );
             }
         }
@@ -349,6 +356,132 @@ fn drilling_faults_are_caught() {
         match check(&text, &Toolpath::new(), &spec, &profile) {
             Ok(()) => panic!("{from:?} made {to:?} was not caught:\n{text}"),
             Err(p) => assert!(p.to_string().contains(said), "{p}\n{text}"),
+        }
+    }
+}
+
+/// Faults in breaking the chip and in tapping: pecks too deep, a tap fed
+/// faster than its pitch a turn, a tap backed out at a rapid, a tap in with
+/// the spindle turning against it.
+#[test]
+fn chip_breaking_and_tapping_faults_are_caught() {
+    let mut profile = Profile::builtin("masso").unwrap().unwrap();
+    profile.drill_cycles = true;
+    let faults: &[(ProgramSpec, &str, &str, &str)] = &[
+        (
+            chip_breaking(),
+            "X10. Y10. Z-1.5 R7. Q2.",
+            "X10. Y10. Z-1.5 R7. Q4.",
+            "pecks deeper",
+        ),
+        (
+            tapping(ThreadHand::Right),
+            "G84 X30. Y10. Z-1.5 R7. F625.",
+            "G84 X30. Y10. Z-1.5 R7. F700.",
+            "drills at 700.000",
+        ),
+        (
+            tapping(ThreadHand::Right),
+            "G84 X30. Y10.",
+            "G81 X30. Y10.",
+            "rapids out of tapped hole 2",
+        ),
+        (
+            tapping(ThreadHand::Right),
+            "S500 M3",
+            "S500 M4",
+            "G84 without the spindle turning M3",
+        ),
+        (
+            tapping(ThreadHand::Left),
+            "G74 X10. Y10.",
+            "G84 X10. Y10.",
+            "G84 without the spindle turning M3",
+        ),
+    ];
+    for (spec, from, to, said) in faults {
+        let text = post(&Toolpath::new(), spec, &profile);
+        assert_eq!(text.matches(from).count(), 1, "{from:?}:\n{text}");
+        check(&text, &Toolpath::new(), spec, &profile).unwrap();
+        let text = text.replace(from, to);
+        match check(&text, &Toolpath::new(), spec, &profile) {
+            Ok(()) => panic!("{from:?} made {to:?} was not caught:\n{text}"),
+            Err(p) => assert!(p.to_string().contains(said), "{p}\n{text}"),
+        }
+    }
+    // A tap whose feed is not its pitch a turn is caught before the program
+    // is read.
+    let mut fast = tapping(ThreadHand::Right);
+    let text = post(&Toolpath::new(), &fast, &profile);
+    if let Some(d) = &mut fast.drill {
+        d.feed = 700.0;
+    }
+    let p = check(&text, &Toolpath::new(), &fast, &profile).unwrap_err();
+    assert!(p.to_string().contains("1.250 mm a turn"), "{p}");
+}
+
+/// The path holes are drilled along, each way the engine drills them, joined
+/// at a clearance height.
+fn drilled(peck: Option<f64>, chip_break: Option<f64>) -> Toolpath {
+    use camcraft_core::strategy::drilling::{DrillParams, Hole, drill};
+    let holes: Vec<Hole> = [(10.0, 10.0), (30.0, 10.0), (-12.345, 40.0)]
+        .into_iter()
+        .map(|(x, y)| Hole {
+            at: glam::dvec2(x, y),
+            top: 5.0,
+            bottom: -1.5,
+            radius: 3.0,
+        })
+        .collect();
+    let params = DrillParams {
+        peck,
+        chip_break,
+        feed: 250.0,
+        retract_feed: 900.0,
+        tap: None,
+    };
+    let mut t = Toolpath::new();
+    for m in drill(&holes, &params).unwrap().moves() {
+        if m.role == MoveRole::Link {
+            t.rapid_to(dvec3(m.to.x, m.to.y, 20.0)).unwrap();
+            t.rapid_to(m.to).unwrap();
+        } else {
+            t.feed_to(m.to, m.role, m.feed.unwrap()).unwrap();
+        }
+    }
+    t
+}
+
+/// Holes posted as their moves, for a controller without cycles, read back
+/// to the path: pecked and breaking the chip. A tapped hole is not posted as
+/// moves at all.
+#[test]
+fn holes_as_moves_read_back_and_taps_are_refused() {
+    let paths = [
+        ("pecked", drilled(Some(2.0), None)),
+        ("chip breaking", drilled(Some(2.0), Some(0.3))),
+    ];
+    for (name, profile) in profiles() {
+        for units in [ProgramUnits::Mm, ProgramUnits::Inch] {
+            let spec = ProgramSpec { units, ..spec() };
+            for (what, path) in &paths {
+                reads_back(
+                    path,
+                    &spec,
+                    &profile,
+                    &format!("holes {what} as moves for {name} in {units:?}"),
+                );
+            }
+            let taps = ProgramSpec {
+                units,
+                drill: None,
+                ..tapping(ThreadHand::Right)
+            };
+            assert_eq!(
+                lower(&paths[0].1, &taps),
+                Err(camcraft_post::op::LowerError::TapsAsMoves),
+                "{name}"
+            );
         }
     }
 }

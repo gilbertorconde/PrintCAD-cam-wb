@@ -90,12 +90,15 @@ pub fn program_spec(op: &OperationResult, wcs: u8, profile: &Profile) -> Program
             StrategyDetail::Drill(r) if profile.drill_cycles => Some(DrillCycles {
                 holes: r.holes.clone(),
                 peck: r.peck,
+                chip_break: r.chip_break,
                 dwell: r.dwell,
+                tap: r.tap,
                 feed: r.feed,
                 clearance: op.clearance_z,
             }),
             _ => None,
         },
+        taps: matches!(&op.detail, StrategyDetail::Drill(r) if r.tap.is_some()),
     }
 }
 

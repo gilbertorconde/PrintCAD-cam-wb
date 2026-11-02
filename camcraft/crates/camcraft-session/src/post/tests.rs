@@ -130,7 +130,9 @@ fn holes_are_cycles_only_where_the_profile_takes_them() {
             radius: 2.0,
         }],
         peck: Some(1.5),
+        chip_break: None,
         dwell: None,
+        tap: None,
         feed: 200.0,
     });
     let mut profile = load_profile("masso", None).unwrap();
@@ -140,6 +142,45 @@ fn holes_are_cycles_only_where_the_profile_takes_them() {
     let (cycles, _) = program(&op, 54, &profile, "01-holes").unwrap();
     assert!(cycles.contains("G83 X3. Y4. Z0. R7."), "{cycles}");
     assert!(cycles.contains("G80"), "{cycles}");
+}
+
+/// A tapping operation is posted as its cycle, for a profile that takes
+/// cycles, and refused as moves for one that does not.
+#[test]
+fn a_tap_is_posted_only_as_its_cycle() {
+    use camcraft_core::job::ThreadHand;
+    use camcraft_core::strategy::drilling::{DrillReport, Hole, Tap};
+    let ran = run_small();
+    let mut op = ran.result.operations.first().unwrap().clone();
+    let tap = Tap {
+        pitch: 1.5,
+        hand: ThreadHand::Left,
+    };
+    op.rpm = 400;
+    op.spindle = SpindleDirection::CounterClockwise;
+    op.detail = StrategyDetail::Drill(DrillReport {
+        holes: vec![Hole {
+            at: glam::dvec2(3.0, 4.0),
+            top: 5.0,
+            bottom: 0.0,
+            radius: 5.0,
+        }],
+        peck: None,
+        chip_break: None,
+        dwell: None,
+        tap: Some(tap),
+        feed: tap.feed(400.0),
+    });
+    let mut profile = load_profile("masso", None).unwrap();
+    let refused = program(&op, 54, &profile, "01-threads").unwrap_err();
+    assert!(
+        refused.to_string().contains("drill_cycles = true"),
+        "{refused}"
+    );
+    profile.drill_cycles = true;
+    let (cycles, _) = program(&op, 54, &profile, "01-threads").unwrap();
+    assert!(cycles.contains("S400 M4"), "{cycles}");
+    assert!(cycles.contains("G74 X3. Y4. Z0. R7. F600."), "{cycles}");
 }
 
 /// A tool's spindle direction and coolant reach the program.

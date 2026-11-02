@@ -4,12 +4,15 @@
 //! Pick its bottom rim as well and it is drilled to there; otherwise it is drilled
 //! to the operation's bottom height. Each hole is a pass of its own: a link to just
 //! above it, plunges down (in pecks, when asked, backing out to clear chips between
-//! them), and a retract. So the linker, simulator and checks treat a drilled hole
-//! as they treat anything else, and a post that knows canned cycles can write each
-//! hole as one line instead ([`Hole`] carries what it needs).
+//! them, or only a little way to break them), and a retract. A tapped hole is fed
+//! down and back out at the thread's pitch a turn. So the linker, simulator and
+//! checks treat a drilled hole as they treat anything else, and a post that knows
+//! canned cycles can write each hole as one line instead ([`Hole`] carries what it
+//! needs).
 
 use glam::{DVec2, DVec3, dvec3};
 
+use crate::job::ThreadHand;
 use crate::path::toolpath::{MoveRole, Toolpath};
 use crate::setup::features::Chain;
 use crate::strategy::nesting::nearest;
@@ -44,10 +47,32 @@ impl Hole {
 pub struct DrillParams {
     /// Depth of each peck; the whole depth at once when `None`.
     pub peck: Option<f64>,
+    /// How far to back off between pecks to break the chip, rather than out
+    /// of the hole; only with a peck.
+    pub chip_break: Option<f64>,
     /// Feed down into the hole, in mm/min.
     pub feed: f64,
     /// Feed back out, in mm/min.
     pub retract_feed: f64,
+    /// Tap each hole, rather than drill it: down and back out at `feed`, which
+    /// is the thread's pitch a turn. No pecks.
+    pub tap: Option<Tap>,
+}
+
+/// A thread tapped.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Tap {
+    /// Millimetres a turn.
+    pub pitch: f64,
+    /// Which way it turns.
+    pub hand: ThreadHand,
+}
+
+impl Tap {
+    /// The feed that keeps to the pitch at `rpm`, in mm/min.
+    pub fn feed(&self, rpm: f64) -> f64 {
+        self.pitch * rpm
+    }
 }
 
 /// Why picked edges are not holes.
@@ -172,9 +197,14 @@ pub struct DrillReport {
     pub holes: Vec<Hole>,
     /// Depth of each peck, if it pecked.
     pub peck: Option<f64>,
+    /// How far it backed off between pecks, if it broke the chip rather than
+    /// backing out.
+    pub chip_break: Option<f64>,
     /// Seconds to pause at the bottom, if asked.
     pub dwell: Option<f64>,
-    /// Feed down into each hole, in mm/min.
+    /// The thread, if it tapped.
+    pub tap: Option<Tap>,
+    /// Feed down into each hole, in mm/min: a tap's, its pitch a turn.
     pub feed: f64,
 }
 
@@ -183,14 +213,23 @@ pub fn drill(holes: &[Hole], params: &DrillParams) -> Result<Toolpath, StrategyE
     for (name, v) in [("feed", params.feed), ("retract feed", params.retract_feed)] {
         check(name, v)?;
     }
-    if let Some(p) = params.peck {
-        check("peck", p)?;
+    for (name, v) in [("peck", params.peck), ("chip break", params.chip_break)] {
+        if let Some(v) = v {
+            check(name, v)?;
+        }
     }
     let mut path = Toolpath::new();
     for h in holes {
         let (x, y) = (h.at.x, h.at.y);
         let r = h.retract();
         path.feed_to(dvec3(x, y, r), MoveRole::Link, params.feed)?;
+        if params.tap.is_some() {
+            // In and back out at the pitch a turn, the spindle reversing at the
+            // bottom: a tap backed out any faster strips the thread it cut.
+            path.feed_to(dvec3(x, y, h.bottom), MoveRole::Plunge, params.feed)?;
+            path.feed_to(dvec3(x, y, r), MoveRole::Retract, params.feed)?;
+            continue;
+        }
         let mut depth = h.top;
         loop {
             depth = match params.peck {
@@ -198,10 +237,17 @@ pub fn drill(holes: &[Hole], params: &DrillParams) -> Result<Toolpath, StrategyE
                 None => h.bottom,
             };
             path.feed_to(dvec3(x, y, depth), MoveRole::Plunge, params.feed)?;
-            path.feed_to(dvec3(x, y, r), MoveRole::Retract, params.retract_feed)?;
             if depth <= h.bottom {
+                path.feed_to(dvec3(x, y, r), MoveRole::Retract, params.retract_feed)?;
                 break;
             }
+            if let Some(back) = params.chip_break {
+                // Back off a little to break the chip, and on down from there.
+                let to = (depth + back).min(r);
+                path.feed_to(dvec3(x, y, to), MoveRole::Retract, params.retract_feed)?;
+                continue;
+            }
+            path.feed_to(dvec3(x, y, r), MoveRole::Retract, params.retract_feed)?;
             // Back down to just above the last peck, and on from there.
             path.feed_to(
                 dvec3(x, y, (depth + 0.5).min(r)),

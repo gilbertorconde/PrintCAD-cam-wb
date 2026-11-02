@@ -175,7 +175,7 @@ impl PassesData {
                 min_ring_length, ..
             } => self.min_ring_length = min_ring_length,
             StrategySpec::Face { pass_extension, .. } => self.pass_extension = pass_extension,
-            StrategySpec::Drill { peck, dwell } => {
+            StrategySpec::Drill { peck, dwell, .. } => {
                 self.peck = Opt::of(peck);
                 self.dwell = Opt::of(dwell);
             }
@@ -261,7 +261,7 @@ impl PassesData {
                 min_ring_length, ..
             } => *min_ring_length = self.min_ring_length,
             StrategySpec::Face { pass_extension, .. } => *pass_extension = self.pass_extension,
-            StrategySpec::Drill { peck, dwell } => {
+            StrategySpec::Drill { peck, dwell, .. } => {
                 (*peck, *dwell) = (self.peck.get(), self.dwell.get());
             }
             _ => {}
@@ -818,7 +818,8 @@ mod tests {
             drill.operation("").strategy,
             StrategySpec::Drill {
                 peck: Some(1.5),
-                dwell: None
+                dwell: None,
+                ..
             }
         ));
     }

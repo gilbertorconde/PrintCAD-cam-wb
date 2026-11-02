@@ -43,6 +43,19 @@ once it has run (a canned cycle counting the moves that drill its hole), and
 `RenderReport::op_lines` says how many lines are written once each
 instruction is. What is written is unchanged.
 
+And drilling breaks the chip and taps, as Fusion's drilling cycles do. In
+`camcraft-core`, `StrategySpec::Drill` has `chip_break` (with a peck, each
+backs off only that far: Fusion's chip break distance) and `pitch` and
+`hand` (each hole tapped, fed at the pitch times the spindle's speed both
+ways; a left-hand tap turns counter-clockwise, whatever its tool says).
+There is no tap kind of tool: a tap is a flat end mill or a drill its size,
+which is the hole it leaves. In `camcraft-post`, the cycles are `G73`,
+`G84` and `G74`, a tap's feed written to three more places than other feeds;
+`ProgramSpec::taps` makes lowering refuse a tap as plain moves
+(`LowerError::TapsAsMoves`), and one turning against its thread; and
+`readback` reads the three cycles and checks a tap is fed at its pitch a
+turn, both ways, with the spindle turning its way.
+
 And one test: ogeom is 0.11.1 here, which printCAD's shapes need, and it
 meshes `round_edge_loose_fit.step`'s seam that 0.11.0 drew off the torus, so
 `a_loose_fit_is_refused_for_ogeoms_seam` became
