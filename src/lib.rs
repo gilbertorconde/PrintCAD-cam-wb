@@ -22,6 +22,7 @@ mod data;
 mod draw;
 mod hints;
 mod linking;
+mod listing;
 mod panel;
 mod passes;
 mod picking;
@@ -150,6 +151,13 @@ struct Cam {
     shift: bool,
     /// The played-back setup's run, kept in a helper at full resolution.
     session: Option<session::Session>,
+    /// A line of the program listing clicked before the session knew when
+    /// each move ends: its operation and moves, and the playhead it was
+    /// sent to meanwhile, between the run's moments. Once the session
+    /// knows, the playhead goes to the move itself, unless it has moved.
+    aim: Option<(usize, usize, f64)>,
+    /// Where the listed program's lines start, worked out once for it.
+    listing: std::cell::RefCell<listing::Lines>,
     /// A slot picking in the view.
     armed: Option<picking::Armed>,
     /// The settings page's chosen preset of the chosen tool, and chosen post.
@@ -512,6 +520,84 @@ impl Cam {
             .filter(|s| s.setup == setup)
             .and_then(|s| s.times());
         playback::steps(run, times)
+    }
+
+    /// The operation under way in the playback of `setup`'s run, and how
+    /// many of its moves are made.
+    fn under_way(&self, setup: &str) -> Option<(usize, usize)> {
+        let run = self.runs.get(setup)?.shown()?;
+        let exact = self
+            .session
+            .as_ref()
+            .filter(|s| s.setup == setup)
+            .and_then(|s| s.at.as_ref())
+            .map(|a| (a.op, a.moves, a.of));
+        let playing = self.playing.as_ref().filter(|p| p.setup == setup);
+        playback::under_way(run, playing, exact).map(|(op, made, _)| (op, made))
+    }
+
+    /// A click on a line of the program listing: the playhead goes to its
+    /// move. Whether it was one.
+    fn listing_event(&mut self, event: &PanelEvent) -> bool {
+        let Some(setup) = self.played_setup() else {
+            return false;
+        };
+        let Some(run) = self.runs.get(&setup).and_then(|c| c.shown()) else {
+            return false;
+        };
+        let Some((op, made)) = listing::clicked(run, event, &self.listing.borrow()) else {
+            return false;
+        };
+        self.seek_move(&setup, op, made);
+        true
+    }
+
+    /// Take the playhead of `setup`'s playback to where operation `op` has
+    /// made `made` moves: exactly once the session knows when each move
+    /// ends, between the run's moments until then.
+    fn seek_move(&mut self, setup: &str, op: usize, made: usize) {
+        let Some(run) = self.runs.get(setup).and_then(|c| c.shown()) else {
+            return;
+        };
+        let times = self
+            .session
+            .as_ref()
+            .filter(|s| s.setup == setup)
+            .and_then(|s| s.times());
+        let at = playback::time_of(run, times, op, made);
+        let steps = self.steps(setup, run);
+        playback::apply(
+            &mut self.playing,
+            &mut self.transport,
+            setup,
+            run,
+            playback::Command::Seek(at),
+            &steps,
+        );
+        self.aim = times.is_none().then_some((op, made, at));
+    }
+
+    /// Once the session knows the moves, a line clicked before it did gets
+    /// its own move, if the playhead still stands where the click left it.
+    fn take_aim(&mut self, setup: Option<&str>) {
+        let Some((op, made, at)) = self.aim else {
+            return;
+        };
+        let standing = self
+            .playing
+            .as_ref()
+            .is_some_and(|p| p.at == at && p.running.is_none() && Some(p.setup.as_str()) == setup);
+        if !standing {
+            self.aim = None;
+            return;
+        }
+        let known = self
+            .session
+            .as_ref()
+            .is_some_and(|s| Some(s.setup.as_str()) == setup && s.times().is_some());
+        if let (true, Some(setup)) = (known, setup) {
+            self.seek_move(setup, op, made);
+        }
     }
 
     /// How many steps Shift and an arrow take.
@@ -1344,6 +1430,7 @@ impl Bench for Cam {
             p.tick(run, &self.transport);
         }
         self.keep_session(open.as_deref());
+        self.take_aim(open.as_deref());
         // A slot is armed only while its feature is open.
         if self
             .armed
@@ -1426,6 +1513,9 @@ impl Bench for Cam {
                     &steps,
                 );
             }
+            return;
+        }
+        if self.listing_event(&event) {
             return;
         }
         let Some(editing) = self.editing.clone() else {

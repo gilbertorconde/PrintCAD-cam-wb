@@ -94,6 +94,10 @@ panels, the drawing and the helper that runs camcraft.
   Once playing, the material is swept again at full resolution by the helper
   kept running for it (up to 600 points a side), and steps go a move at a
   time; until then, and where it cannot, the run's coarse moments play.
+  The panel lists the program being played (the operation's own, or in a
+  setup's panel the one under way): the lines round the playhead's,
+  numbered, with its line marked, following it as it plays. Click a line's
+  number to take the playhead to its move.
 
   ![3D finishing half way: the passes still to run, over the material roughing left](docs/screenshots/finishing.png)
 

@@ -320,9 +320,9 @@ pub fn transport_widgets(
     t: &Transport,
     exact: Option<(usize, usize, usize)>,
 ) -> Vec<Widget> {
-    let Some(play) = run.playback.as_ref() else {
+    if run.playback.is_none() {
         return Vec::new();
-    };
+    }
     let line = Timeline::of(run);
     let at = playing.map_or(line.total, |p| p.at);
     let running = playing.and_then(|p| p.running);
@@ -426,12 +426,7 @@ pub fn transport_widgets(
             on: t.stop_at_ops,
         },
     ];
-    let under_way = exact.or_else(|| {
-        play.moments
-            .get(moment_index(play, at))
-            .map(|m| (m.op, m.moves, m.of))
-    });
-    if let Some((op, moves, of)) = under_way {
+    if let Some((op, moves, of)) = under_way(run, playing, exact) {
         let name = run.operations.get(op).map_or("", |o| o.name.as_str());
         out.push(Widget::Value {
             label: String::new(),
@@ -449,6 +444,77 @@ pub fn transport_widgets(
         callouts: Vec::new(),
     });
     out
+}
+
+/// The operation under way at the playhead, how many of its moves are made,
+/// and of how many: `exact`, as a playback session last answered, or else
+/// worked out between the run's moments either side of the playhead (at its
+/// end while it is not played back).
+pub fn under_way(
+    run: &Run,
+    playing: Option<&Playing>,
+    exact: Option<(usize, usize, usize)>,
+) -> Option<(usize, usize, usize)> {
+    exact.or_else(|| {
+        run.playback.as_ref()?;
+        let line = Timeline::of(run);
+        let at = playing.map_or(line.total, |p| p.at);
+        let op = line.op_at(at);
+        let known = moments_of(run, op, &line);
+        let of = known.last().map_or(0, |(n, _)| *n);
+        let before = known.iter().rfind(|(_, s)| *s <= at + 1e-9)?;
+        let made = match known.iter().find(|(_, s)| *s > at + 1e-9) {
+            Some(after) if after.1 > before.1 => {
+                let f = (at - before.1) / (after.1 - before.1);
+                before.0 + (f * (after.0 - before.0) as f64) as usize
+            }
+            _ => before.0,
+        };
+        Some((op, made, of))
+    })
+}
+
+/// Operation `op`'s moments as moves made and when: its start, with none
+/// made, then each of the run's.
+fn moments_of(run: &Run, op: usize, line: &Timeline) -> Vec<(usize, f64)> {
+    let start = line.starts.get(op).copied().unwrap_or(line.total);
+    std::iter::once((0, start))
+        .chain(
+            run.playback
+                .iter()
+                .flat_map(|p| p.moments.iter())
+                .filter(|m| m.op == op)
+                .map(|m| (m.moves, m.seconds)),
+        )
+        .collect()
+}
+
+/// When operation `op` of `run` has made `made` of its moves, in machining
+/// seconds from the setup's start: from when each move ends (`times`, from a
+/// playback session) where they are known, else between the run's moments
+/// either side. Where the ends are known, a hair past it, so a seek there
+/// stands with that many made whatever the rounding, but never as far as
+/// the next move's end.
+pub fn time_of(run: &Run, times: Option<&[Vec<f32>]>, op: usize, made: usize) -> f64 {
+    let line = Timeline::of(run);
+    let start = line.starts.get(op).copied().unwrap_or(line.total);
+    if let Some(ends) = times.and_then(|t| t.get(op)) {
+        let end = |i: usize| ends.get(i).map(|t| f64::from(*t));
+        let at = made.checked_sub(1).and_then(end).unwrap_or(start);
+        // At the last, no further: past it is the next operation's start.
+        return match end(made) {
+            Some(next) => at + (at.abs() * 1e-6 + 1e-6).min((next - at) / 2.0).max(0.0),
+            None => at,
+        };
+    }
+    let known = moments_of(run, op, &line);
+    let before = known.iter().rfind(|(n, _)| *n <= made).copied();
+    let after = known.iter().find(|(n, _)| *n >= made).copied();
+    match (before, after) {
+        (Some((a, s)), Some((b, t))) if b > a => s + (made - a) as f64 / (b - a) as f64 * (t - s),
+        (Some((_, s)), _) => s,
+        _ => start,
+    }
 }
 
 /// The places the transport steps between: every move's end where the
@@ -691,6 +757,69 @@ mod tests {
         assert_eq!(speed_label(0.25), "¼×");
         assert_eq!(clock(3725.0), "1:02:05");
         assert_eq!(clock(65.0), "1:05");
+    }
+
+    #[test]
+    fn a_move_has_a_time_to_seek_to() {
+        // Exactly, where the session knows when each move ends: a hair past
+        // the end of the last made, and at the end of the last.
+        let run = run();
+        let times = vec![vec![0.0, 4.0, 10.0], vec![15.0, 40.0]];
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-3;
+        let t = time_of(&run, Some(&times), 0, 2);
+        assert!(t > 4.0 && near(t, 4.0), "{t}");
+        assert_eq!(time_of(&run, Some(&times), 0, 3), 10.0);
+        let t = time_of(&run, Some(&times), 1, 0);
+        assert!(t > 10.0 && near(t, 10.0), "{t}");
+        // Else between the moments either side, from the operation's start.
+        let mut run = run;
+        let moments = &mut run.playback.as_mut().unwrap().moments;
+        moments.retain(|m| m.op == 0);
+        for (moves, seconds) in [(4, 20.0), (8, 40.0)] {
+            moments.push(Moment {
+                op: 1,
+                moves,
+                of: 8,
+                seconds,
+                ..Moment::default()
+            });
+        }
+        assert_eq!(time_of(&run, None, 1, 2), 15.0);
+        assert_eq!(time_of(&run, None, 1, 6), 30.0);
+        assert_eq!(time_of(&run, None, 1, 8), 40.0);
+        assert_eq!(time_of(&run, None, 1, 0), 10.0);
+    }
+
+    #[test]
+    fn under_way_is_the_sessions_else_between_the_moments() {
+        let mut run = run();
+        let playing = |at| Playing {
+            setup: "s".into(),
+            at,
+            running: None,
+        };
+        assert_eq!(
+            under_way(&run, Some(&playing(12.0)), Some((1, 5, 9))),
+            Some((1, 5, 9))
+        );
+        // The second operation, from 10 s, makes 4 moves by 20 s and 8 by
+        // 40 s.
+        let moments = &mut run.playback.as_mut().unwrap().moments;
+        moments.retain(|m| m.op == 0);
+        for (moves, seconds) in [(4, 20.0), (8, 40.0)] {
+            moments.push(Moment {
+                op: 1,
+                moves,
+                of: 8,
+                seconds,
+                ..Moment::default()
+            });
+        }
+        assert_eq!(under_way(&run, Some(&playing(15.0)), None), Some((1, 2, 8)));
+        assert_eq!(under_way(&run, Some(&playing(30.0)), None), Some((1, 6, 8)));
+        assert_eq!(under_way(&run, None, None), Some((1, 8, 8)), "at the end");
+        let first = under_way(&run, Some(&playing(5.0)), None).unwrap();
+        assert_eq!(first.0, 0);
     }
 
     #[test]
