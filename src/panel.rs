@@ -178,6 +178,13 @@ fn run_widgets(cam: &Cam, setup: &str, only: Option<usize>) -> Vec<Widget> {
         });
     }
     out.extend(verdict(run, only));
+    // The program being played: the operation's own, or in a setup's panel
+    // the one under way.
+    let here = cam.under_way(setup);
+    if let Some(op) = only.or(here.map(|(op, _)| op)) {
+        let mut kept = cam.listing.borrow_mut();
+        out.extend(crate::listing::widgets(run, op, here, &mut kept));
+    }
     out
 }
 

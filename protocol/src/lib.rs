@@ -16,7 +16,7 @@ pub const HELPER: &str = "camcraft-helper";
 
 /// Bumped whenever a request or response changes shape, so a package never
 /// reads an answer from a helper of another build.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// One setup to run.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -273,6 +273,30 @@ pub struct Program {
     pub text: String,
     /// How many lines it has.
     pub lines: usize,
+    /// For each line, how many of the operation's moves are made once it
+    /// has run, as [`Moment::moves`] counts them: never fewer than the line
+    /// before's. Empty when it is not known.
+    #[serde(default)]
+    pub moves: Vec<u32>,
+}
+
+impl Program {
+    /// The line the tool stands on once `made` moves are made: the first
+    /// that makes that many, from zero, the first line before any. `None`
+    /// when the lines' moves are not known.
+    pub fn line_of(&self, made: usize) -> Option<usize> {
+        let last = self.moves.len().checked_sub(1)?;
+        Some(
+            self.moves
+                .partition_point(|m| (*m as usize) < made)
+                .min(last),
+        )
+    }
+
+    /// How many moves are made once line `line` has run.
+    pub fn made_by(&self, line: usize) -> Option<usize> {
+        self.moves.get(line).map(|m| *m as usize)
+    }
 }
 
 /// The material's top, sampled coarsely, as triangles in the document's
@@ -427,6 +451,23 @@ mod tests {
         assert_eq!(base64(b"Man"), "TWFu");
         assert_eq!(base64(b"Ma"), "TWE=");
         assert_eq!(unbase64("TWE"), None);
+    }
+
+    #[test]
+    fn a_line_and_its_move_find_each_other() {
+        // A header, three moves (the second in two lines), a footer.
+        let program = Program {
+            moves: vec![0, 0, 1, 2, 2, 3, 3],
+            ..Program::default()
+        };
+        assert_eq!(program.line_of(0), Some(0));
+        assert_eq!(program.line_of(1), Some(2));
+        assert_eq!(program.line_of(2), Some(3), "the first of its lines");
+        assert_eq!(program.line_of(3), Some(5));
+        assert_eq!(program.line_of(9), Some(6), "past the end, the last");
+        assert_eq!(program.made_by(4), Some(2));
+        assert_eq!(program.made_by(7), None);
+        assert_eq!(Program::default().line_of(0), None, "not known");
     }
 
     #[test]

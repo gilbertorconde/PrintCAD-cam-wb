@@ -32,6 +32,10 @@ pub struct RenderReport {
     pub lines: u64,
     /// Motion blocks written.
     pub motion_blocks: u64,
+    /// How many lines are written once each instruction is, one for each:
+    /// which instruction wrote which line, with `op::lower_counted` which
+    /// move.
+    pub op_lines: Vec<u64>,
 }
 
 /// Render a stream into G-code.
@@ -43,8 +47,10 @@ pub fn render(ops: &[Op], profile: &Profile, program_name: &str) -> (String, Ren
     for line in &profile.header {
         w.raw(&line.replace("{name}", &name));
     }
+    w.report.op_lines.reserve(ops.len());
     for op in ops {
         w.op(op);
+        w.report.op_lines.push(w.report.lines);
     }
     for line in &profile.footer {
         w.raw(&line.replace("{name}", &name));

@@ -216,6 +216,19 @@ pub enum LowerError {
 /// a post because every post would otherwise have to repeat it, and one that forgot
 /// would emit a program with a hole in it.
 pub fn lower(path: &Toolpath, spec: &ProgramSpec) -> Result<Vec<Op>, LowerError> {
+    lower_counted(path, spec).map(|(ops, _)| ops)
+}
+
+/// [`lower`], and for each instruction how many of the path's moves are made
+/// once it has run: so a line of the program can be found from a move of the
+/// path, and a move from a line, as a listing beside a playback needs.
+///
+/// A canned cycle stands for the moves that drill its hole, so it counts as
+/// far as the last of them; the rapid across to the first hole counts none.
+pub fn lower_counted(
+    path: &Toolpath,
+    spec: &ProgramSpec,
+) -> Result<(Vec<Op>, Vec<usize>), LowerError> {
     let unresolved = path
         .moves()
         .iter()
@@ -262,11 +275,12 @@ pub fn lower(path: &Toolpath, spec: &ProgramSpec) -> Result<Vec<Op>, LowerError>
     if coolant {
         out.push(Op::CoolantOn(spec.coolant));
     }
+    let mut made = vec![0; out.len()];
 
     if let Some(d) = &spec.drill {
-        cycles(d, &mut out);
+        cycles(d, path, &mut out, &mut made);
     } else {
-        moves(path, &mut out);
+        moves(path, &mut out, &mut made);
     }
 
     if coolant {
@@ -277,12 +291,15 @@ pub fn lower(path: &Toolpath, spec: &ProgramSpec) -> Result<Vec<Op>, LowerError>
     out.push(Op::Home);
     out.push(Op::SectionEnd);
     out.push(Op::ProgramEnd);
-    Ok(out)
+    made.resize(out.len(), path.len());
+    Ok((out, made))
 }
 
 /// Each hole as one canned cycle: across at the clearance height to the first,
 /// then each cycle returning there (`G98`) before the next, and `G80` after.
-fn cycles(d: &DrillCycles, out: &mut Vec<Op>) {
+/// `made` gets, for each, how many of `path`'s moves it stands for: those
+/// down to its hole and back out, found in order.
+fn cycles(d: &DrillCycles, path: &Toolpath, out: &mut Vec<Op>, made: &mut Vec<usize>) {
     let Some(first) = d.holes.first() else {
         return;
     };
@@ -290,12 +307,29 @@ fn cycles(d: &DrillCycles, out: &mut Vec<Op>) {
         to: dvec3(first.at.x, first.at.y, d.clearance),
     });
     out.push(Op::CycleStart);
+    let mut count = made.last().copied().unwrap_or(0);
+    made.resize(out.len(), count);
     let kind = match (d.peck, d.dwell) {
         (Some(_), _) => CycleKind::Peck,
         (None, Some(_)) => CycleKind::DrillDwell,
         (None, None) => CycleKind::Drill,
     };
+    let moves = path.moves();
+    let over = |i: usize, at: DVec2| {
+        moves
+            .get(i)
+            .is_some_and(|m| m.to.truncate().distance(at) < 1e-6)
+    };
     for h in &d.holes {
+        // The first move over the hole after the last hole's, then on while
+        // the moves stay over it.
+        if let Some(i) = (count..moves.len()).find(|&i| over(i, h.at)) {
+            let mut end = i;
+            while over(end + 1, h.at) {
+                end += 1;
+            }
+            count = end + 1;
+        }
         out.push(Op::Cycle {
             kind,
             at: h.at,
@@ -309,30 +343,34 @@ fn cycles(d: &DrillCycles, out: &mut Vec<Op>) {
             },
             feed: d.feed,
         });
+        made.push(count);
     }
     out.push(Op::CycleEnd);
+    made.push(count);
 }
 
-fn moves(path: &Toolpath, out: &mut Vec<Op>) {
-    for m in path.moves() {
-        match (m.kind, m.role, m.feed) {
-            (MoveKind::Linear, MoveRole::Rapid, _) => out.push(Op::Rapid { to: m.to }),
-            (MoveKind::Linear, role, Some(feed)) => out.push(Op::Feed {
+fn moves(path: &Toolpath, out: &mut Vec<Op>, made: &mut Vec<usize>) {
+    for (i, m) in path.moves().iter().enumerate() {
+        let op = match (m.kind, m.role, m.feed) {
+            (MoveKind::Linear, MoveRole::Rapid, _) => Op::Rapid { to: m.to },
+            (MoveKind::Linear, role, Some(feed)) => Op::Feed {
                 to: m.to,
                 feed,
                 role,
-            }),
-            (MoveKind::Arc(arc), role, Some(feed)) => out.push(Op::Arc {
+            },
+            (MoveKind::Arc(arc), role, Some(feed)) => Op::Arc {
                 to: m.to,
                 arc,
                 feed,
                 role,
-            }),
+            },
             // A feeding move with no feed cannot be constructed: Toolpath::push
             // rejects it. Skipping is unreachable, and silently emitting a rapid
             // here would be the dangerous choice.
-            _ => {}
-        }
+            _ => continue,
+        };
+        out.push(op);
+        made.push(i + 1);
     }
 }
 
@@ -412,6 +450,59 @@ mod tests {
             ops.iter().filter(|o| matches!(o, Op::Rapid { .. })).count(),
             1
         );
+    }
+
+    #[test]
+    fn each_instruction_counts_the_moves_made() {
+        let path = linked_path();
+        let (ops, made) = lower_counted(&path, &ProgramSpec::default()).unwrap();
+        assert_eq!(ops.len(), made.len());
+        let motion: Vec<usize> = ops
+            .iter()
+            .zip(&made)
+            .filter(|(o, _)| matches!(o, Op::Rapid { .. } | Op::Feed { .. }))
+            .map(|(_, n)| *n)
+            .collect();
+        assert_eq!(motion, vec![1, 2, 3], "one a move, in order");
+        assert_eq!(made.first(), Some(&0), "nothing before the first");
+        assert_eq!(made.last(), Some(&path.len()), "all of them after");
+        assert!(made.windows(2).all(|w| w[0] <= w[1]));
+    }
+
+    #[test]
+    fn a_cycle_counts_the_moves_that_drill_its_hole() {
+        let mut path = Toolpath::new();
+        for x in [0.0, 10.0] {
+            path.rapid_to(dvec3(x, 0.0, 5.0)).unwrap();
+            path.feed_to(dvec3(x, 0.0, -3.0), MoveRole::Plunge, 100.0)
+                .unwrap();
+            path.feed_to(dvec3(x, 0.0, 5.0), MoveRole::Retract, 300.0)
+                .unwrap();
+        }
+        let hole = |x: f64| Hole {
+            at: DVec2::new(x, 0.0),
+            top: 0.0,
+            bottom: -3.0,
+            radius: 2.0,
+        };
+        let spec = ProgramSpec {
+            drill: Some(DrillCycles {
+                holes: vec![hole(0.0), hole(10.0)],
+                peck: None,
+                dwell: None,
+                feed: 100.0,
+                clearance: 5.0,
+            }),
+            ..ProgramSpec::default()
+        };
+        let (ops, made) = lower_counted(&path, &spec).unwrap();
+        let cycles: Vec<usize> = ops
+            .iter()
+            .zip(&made)
+            .filter(|(o, _)| matches!(o, Op::Cycle { .. }))
+            .map(|(_, n)| *n)
+            .collect();
+        assert_eq!(cycles, vec![3, 6]);
     }
 
     #[test]
