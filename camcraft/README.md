@@ -14,7 +14,7 @@ and `vendor/` (OpenCascade, LGPL) are left out.
 
 ## What is changed here
 
-Only `camcraft-import`:
+In `camcraft-import`:
 
 - The `opencascade` feature is gone (its code, `build.rs` and
   `tests/opencascade.rs`), and with it every trace of OpenCascade and the LGPL.
@@ -22,6 +22,11 @@ Only `camcraft-import`:
   shape, and tessellates it as a STEP file's solids are: `step::mesh_bodies`
   and `step::weld_faces` are what `step` did inline, split out so both use
   them.
+
+And in `camcraft-post`: a LinuxCNC profile (`profiles/linuxcnc.toml`, and
+`linuxcnc-inch.toml`), and a profile's optional `spindle = [slowest, fastest]`
+in rev/min, which `Profile::spindle_problem` checks a speed against; the
+helper warns about an operation asked to turn outside it.
 
 And one fix, in `camcraft-core`'s adaptive clearing
 (`strategy/adaptive/clearing.rs`): a pass that circles a speck it touches

@@ -101,9 +101,10 @@ panels, the drawing and the helper that runs camcraft.
   toolpath (rapids dashed while it is edited), and the material left.
 - **G-code through the save dialog,** one program per operation, or every
   program of a setup into a folder at once, for GRBL,
-  Masso or Centroid CNC12 (Avid), in millimetres or inches, or through a
+  Masso, Centroid CNC12 (Avid) or LinuxCNC, in millimetres or inches, or through a
   machine profile of your own in camcraft's TOML, which a setup carries a
-  copy of.
+  copy of. A profile can give the spindle's range (`spindle = [6000, 24000]`),
+  and an operation whose tool turns outside it is warned about.
 - **Formulas.** Every number of a setup and of an operation takes a formula.
 - **Script commands**, for scripts and AI agents:
 

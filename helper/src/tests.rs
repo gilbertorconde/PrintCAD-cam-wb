@@ -376,13 +376,15 @@ fn a_file_is_read_for_the_package() {
     assert!(crate::read(&old, &path).unwrap_err().contains("reinstall"));
 }
 
-/// A setup posts with a profile of the user's that the request carries.
+/// A setup posts with a profile of the user's that the request carries, and
+/// an operation whose tool turns outside that machine's spindle range is
+/// warned about.
 #[test]
 fn a_post_of_ones_own_writes_the_program() {
     let grbl = include_str!("../../camcraft/crates/camcraft-post/profiles/grbl.toml");
     let mine = grbl.replacen("\"GRBL\"", "\"My mill\"", 1).replacen(
         "extension = \"nc\"",
-        "extension = \"mine\"",
+        "extension = \"mine\"\nspindle = [18000, 24000]",
         1,
     );
     let request = Request {
@@ -403,6 +405,11 @@ fn a_post_of_ones_own_writes_the_program() {
     let program = run.operations[0].program.as_ref().unwrap();
     assert_eq!(program.post, "My mill");
     assert_eq!(program.extension, "mine");
+    let warned = &run.operations[0].warnings;
+    assert!(
+        warned.iter().any(|w| w.contains("16000 rev/min")),
+        "{warned:?}"
+    );
 }
 
 /// A playback session runs the setup once, then answers each seek with the

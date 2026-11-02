@@ -116,6 +116,16 @@ fn centroid_avid_inch_output_is_stable() {
     check("centroid-avid-inch");
 }
 
+#[test]
+fn linuxcnc_output_is_stable() {
+    check("linuxcnc");
+}
+
+#[test]
+fn linuxcnc_inch_output_is_stable() {
+    check("linuxcnc-inch");
+}
+
 fn masso_with_cycles() -> Profile {
     let mut p = Profile::builtin("masso").unwrap().unwrap();
     p.drill_cycles = true;
