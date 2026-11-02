@@ -225,7 +225,17 @@ pub(crate) fn execute(
                 "{} passes, {} links stayed down, removed {:.0} mm³",
                 op.passes, op.links.stayed_down, op.sim.removed_mm3
             ),
-            warnings: op.warnings.clone(),
+            warnings: op
+                .warnings
+                .iter()
+                .cloned()
+                .chain(
+                    op.made
+                        .has_paths()
+                        .then(|| profile.spindle_problem(op.rpm))
+                        .flatten(),
+                )
+                .collect(),
             strokes: std::mem::take(&mut drawn.strokes),
             points: drawn.points,
             cut_mm: drawn.cut,

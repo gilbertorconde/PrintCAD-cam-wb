@@ -795,7 +795,7 @@ impl Bench for Cam {
                             "post",
                             ParamKind::String,
                             false,
-                            "grbl, masso, masso-inch, centroid-avid or centroid-avid-inch",
+                            "grbl, masso, masso-inch, centroid-avid, centroid-avid-inch, linuxcnc or linuxcnc-inch",
                         ),
                         param(
                             "tolerance",

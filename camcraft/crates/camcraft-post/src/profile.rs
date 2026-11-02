@@ -143,6 +143,10 @@ pub struct Profile {
     /// `G80`). Off, a drilling operation is posted as its moves.
     #[serde(default)]
     pub drill_cycles: bool,
+    /// The slowest and fastest the spindle turns, in rev/min. A tool asked to
+    /// turn outside them is warned about. Absent, any speed goes.
+    #[serde(default)]
+    pub spindle: Option<[u32; 2]>,
     /// Lines emitted before anything else. `{name}` is replaced.
     pub header: Vec<String>,
     /// Lines that take the tool straight up clear of everything, as far as the
@@ -198,6 +202,11 @@ const BUILTIN: &[(&str, &str)] = &[
     (
         "centroid-avid-inch",
         include_str!("../profiles/centroid-avid-inch.toml"),
+    ),
+    ("linuxcnc", include_str!("../profiles/linuxcnc.toml")),
+    (
+        "linuxcnc-inch",
+        include_str!("../profiles/linuxcnc-inch.toml"),
     ),
 ];
 
@@ -279,7 +288,27 @@ impl Profile {
                     .into(),
             });
         }
+        if let Some([low, high]) = self.spindle
+            && low > high
+        {
+            return Err(ProfileError::BadValue {
+                field: "spindle",
+                reason: format!("its slowest, {low}, is faster than its fastest, {high}"),
+            });
+        }
         Ok(())
+    }
+
+    /// What is wrong with turning the spindle at `rpm` on this machine, if
+    /// anything: a speed outside its `spindle` range.
+    pub fn spindle_problem(&self, rpm: u32) -> Option<String> {
+        let [low, high] = self.spindle?;
+        (rpm < low || rpm > high).then(|| {
+            format!(
+                "the spindle is asked for {rpm} rev/min, outside {}'s {low} to {high}",
+                self.name
+            )
+        })
     }
 
     /// Format a value for an axis word.
@@ -416,6 +445,39 @@ mod tests {
             ..mm
         };
         assert_eq!(inch, expected);
+    }
+
+    /// LinuxCNC in inches is the millimetre profile in everything but its name
+    /// and units.
+    #[test]
+    fn linuxcnc_inch_is_linuxcnc_in_inches() {
+        let mm = Profile::builtin("linuxcnc").unwrap().unwrap();
+        let inch = Profile::builtin("linuxcnc-inch").unwrap().unwrap();
+        let expected = Profile {
+            name: "LinuxCNC (inch)".into(),
+            units: ProgramUnits::Inch,
+            ..mm
+        };
+        assert_eq!(inch, expected);
+    }
+
+    /// A speed outside the machine's range is a problem; inside it, or with no
+    /// range given, none.
+    #[test]
+    fn spindle_speeds_are_checked_against_the_range() {
+        let mut p = Profile::builtin("grbl").unwrap().unwrap();
+        assert_eq!(p.spindle_problem(100_000), None, "no range, any speed");
+        p.spindle = Some([8000, 24000]);
+        assert_eq!(p.spindle_problem(8000), None);
+        assert_eq!(p.spindle_problem(24000), None);
+        let slow = p.spindle_problem(5000).unwrap();
+        assert!(
+            slow.contains("5000") && slow.contains("8000 to 24000"),
+            "{slow}"
+        );
+        assert!(p.spindle_problem(30000).is_some());
+        p.spindle = Some([24000, 8000]);
+        assert!(p.validate().is_err(), "slowest above fastest");
     }
 
     /// Avid as Fusion's Avid post writes it: no trailing zeros and no bare
