@@ -511,3 +511,94 @@ fn each_line_counts_the_moves_of_the_instruction_that_wrote_it() {
         "no instructions"
     );
 }
+
+/// One of the sled base's holes, picked by its top and bottom rims, tapped
+/// left-hand. For a post without the tapping cycle the run is shown but fails,
+/// saying why, and has no program; for one with it, it passes, a G74 a hole.
+#[test]
+fn a_tap_posts_only_where_the_post_has_the_cycle() {
+    let job = r#"
+version = 1
+tolerance = 0.1
+
+[tools.tap]
+kind = "flat"
+diameter = 5.08
+number = 7
+rpm = 600
+comment = "M5 tap"
+
+[[model]]
+name = "sled"
+path = "sled"
+
+[[stock]]
+name = "block"
+kind = "around-models"
+margin = [2.0, 2.0, 2.0]
+
+[[setup]]
+name = "top"
+models = ["sled"]
+stocks = ["block"]
+post = "grbl"
+
+[[setup.operation]]
+name = "threads"
+strategy = "drill"
+pitch = 0.8
+hand = "left"
+tool = "tap"
+selection = { edges = [
+    { model = "sled", index = 86, at = [228.11, 195.25, 40.894] },
+    { model = "sled", index = 100, at = [228.11, 195.25, 1.016] },
+] }
+"#;
+    let request = |post: Option<String>| Request {
+        version: VERSION,
+        job: job.into(),
+        shapes: BTreeMap::from([(
+            "sled".to_string(),
+            Shape {
+                text: native("sled_base.step"),
+                placement: IDENTITY,
+            },
+        )]),
+        max_points: 0,
+        post,
+        read: None,
+    };
+    let refused = answer(&request(None)).unwrap();
+    assert!(!refused.passed);
+    let said = &refused.findings[0];
+    assert_eq!((said.level, said.operation), (Level::Fail, Some(0)));
+    assert!(said.text.contains("tapping cycle"), "{said:?}");
+    let op = &refused.operations[0];
+    assert!(op.program.is_none());
+    assert!(op.cut_mm > 0.0, "its path is still shown");
+
+    let grbl = include_str!("../../camcraft/crates/camcraft-post/profiles/grbl.toml");
+    let cycles = grbl.replacen(
+        "extension = \"nc\"",
+        "extension = \"nc\"\ndrill_cycles = true",
+        1,
+    );
+    let run = answer(&request(Some(cycles))).unwrap();
+    for f in run.findings.iter().filter(|f| f.level == Level::Fail) {
+        eprintln!("{f:?}");
+    }
+    assert!(run.passed);
+    let program = run.operations[0].program.as_ref().unwrap();
+    assert!(program.text.contains("S600 M4"), "{}", program.text);
+    let taps: Vec<&str> = program
+        .text
+        .lines()
+        .filter(|l| l.starts_with("G74"))
+        .collect();
+    assert_eq!(taps.len(), 1, "{}", program.text);
+    assert!(
+        taps[0].ends_with("F480"),
+        "0.8 mm a turn at 600: {}",
+        taps[0]
+    );
+}
