@@ -5,7 +5,7 @@
 
 use camcraft_core::job::{
     ContourOrder, FaceDirection, Finishing, Operation, PassOrder, RadialDirection, StrategySpec,
-    TabShape, Tabs, ToolSpec,
+    TabShape, Tabs, ThreadHand, ToolSpec,
 };
 use printcad_bench_sdk::api::*;
 use printcad_bench_sdk::serde_json::{self, Value};
@@ -43,6 +43,16 @@ pub struct PassesData {
     /// A drill's peck depth and its dwell at the bottom, in seconds.
     pub peck: Opt,
     pub dwell: Opt,
+    /// How far a peck backs off to break the chip, rather than out of the
+    /// hole: Fusion's chip break distance.
+    #[serde(default)]
+    pub chip_break: Opt,
+    /// A tap's thread: its pitch, mm a turn, and its hand. Given, each hole is
+    /// tapped rather than drilled, and the peck, chip break and dwell wait.
+    #[serde(default)]
+    pub pitch: Opt,
+    #[serde(default)]
+    pub hand: ThreadHand,
     pub tabs: bool,
     pub tab_shape: TabShape,
     pub tab_width: f64,
@@ -75,6 +85,9 @@ impl Default for PassesData {
             pass_extension: 0.0,
             peck: Opt::default(),
             dwell: Opt::default(),
+            chip_break: Opt::default(),
+            pitch: Opt::default(),
+            hand: ThreadHand::default(),
             tabs: false,
             tab_shape: tabs.shape,
             tab_width: tabs.width,
@@ -175,9 +188,21 @@ impl PassesData {
                 min_ring_length, ..
             } => self.min_ring_length = min_ring_length,
             StrategySpec::Face { pass_extension, .. } => self.pass_extension = pass_extension,
-            StrategySpec::Drill { peck, dwell, .. } => {
-                self.peck = Opt::of(peck);
-                self.dwell = Opt::of(dwell);
+            StrategySpec::Drill {
+                peck,
+                dwell,
+                chip_break,
+                pitch,
+                hand,
+            } => {
+                // Tapping, the others are not given, and keep what they were.
+                if pitch.is_none() {
+                    self.peck = Opt::of(peck);
+                    self.dwell = Opt::of(dwell);
+                    self.chip_break = Opt::of(chip_break);
+                }
+                self.pitch = Opt::of(pitch);
+                self.hand = hand;
             }
             _ => {}
         }
@@ -261,8 +286,21 @@ impl PassesData {
                 min_ring_length, ..
             } => *min_ring_length = self.min_ring_length,
             StrategySpec::Face { pass_extension, .. } => *pass_extension = self.pass_extension,
-            StrategySpec::Drill { peck, dwell, .. } => {
-                (*peck, *dwell) = (self.peck.get(), self.dwell.get());
+            StrategySpec::Drill {
+                peck,
+                dwell,
+                chip_break,
+                pitch,
+                hand,
+            } => {
+                // A tap neither pecks nor pauses; a chip is broken between pecks.
+                let tapping = self.pitch.given;
+                let drilling = |v: Opt| v.get().filter(|_| !tapping);
+                *peck = drilling(self.peck);
+                *dwell = drilling(self.dwell);
+                *chip_break = drilling(self.chip_break).filter(|_| self.peck.given);
+                *pitch = self.pitch.get();
+                *hand = self.hand;
             }
             _ => {}
         }
@@ -301,7 +339,8 @@ impl PassesData {
         let centred = matches!(s, StrategySpec::Spiral { .. } | StrategySpec::Radial { .. });
         let centre = centred || matches!(s, StrategySpec::MorphedSpiral { .. });
         let radial = matches!(s, StrategySpec::Radial { .. });
-        let drill = matches!(s, StrategySpec::Drill { .. });
+        let tap = self.pitch.given;
+        let drill = matches!(s, StrategySpec::Drill { .. }) && !tap;
         let mut out = Vec::new();
         let mut add = |on: bool, field: &'static str, label, dim| {
             if on {
@@ -347,7 +386,19 @@ impl PassesData {
                 Dim::Length,
             ),
             (drill && self.peck.given, "peck", "Peck", Dim::Length),
+            (
+                drill && self.peck.given && self.chip_break.given,
+                "chip_break",
+                "Chip break distance",
+                Dim::Length,
+            ),
             (drill && self.dwell.given, "dwell", "Dwell, s", Dim::Number),
+            (
+                matches!(s, StrategySpec::Drill { .. }) && tap,
+                "pitch",
+                "Thread pitch",
+                Dim::Length,
+            ),
             (
                 finishing && self.finishing_stepover.given,
                 "finishing_stepover",
@@ -387,6 +438,10 @@ const FACE_DIRECTIONS: [(FaceDirection, &str); 3] = [
     (FaceDirection::Climb, "Climb"),
     (FaceDirection::Conventional, "Conventional"),
 ];
+const HANDS: [(ThreadHand, &str); 2] = [
+    (ThreadHand::Right, "Right-hand: G84"),
+    (ThreadHand::Left, "Left-hand: G74"),
+];
 const TAB_SHAPES: [(TabShape, &str); 2] = [
     (TabShape::Rectangular, "Rectangular"),
     (TabShape::Triangular, "Triangular: ramped, no plunge"),
@@ -419,8 +474,9 @@ fn flat_areas_mut(s: &mut StrategySpec) -> Option<&mut bool> {
     }
 }
 
-/// The strategy's own rows of the Passes group, and the deepest step.
-pub fn strategy_rows(data: &OperationData, feature: &str) -> Vec<Widget> {
+/// The strategy's own rows of the Passes group, and the deepest step, for an
+/// operation cutting with `tool`.
+pub fn strategy_rows(data: &OperationData, tool: Option<&ToolSpec>, feature: &str) -> Vec<Widget> {
     let p = &data.passes;
     let mut s = data.operation.strategy;
     let mut rows = Vec::new();
@@ -526,8 +582,28 @@ pub fn strategy_rows(data: &OperationData, feature: &str) -> Vec<Widget> {
         rows.push(angle("passes/slope_to", "Slopes to", p.slope_to));
     }
     if let StrategySpec::Drill { .. } = s {
+        drill_rows(&mut rows, data, tool, feature);
+    }
+    rows.push(length(
+        "passes/max_cut_step",
+        "Deepest step",
+        p.max_cut_step,
+    ));
+    rows
+}
+
+/// A drilling operation's rows: its pecks, how they break the chip and the
+/// pause at the bottom; or, tapping, the thread and the feed it makes.
+fn drill_rows(
+    rows: &mut Vec<Widget>,
+    data: &OperationData,
+    tool: Option<&ToolSpec>,
+    feature: &str,
+) {
+    let p = &data.passes;
+    if !p.pitch.given {
         optional_row(
-            &mut rows,
+            rows,
             "passes",
             "peck",
             "Peck",
@@ -536,8 +612,20 @@ pub fn strategy_rows(data: &OperationData, feature: &str) -> Vec<Widget> {
             Dim::Length,
             feature,
         );
+        if p.peck.given {
+            optional_row(
+                rows,
+                "passes",
+                "chip_break",
+                "Chip break distance",
+                "out of the hole each peck",
+                p.chip_break,
+                Dim::Length,
+                feature,
+            );
+        }
         optional_row(
-            &mut rows,
+            rows,
             "passes",
             "dwell",
             "Dwell at the bottom, s",
@@ -547,12 +635,35 @@ pub fn strategy_rows(data: &OperationData, feature: &str) -> Vec<Widget> {
             feature,
         );
     }
-    rows.push(length(
-        "passes/max_cut_step",
-        "Deepest step",
-        p.max_cut_step,
-    ));
-    rows
+    optional_row(
+        rows,
+        "passes",
+        "pitch",
+        "Tap: thread pitch",
+        "drilled, not tapped",
+        p.pitch,
+        Dim::Length,
+        feature,
+    );
+    if p.pitch.given {
+        rows.push(pick("passes/hand", "Thread", &HANDS, p.hand));
+        let rpm = match (data.rpm, tool) {
+            (r, _) if r > 0.0 => Some(r),
+            (_, Some(t)) => Some(f64::from(t.rpm)),
+            (_, None) => None,
+        };
+        let feed = match rpm {
+            Some(rpm) => format!("{:.0} mm/min at {rpm:.0} rev/min", p.pitch.value * rpm),
+            None => "the pitch times the spindle's speed".into(),
+        };
+        rows.push(Widget::Text {
+            text: format!(
+                "Fed in at the pitch a turn, {feed}, and back out with the spindle \
+                 reversed. Only a post with drill cycles can write it."
+            ),
+            mono: false,
+        });
+    }
 }
 
 /// The Tabs group, for a strategy that leaves them.
@@ -655,11 +766,35 @@ fn start(field: &str, data: &OperationData, tool: Option<&ToolSpec>) -> Option<f
     Some(match field {
         "outer_radius" => data.passes.inner_radius + 10.0,
         "peck" => 2.0,
+        "chip_break" => 0.5,
         "dwell" => 0.5,
+        "pitch" => coarse_pitch(d),
         "finishing_stepover" => 0.1 * d,
         "finishing_feed" => data.feed,
         _ => return None,
     })
+}
+
+/// The ISO metric coarse pitch of the thread nearest `diameter` across, as a
+/// tap of that size most likely cuts.
+fn coarse_pitch(diameter: f64) -> f64 {
+    const COARSE: [(f64, f64); 11] = [
+        (2.0, 0.4),
+        (2.5, 0.45),
+        (3.0, 0.5),
+        (4.0, 0.7),
+        (5.0, 0.8),
+        (6.0, 1.0),
+        (8.0, 1.25),
+        (10.0, 1.5),
+        (12.0, 1.75),
+        (16.0, 2.0),
+        (20.0, 2.5),
+    ];
+    COARSE
+        .iter()
+        .min_by(|a, b| (a.0 - diameter).abs().total_cmp(&(b.0 - diameter).abs()))
+        .map_or(1.0, |(_, p)| *p)
 }
 
 /// A range camcraft would refuse put right, as camcraft's app does as it is
@@ -723,6 +858,12 @@ pub fn passes_event(
             );
         }
         ("flat_areas", PanelEvent::Toggle { on, .. }) => return set(flat_areas_mut(s), Some(*on)),
+        ("hand", PanelEvent::Choice { index, .. }) => {
+            return set(
+                Some(&mut data.passes.hand),
+                HANDS.get(*index).map(|(x, _)| *x),
+            );
+        }
         ("tab_shape", PanelEvent::Choice { index, .. }) => {
             return set(
                 Some(&mut data.passes.tab_shape),
@@ -819,9 +960,94 @@ mod tests {
             StrategySpec::Drill {
                 peck: Some(1.5),
                 dwell: None,
+                chip_break: None,
+                pitch: None,
                 ..
             }
         ));
+    }
+
+    /// Chip breaking and tapping reach the operation and come back from it,
+    /// and while it taps, the peck and the rest wait, kept.
+    #[test]
+    fn chip_breaking_and_tapping_reach_the_operation() {
+        let mut drill = op("drill");
+        let tick = |field: &str| PanelEvent::Toggle {
+            id: format!("passes/{field}/given"),
+            on: true,
+        };
+        assert!(passes_event(&mut drill, "peck/given", &tick("peck"), None));
+        assert!(passes_event(
+            &mut drill,
+            "chip_break/given",
+            &tick("chip_break"),
+            None
+        ));
+        let cut = drill.operation("");
+        assert!(matches!(
+            cut.strategy,
+            StrategySpec::Drill {
+                peck: Some(2.0),
+                chip_break: Some(0.5),
+                pitch: None,
+                ..
+            }
+        ));
+        assert_eq!(PassesData::of(&cut), drill.passes);
+        let names: Vec<_> = drill
+            .passes
+            .parameters(&cut)
+            .into_iter()
+            .map(|(_, name, ..)| name)
+            .collect();
+        assert!(names.contains(&"chip_break"), "{names:?}");
+
+        // An M8 tap, left-hand.
+        let tap: ToolSpec = serde_json::from_value(serde_json::json!({
+            "kind": "flat", "diameter": 8.0, "number": 1
+        }))
+        .unwrap();
+        assert!(passes_event(
+            &mut drill,
+            "pitch/given",
+            &tick("pitch"),
+            Some(&tap)
+        ));
+        let left = PanelEvent::Choice {
+            id: "passes/hand".into(),
+            index: 1,
+        };
+        assert!(passes_event(&mut drill, "hand", &left, None));
+        let cut = drill.operation("");
+        assert!(matches!(
+            cut.strategy,
+            StrategySpec::Drill {
+                peck: None,
+                chip_break: None,
+                dwell: None,
+                pitch: Some(1.25),
+                hand: ThreadHand::Left,
+            }
+        ));
+        let back = OperationData::from(&drill.to_value()).unwrap();
+        assert_eq!(back.passes.peck, Opt::of(Some(2.0)), "the peck waits");
+        // A document from before them drills as it did.
+        let mut old = op("drill").to_value();
+        for field in ["chip_break", "pitch", "hand"] {
+            old["passes"].as_object_mut().unwrap().remove(field);
+        }
+        let old = OperationData::from(&old).unwrap();
+        assert_eq!(old.operation(""), op("drill").operation(""));
+        let names: Vec<_> = drill
+            .passes
+            .parameters(&cut)
+            .into_iter()
+            .map(|(_, name, ..)| name)
+            .collect();
+        assert!(
+            names.contains(&"pitch") && !names.contains(&"peck"),
+            "{names:?}"
+        );
     }
 
     #[test]

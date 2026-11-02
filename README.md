@@ -37,7 +37,8 @@ panels, the drawing and the helper that runs camcraft.
   the toolbar makes one on the selected body, or on every shown one.
 - **Operations**, after Fusion's: adaptive and pocket clearing; parallel,
   scallop, contour, flat, spiral, radial and morphed spiral finishing; 2D
-  profiles and pockets; facing; drilling. An operation
+  profiles and pockets; facing; drilling: at once, in pecks backing out,
+  breaking the chip, or tapping, right- or left-hand. An operation
   (`io.github.gilbertorconde.cam.operation`) belongs to a setup and runs in the
   document's order, each against what the one before left. Drag one in the
   tree to run it sooner or later, or under another setup.
@@ -62,7 +63,8 @@ panels, the drawing and the helper that runs camcraft.
   the panel says what that comes to for the tool.
 - **Passes**, as Fusion's Passes tab: besides the stepover, depths, feeds and
   stock to leave, each strategy's own settings (slopes, order, centre and
-  radii, spokes, pass extension, peck and dwell, flat areas), the deepest step,
+  radii, spokes, pass extension, flat areas; a drill's peck, chip break
+  distance and dwell, or a tap's pitch and hand), the deepest step,
   tabs to hold a profiled part, and finishing passes along a pocket's walls.
   Hovering the stepover, stepdown, stock to leave or a height shows a sketch
   of what it measures, as camcraft's hints do.
@@ -108,7 +110,15 @@ panels, the drawing and the helper that runs camcraft.
   Masso, Centroid CNC12 (Avid) or LinuxCNC, in millimetres or inches, or through a
   machine profile of your own in camcraft's TOML, which a setup carries a
   copy of. A profile can give the spindle's range (`spindle = [6000, 24000]`),
-  and an operation whose tool turns outside it is warned about.
+  and an operation whose tool turns outside it is warned about. A profile
+  that takes canned cycles (`drill_cycles = true`) writes each hole as one:
+  G81, G82 with a dwell, G83 pecking, G73 breaking the chip (backing off as
+  far as the controller is set to), and G84, or G74 left-hand, tapping at the
+  pitch times the spindle's speed. The built-in posts have them off, until
+  they are dry-run on each machine: holes go as plain moves, and tapping is
+  refused, as a failed check, since no plain move keeps the feed to the
+  spindle as it reverses at the bottom. A tap is kept in the tool library as
+  a flat end mill its size, and turns the way its thread does.
 - **Formulas.** Every number of a setup and of an operation takes a formula.
 - **Script commands**, for scripts and AI agents:
 
