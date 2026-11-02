@@ -26,9 +26,13 @@ use camcraft_core::setup::frame::Frame;
 use camcraft_core::setup::{Bodies, Prepared, features, prepare};
 use camcraft_geom::mesh::Aabb;
 use camcraft_import::native::load_native;
+use camcraft_post::op::lower_counted;
 use camcraft_post::profile::Profile;
+use camcraft_post::render::render;
 use camcraft_session::checks::Level as CheckLevel;
-use camcraft_session::{Model, Models, Ran, load_profile, parse_job, program, run_setup_planned};
+use camcraft_session::{
+    Model, Models, Ran, load_profile, parse_job, program_spec, run_setup_planned,
+};
 use glam::{DAffine3, DMat4, DVec2, DVec3};
 
 /// How many columns a side the drawn material has, at most.
@@ -206,13 +210,17 @@ pub(crate) fn execute(
         let mut drawn = strokes(&op.path, &frame, tolerance, request.max_points);
         let program = if op.made.has_paths() {
             let name = camcraft_session::program_name(&setup.name, k, &op.name);
-            let (text, report) =
-                program(op, setup.wcs, &profile, &name).map_err(|e| e.to_string())?;
+            // As `camcraft_session::program` posts it, keeping which move
+            // each line is of.
+            let (ops, made) = lower_counted(&op.path, &program_spec(op, setup.wcs, &profile))
+                .map_err(|e| e.to_string())?;
+            let (text, report) = render(&ops, &profile, &name);
             Some(Program {
                 name,
                 extension: profile.extension.clone(),
                 post: profile.name.clone(),
                 lines: usize::try_from(report.lines).unwrap_or(usize::MAX),
+                moves: line_moves(&made, &report.op_lines, report.lines),
                 text,
             })
         } else {
@@ -373,6 +381,25 @@ fn findings(ran: &Ran) -> Vec<Finding> {
         Level::Pass => 3,
     };
     out.sort_by_key(|f| rank(f.level));
+    out
+}
+
+/// For each of a program's `lines`, how many moves are made once it has run:
+/// `made` says it of each instruction, and `op_lines` how many lines are
+/// written once each is. The header's lines make none.
+pub(crate) fn line_moves(made: &[usize], op_lines: &[u64], lines: u64) -> Vec<u32> {
+    let mut out = Vec::with_capacity(usize::try_from(lines).unwrap_or(0));
+    let mut now = 0;
+    for (n, upto) in made.iter().zip(op_lines) {
+        now = u32::try_from(*n).unwrap_or(u32::MAX);
+        while (out.len() as u64) < *upto {
+            out.push(now);
+        }
+    }
+    // The footer's.
+    while (out.len() as u64) < lines {
+        out.push(now);
+    }
     out
 }
 

@@ -102,6 +102,19 @@ fn a_native_solid_runs_and_posts() {
     assert!(drawn > 0 && drawn <= 5000 + op.strokes.len(), "{drawn}");
     let program = op.program.as_ref().unwrap();
     assert!(program.text.contains("G21"), "millimetres");
+    // Each line says how many moves are made once it has run: none in the
+    // header, every one by the end, and a cutting move where a move is.
+    assert_eq!(program.moves.len(), program.text.lines().count());
+    assert_eq!(program.moves.len(), program.lines);
+    assert_eq!(program.moves.first(), Some(&0));
+    let moves = run.playback.as_ref().unwrap().moments.last().unwrap().of;
+    assert_eq!(program.moves.last().map(|m| *m as usize), Some(moves));
+    assert!(program.moves.windows(2).all(|w| w[0] <= w[1]));
+    let first_cut = program.text.lines().position(|l| l.starts_with("G1"));
+    let first_cut = first_cut.expect("a cut");
+    assert!(program.moves[first_cut] > program.moves[first_cut - 1]);
+    let line = program.line_of(program.moves[first_cut] as usize);
+    assert_eq!(line, Some(first_cut), "the line found again from its move");
     assert!(run.material.is_some());
     assert!(run.stock[1][2] > run.stock[0][2]);
     // Its boundary, the part's silhouette, drawn with where the tool may go
@@ -479,4 +492,22 @@ fn a_session_plays_back_at_full_resolution() {
     // Back at the start the block is whole again where it changed.
     let top = heights(&start).into_iter().max().unwrap();
     assert!(heights(&back).iter().all(|h| *h == top));
+}
+
+#[test]
+fn each_line_counts_the_moves_of_the_instruction_that_wrote_it() {
+    // Two header lines; an instruction of two lines making none, one of a
+    // line making a move, one writing nothing, one of two lines making two
+    // more; a footer line.
+    let made = [0, 1, 1, 3];
+    let op_lines = [4, 5, 5, 7];
+    assert_eq!(
+        crate::line_moves(&made, &op_lines, 8),
+        vec![0, 0, 0, 0, 1, 3, 3, 3]
+    );
+    assert_eq!(
+        crate::line_moves(&[], &[], 2),
+        vec![0, 0],
+        "no instructions"
+    );
 }
