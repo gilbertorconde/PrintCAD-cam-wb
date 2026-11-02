@@ -527,3 +527,27 @@ fn a_move_to_the_current_position_emits_nothing() {
     // The first, from nowhere known, is two blocks: down, then across.
     assert_eq!(report.motion_blocks, 2, "the second move is a no-op:\n{g}");
 }
+
+/// Each instruction's lines are counted as written, so every line of the
+/// program can be traced to the instruction, and the move, that wrote it.
+#[test]
+fn each_instruction_says_how_far_the_lines_go() {
+    let p = masso();
+    let ops = crate::op::lower(&path(), &ProgramSpec::default()).unwrap();
+    let (g, report) = render(&ops, &p, "t");
+    assert_eq!(report.op_lines.len(), ops.len());
+    assert!(report.op_lines.windows(2).all(|w| w[0] <= w[1]));
+    let lines = g.lines().count() as u64;
+    assert_eq!(report.lines, lines);
+    assert!(report.op_lines.last().is_some_and(|n| *n <= lines));
+    // Each feed of this path moves the tool: one line, a move.
+    for (i, op) in ops.iter().enumerate() {
+        if !matches!(op, Op::Feed { .. }) {
+            continue;
+        }
+        let from = report.op_lines[i - 1];
+        assert_eq!(report.op_lines[i], from + 1, "{op:?}");
+        let line = g.lines().nth(from as usize).unwrap();
+        assert!(line.contains(['X', 'Y', 'Z']), "{line}");
+    }
+}

@@ -36,6 +36,13 @@ close to where it last took some, ends there. The test
 `a_pass_that_takes_nothing_ends` replays one such pass from
 `strategy/adaptive/circling.txt`.
 
+And in `camcraft-post`, so a program's lines can be traced to the moves
+they make, for the listing beside playback: `op::lower_counted` is `lower`
+that also says, for each instruction, how many of the path's moves are made
+once it has run (a canned cycle counting the moves that drill its hole), and
+`RenderReport::op_lines` says how many lines are written once each
+instruction is. What is written is unchanged.
+
 And one test: ogeom is 0.11.1 here, which printCAD's shapes need, and it
 meshes `round_edge_loose_fit.step`'s seam that 0.11.0 drew off the torus, so
 `a_loose_fit_is_refused_for_ogeoms_seam` became
