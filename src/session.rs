@@ -35,6 +35,8 @@ pub struct Session {
     /// The setup, and the run it plays: a digest of what it was run from.
     pub setup: String,
     pub key: u64,
+    /// The run's [`cam_protocol::timing`]: the session's must be the same.
+    timing: u64,
     ready: Option<(SessionReady, u64)>,
     /// A seek asked for and not yet answered.
     waiting: bool,
@@ -44,12 +46,14 @@ pub struct Session {
     pub at: Option<StockPatch>,
     /// Why it stopped, when it did.
     pub failed: Option<String>,
+    /// Whether that was said.
+    told: bool,
 }
 
 impl Session {
     /// Start one for `setup`'s run `key`, made from `request`, the run's
-    /// own request.
-    pub fn open(setup: &str, key: u64, request: &str) -> Result<Self, String> {
+    /// own request, whose moves end as `timing` says.
+    pub fn open(setup: &str, key: u64, request: &str, timing: u64) -> Result<Self, String> {
         let handle = host::helper_open(cam_protocol::HELPER)?;
         // The request is already JSON: wrapped, it is the opening line.
         if let Err(e) = host::helper_send(handle, &format!("{{\"open\":{request}}}")) {
@@ -60,12 +64,21 @@ impl Session {
             handle,
             setup: setup.into(),
             key,
+            timing,
             ready: None,
             waiting: true,
             asked: None,
             at: None,
             failed: None,
+            told: false,
         })
+    }
+
+    /// Why it stopped, the first time it is asked after it did.
+    pub fn failure(&mut self) -> Option<String> {
+        let why = self.failed.clone().filter(|_| !self.told)?;
+        self.told = true;
+        Some(why)
     }
 
     /// The grid's timing, once the session has run: when each move ends.
@@ -114,6 +127,10 @@ impl Session {
         match serde_json::from_str::<SessionOut>(line) {
             Ok(SessionOut::Ready(ready)) => {
                 self.waiting = false;
+                if let Err(e) = agrees(&ready, self.timing) {
+                    self.failed = Some(e);
+                    return;
+                }
                 match grid(&ready) {
                     Ok(mesh) => self.ready = Some((*ready, mesh)),
                     Err(e) => self.failed = Some(e),
@@ -140,6 +157,18 @@ impl Drop for Session {
         if let Some((_, mesh)) = &self.ready {
             host::mesh_remove(*mesh);
         }
+    }
+}
+
+/// Whether a session that answered `ready` times its moves as the run
+/// shown, whose timing is `timing`. A session that ran something else
+/// would step and seek to the wrong moves, so it is not used: playback
+/// stays coarse, on the run's own times, rather than land wrong.
+fn agrees(ready: &SessionReady, timing: u64) -> Result<(), String> {
+    if ready.timing == timing {
+        Ok(())
+    } else {
+        Err("the playback helper's run of the setup is not the one shown".into())
     }
 }
 
@@ -205,4 +234,32 @@ fn apply(ready: &SessionReady, mesh: u64, patch: &StockPatch) -> Result<(), Stri
         host::mesh_update(mesh, row * ready.cols + patch.col, &positions, &colours)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_session_is_used_only_for_the_run_shown() {
+        let ends = [vec![0.0, 4.0, 10.0], vec![5.0, 30.0]];
+        let timing = cam_protocol::timing(ends.iter().map(Vec::as_slice));
+        let ready = SessionReady {
+            timing,
+            ..SessionReady::default()
+        };
+        assert_eq!(agrees(&ready, timing), Ok(()));
+        // The same job, an operation timed a little longer.
+        let longer = [vec![0.0, 4.0, 10.0], vec![5.0, 30.5]];
+        let other = cam_protocol::timing(longer.iter().map(Vec::as_slice));
+        assert_ne!(other, timing);
+        assert!(agrees(&ready, other).is_err());
+        // A move more, or the same moves split differently between
+        // operations, is another run too.
+        let more = [vec![0.0, 4.0, 10.0, 10.0], vec![5.0, 30.0]];
+        let split = [vec![0.0, 4.0], vec![10.0, 5.0, 30.0]];
+        for t in [&more, &split] {
+            assert_ne!(cam_protocol::timing(t.iter().map(Vec::as_slice)), timing);
+        }
+    }
 }

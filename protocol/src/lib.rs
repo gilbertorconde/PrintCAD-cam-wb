@@ -16,7 +16,7 @@ pub const HELPER: &str = "camcraft-helper";
 
 /// Bumped whenever a request or response changes shape, so a package never
 /// reads an answer from a helper of another build.
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 5;
 
 /// One setup to run.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -107,6 +107,11 @@ pub struct Run {
     pub playback: Option<Playback>,
     /// How long it took, in seconds.
     pub seconds: f64,
+    /// When each move ends, as one number ([`timing`]): a playback session
+    /// says the same of its run, so the package knows the session's moves
+    /// are the ones it shows.
+    #[serde(default)]
+    pub timing: u64,
 }
 
 /// A round bar of stock, in the document's coordinates.
@@ -370,12 +375,36 @@ pub struct SessionReady {
     /// When each move of each operation ends, in machining seconds from
     /// the setup's start.
     pub times: Vec<Vec<f32>>,
+    /// Its run's [`timing`], as [`Run::timing`] has it.
+    #[serde(default)]
+    pub timing: u64,
     /// The grid's squares (from point `(c, r)` to `(c + 1, r + 1)`, row by
     /// row) with no stock over them at the start, as round stock leaves
     /// its box's corners: a bit each, the lowest first, in base64. Empty
     /// when there are none.
     #[serde(default)]
     pub bare: String,
+}
+
+/// A digest of when each move of each operation ends, in machining seconds
+/// from the operation's start: two runs time their moves alike only if they
+/// have the same moves at the same feeds. FNV-1a over each operation's move
+/// count and each time's bits, so it is the same on every system.
+pub fn timing<'a>(operations: impl IntoIterator<Item = &'a [f64]>) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut eat = |word: u64| {
+        for b in word.to_le_bytes() {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+    };
+    for times in operations {
+        eat(times.len() as u64);
+        for t in times {
+            eat(t.to_bits());
+        }
+    }
+    h
 }
 
 /// Whether square `i` is one of `bare`'s, as [`SessionReady::bare`] packs

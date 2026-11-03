@@ -164,6 +164,10 @@ panels, the drawing and the helper that runs camcraft.
   Once playing, the material is swept again at full resolution by the helper
   kept running for it (up to 600 points a side), and steps go a move at a
   time; until then, and where it cannot, the run's coarse moments play.
+  The helper runs the setup from the same request as the run shown, even
+  when the document has changed since without the setup running again,
+  and its moves must end when the run's do; when they do not, playback
+  stays coarse and says so, rather than step and seek to the wrong moves.
   The panel lists the program being played (the operation's own, or in a
   setup's panel the one under way): the lines round the playhead's,
   numbered, with its line marked, following it as it plays. Click a line's
