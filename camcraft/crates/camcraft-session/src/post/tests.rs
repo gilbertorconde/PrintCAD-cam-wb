@@ -108,7 +108,7 @@ fn a_program_renders_from_a_run() {
     let ran = run_small();
     let profile = load_profile("masso", None).unwrap();
     let op = ran.result.operations.first().unwrap();
-    let (text, report) = program(op, 54, &profile, "01-finish").unwrap();
+    let (text, report) = program(op, 54, &ran.result.frame, &profile, "01-finish").unwrap();
     assert!(text.contains("G54"));
     assert!(report.motion_blocks > 10);
     let word = |w: &str| text.split_whitespace().any(|x| x == w);
@@ -136,10 +136,10 @@ fn holes_are_cycles_only_where_the_profile_takes_them() {
         feed: 200.0,
     });
     let mut profile = load_profile("masso", None).unwrap();
-    let (moves, _) = program(&op, 54, &profile, "01-holes").unwrap();
+    let (moves, _) = program(&op, 54, &ran.result.frame, &profile, "01-holes").unwrap();
     assert!(!moves.contains("G83"), "{moves}");
     profile.drill_cycles = true;
-    let (cycles, _) = program(&op, 54, &profile, "01-holes").unwrap();
+    let (cycles, _) = program(&op, 54, &ran.result.frame, &profile, "01-holes").unwrap();
     assert!(cycles.contains("G83 X3. Y4. Z0. R7."), "{cycles}");
     assert!(cycles.contains("G80"), "{cycles}");
 }
@@ -172,13 +172,13 @@ fn a_tap_is_posted_only_as_its_cycle() {
         feed: tap.feed(400.0),
     });
     let mut profile = load_profile("masso", None).unwrap();
-    let refused = program(&op, 54, &profile, "01-threads").unwrap_err();
+    let refused = program(&op, 54, &ran.result.frame, &profile, "01-threads").unwrap_err();
     assert!(
         refused.to_string().contains("drill_cycles = true"),
         "{refused}"
     );
     profile.drill_cycles = true;
-    let (cycles, _) = program(&op, 54, &profile, "01-threads").unwrap();
+    let (cycles, _) = program(&op, 54, &ran.result.frame, &profile, "01-threads").unwrap();
     assert!(cycles.contains("S400 M4"), "{cycles}");
     assert!(cycles.contains("G74 X3. Y4. Z0. R7. F600."), "{cycles}");
 }
@@ -191,10 +191,51 @@ fn a_tools_direction_and_coolant_are_posted() {
     let mut op = ran.result.operations.first().unwrap().clone();
     op.spindle = SpindleDirection::CounterClockwise;
     op.coolant = Coolant::Mist;
-    let (text, _) = program(&op, 54, &profile, "01-finish").unwrap();
+    let (text, _) = program(&op, 54, &ran.result.frame, &profile, "01-finish").unwrap();
     let word = |w: &str| text.split_whitespace().any(|x| x == w);
     assert!(word("M4") && !word("M3"), "{text}");
     assert!(word("M7") && word("M9"), "{text}");
+}
+
+/// A tilted setup's program says so in its header; with an A rotary it
+/// stands the part up first, at rapid, alone, and reads back; past the A's
+/// limits, it is refused, saying why.
+#[test]
+fn a_tilted_setup_is_posted_with_its_rotary() {
+    use camcraft_core::setup::frame::{Axis, Direction, Frame, Orientation};
+    let ran = run_small();
+    let op = ran.result.operations.first().unwrap();
+    let (s, c) = 30f64.to_radians().sin_cos();
+    let turn = Orientation {
+        z: Direction::Vector([0.0, -s, c]),
+        x: Direction::Axis(Axis::PosX),
+    }
+    .turn()
+    .unwrap()
+    .unwrap();
+    let frame = Frame {
+        turn,
+        origin: glam::DVec3::ZERO,
+    };
+    let mut profile = load_profile("linuxcnc", None).unwrap();
+    let (by_hand, _) = program(op, 54, &frame, &profile, "01-tilted").unwrap();
+    assert!(by_hand.contains("tilted 30 deg"), "{by_hand}");
+    assert!(by_hand.contains("fixture the part tilted"), "{by_hand}");
+    assert!(!by_hand.contains(" A"), "{by_hand}");
+
+    profile.rotary =
+        Some(toml::from_str("axes = [\"A\"]\n[A]\nsign = -1\nlimits = [-10, 110]\n").unwrap());
+    let (text, _) = program(op, 54, &frame, &profile, "01-tilted").unwrap();
+    assert!(text.lines().any(|l| l == "G0 A30"), "{text}");
+    assert!(text.contains("set the work offset in it"), "{text}");
+    let spec = program_spec(op, 54, &frame, &profile).unwrap();
+    if let Err(p) = camcraft_post::readback::check(&text, &op.path, &spec, &profile) {
+        panic!("does not read back: {p}\n{text}");
+    }
+
+    profile.rotary = Some(toml::from_str("axes = [\"A\"]\n[A]\nlimits = [-20, 20]\n").unwrap());
+    let e = program(op, 54, &frame, &profile, "01-tilted").unwrap_err();
+    assert!(e.to_string().contains("past the machine's limits"), "{e}");
 }
 
 /// Every operation of setup `index` of `job`, as run, posted for every
@@ -210,11 +251,12 @@ fn reads_back_for_every_post(job: &camcraft_core::job::Job, index: usize, ran: &
             let (text, _) = program(
                 op,
                 setup.wcs,
+                &ran.result.frame,
                 &profile,
                 &program_name(&setup.name, i, &op.name),
             )
             .unwrap();
-            let spec = program_spec(op, setup.wcs, &profile);
+            let spec = program_spec(op, setup.wcs, &ran.result.frame, &profile).unwrap();
             if let Err(p) = camcraft_post::readback::check(&text, &op.path, &spec, &profile) {
                 panic!("{} posted for {name} does not read back: {p}", op.name);
             }

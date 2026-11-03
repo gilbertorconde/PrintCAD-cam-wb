@@ -3,7 +3,8 @@
 //! a click takes it. An operation takes faces, and edges in loops (a click on
 //! an edge takes the loop it goes round at its height, shown before the
 //! click), or an engraving edges one at a time; a setup takes its work zero, a corner or the centre of a round
-//! edge.
+//! edge, its tool axis out of a flat face or along a straight edge, and its
+//! machine X along a straight edge.
 
 use printcad_bench_sdk::api::*;
 use printcad_bench_sdk::{host, json, serde_json};
@@ -16,6 +17,12 @@ pub enum Slot {
     Faces,
     Edges,
     Zero,
+    /// A setup's tool axis, out of a flat face.
+    AxisFace,
+    /// A setup's tool axis, along a straight edge.
+    AxisEdge,
+    /// A setup's machine X, along a straight edge.
+    XEdge,
 }
 
 impl Slot {
@@ -24,6 +31,9 @@ impl Slot {
             "faces" => Self::Faces,
             "edges" => Self::Edges,
             "zero_pick" => Self::Zero,
+            "axis_face" => Self::AxisFace,
+            "axis_edge" => Self::AxisEdge,
+            "x_edge" => Self::XEdge,
             _ => return None,
         })
     }
@@ -159,6 +169,35 @@ pub fn hover(slot: Slot, pointer: &Pointer, up: [f32; 3], alone: bool) -> Option
                 round: edge_loop(edge, up, alone),
             })
         }
+        // Only a flat face has one normal to take: one known to be round is
+        // not offered; camcraft refuses any other that is not flat.
+        Slot::AxisFace => {
+            let face = pointer.hover_face.as_ref()?;
+            if let Some(
+                kernel_api::FaceSurface::Cylinder { .. }
+                | kernel_api::FaceSurface::Cone { .. }
+                | kernel_api::FaceSurface::Sphere { .. }
+                | kernel_api::FaceSurface::Torus { .. },
+            ) = face.surface
+            {
+                return None;
+            }
+            let body = pointer.body.clone()?;
+            Some(Hover::Face {
+                loops: face_loops(&body, face.point),
+                body,
+                at: face.point,
+            })
+        }
+        // Only a straight edge has one direction.
+        Slot::AxisEdge | Slot::XEdge => {
+            let edge = pointer.hover_edge.as_ref().filter(|e| e.circle.is_none())?;
+            Some(Hover::Edge {
+                body: edge.body.clone(),
+                at: edge.point,
+                round: edge_loop(edge, up, true),
+            })
+        }
         Slot::Zero => {
             if let Some(v) = &pointer.vertex {
                 return Some(Hover::Point {
@@ -243,5 +282,8 @@ pub fn draw(frame: &mut Frame, armed: &Armed, color: Rgb) {
             .into(),
         Slot::Edges => "Click an edge to pick the loop it goes round".into(),
         Slot::Zero => "Click a corner or a round edge for the work zero".into(),
+        Slot::AxisFace => "Click a flat face: the tool axis comes out of it".into(),
+        Slot::AxisEdge => "Click a straight edge: the tool axis lies along it".into(),
+        Slot::XEdge => "Click a straight edge: machine X lies along it".into(),
     });
 }

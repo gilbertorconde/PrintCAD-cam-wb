@@ -228,10 +228,11 @@ fn outlines(frame: &mut Frame, o: &cam_protocol::Outlines) {
     }
 }
 
-/// The stock's box, as twelve edges.
+/// The stock's box, as twelve edges: turned with the part, for a tilted
+/// setup.
 fn stock_box(frame: &mut Frame, run: &Run, mine: bool) {
-    let [lo, hi] = run.stock;
-    if lo == hi {
+    let c = run.stock;
+    if c[0] == c[7] {
         return;
     }
     let color = if mine { STOCK } else { MUTED };
@@ -239,33 +240,20 @@ fn stock_box(frame: &mut Frame, run: &Run, mine: bool) {
         frame.lines.extend(cylinder(c, color));
         return;
     }
-    let p = |x: bool, y: bool, z: bool| {
-        [
-            if x { hi[0] } else { lo[0] } as f32,
-            if y { hi[1] } else { lo[1] } as f32,
-            if z { hi[2] } else { lo[2] } as f32,
-        ]
-    };
-    let ring = |z: bool| {
-        vec![
-            p(false, false, z),
-            p(true, false, z),
-            p(true, true, z),
-            p(false, true, z),
-        ]
-    };
-    for z in [false, true] {
+    // Corner `i` is high in X, Y and Z where bits 1, 2 and 4 of it are.
+    let p = |i: usize| c[i].map(|v| v as f32);
+    for z in [0, 4] {
         frame.lines.push(Polyline {
-            points: ring(z),
+            points: [0, 1, 3, 2].iter().map(|i| p(i + z)).collect(),
             color,
             dashed: true,
             closed: true,
             ..Default::default()
         });
     }
-    for (x, y) in [(false, false), (true, false), (true, true), (false, true)] {
+    for i in [0, 1, 3, 2] {
         frame.lines.push(Polyline {
-            points: vec![p(x, y, false), p(x, y, true)],
+            points: vec![p(i), p(i + 4)],
             color,
             dashed: true,
             ..Default::default()
@@ -281,15 +269,27 @@ const ROUND: usize = 72;
 fn cylinder(c: &Cylinder, color: Rgb) -> Vec<Polyline> {
     let [a, b] = c.ends;
     let along = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-    // Two directions square to the axis and to each other. The axis lies
-    // along one of the document's, so the next one round is square to it.
-    let (u, v) = if along[0].abs() > along[1].abs().max(along[2].abs()) {
-        ([0.0, 1.0, 0.0], [0.0, 0.0, 1.0])
-    } else if along[1].abs() > along[2].abs() {
-        ([0.0, 0.0, 1.0], [1.0, 0.0, 0.0])
-    } else {
-        ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0])
+    // Two directions square to the axis and to each other: across it from
+    // whichever document axis it lies least along, as a tilted setup's need
+    // not lie along any.
+    let cross = |p: [f64; 3], q: [f64; 3]| {
+        [
+            p[1] * q[2] - p[2] * q[1],
+            p[2] * q[0] - p[0] * q[2],
+            p[0] * q[1] - p[1] * q[0],
+        ]
     };
+    let unit = |p: [f64; 3]| {
+        let l = p.iter().map(|c| c * c).sum::<f64>().sqrt().max(1e-12);
+        p.map(|c| c / l)
+    };
+    let least = (0..3)
+        .min_by(|&i, &j| along[i].abs().total_cmp(&along[j].abs()))
+        .unwrap_or(0);
+    let mut other = [0.0; 3];
+    other[least] = 1.0;
+    let u = unit(cross(along, other));
+    let v = unit(cross(along, u));
     let at = |end: [f64; 3], angle: f64| -> [f32; 3] {
         let (s, c_) = angle.sin_cos();
         std::array::from_fn(|i| (end[i] + c.radius * (c_ * u[i] + s * v[i])) as f32)

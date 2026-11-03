@@ -688,7 +688,7 @@ impl Picked {
             let body = bodies.get(c.model.as_str())?;
             match body.topology().edge(c.edge)?.kind {
                 EdgeKind::Circle(circle)
-                    if prepared.frame.orientation.apply(circle.normal).z.abs() > 1.0 - 1e-6 =>
+                    if prepared.frame.turn.apply(circle.normal).z.abs() > 1.0 - 1e-6 =>
                 {
                     Some(prepared.frame.to_setup(circle.center).truncate())
                 }

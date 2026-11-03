@@ -51,7 +51,7 @@ pub enum JobError {
     /// A setup would do nothing.
     #[error("setup '{0}' has no operations")]
     NoOperations(String),
-    /// A setup's axes are not square to each other.
+    /// A setup's axes cannot be worked out: X along Z, say.
     #[error("setup '{setup}': {source}")]
     BadOrientation {
         /// Which setup.

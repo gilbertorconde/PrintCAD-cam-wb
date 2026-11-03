@@ -19,6 +19,8 @@
 
 use serde::Deserialize;
 
+use crate::rotary::Rotary;
+
 /// How a tool change is expressed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -150,6 +152,11 @@ pub struct Profile {
     /// turn outside them is warned about. Absent, any speed goes.
     #[serde(default)]
     pub spindle: Option<[u32; 2]>,
+    /// The machine's rotary axes, for 3+2 machining: a setup tilted is
+    /// stood up the spindle by them before it cuts ([`Rotary`]). Absent, a
+    /// tilted setup is fixtured tilted by hand.
+    #[serde(default)]
+    pub rotary: Option<Rotary>,
     /// Lines emitted before anything else. `{name}` is replaced.
     pub header: Vec<String>,
     /// Lines that take the tool straight up clear of everything, as far as the
@@ -290,6 +297,23 @@ impl Profile {
                 reason: "would leave every comment empty; leave it out to allow any character"
                     .into(),
             });
+        }
+        if let Some(rotary) = &self.rotary {
+            if let Some(why) = rotary.problem() {
+                return Err(ProfileError::BadValue {
+                    field: "rotary",
+                    reason: why,
+                });
+            }
+            // The part turns under the tool: it must be sent clear first.
+            if self.safe_retract.is_empty() {
+                return Err(ProfileError::BadValue {
+                    field: "rotary",
+                    reason: "rotaries need a safe_retract, to send the tool clear before the \
+                             part turns under it"
+                        .into(),
+                });
+            }
         }
         if let Some([low, high]) = self.spindle
             && low > high

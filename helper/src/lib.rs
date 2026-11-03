@@ -217,7 +217,9 @@ pub(crate) fn execute(
             let name = camcraft_session::program_name(&setup.name, k, &op.name);
             // As `camcraft_session::program` posts it, keeping which move
             // each line is of.
-            match lower_counted(&op.path, &program_spec(op, setup.wcs, &profile)) {
+            let posted = program_spec(op, setup.wcs, &frame, &profile)
+                .and_then(|spec| lower_counted(&op.path, &spec));
+            match posted {
                 Ok((ops, made)) => {
                     let (text, report) = render(&ops, &profile, &name);
                     Some(Program {
@@ -293,7 +295,7 @@ pub(crate) fn execute(
 
     let stock = stock_box
         .map(|b| corners(&frame, b))
-        .unwrap_or([[0.0; 3]; 2]);
+        .unwrap_or([[0.0; 3]; 8]);
     progress(total, total);
     let run = Run {
         version: VERSION,
@@ -530,10 +532,17 @@ pub(crate) fn grid_indices(
     indices
 }
 
-/// A box in the setup's frame as low and high corners in the model's.
-fn corners(frame: &Frame, b: Aabb) -> [[f64; 3]; 2] {
-    let (a, z) = (frame.to_model(b.min), frame.to_model(b.max));
-    [to_array(a.min(z)), to_array(a.max(z))]
+/// A box in the setup's frame as its eight corners in the model's, as
+/// [`cam_protocol::Run::stock`] has them: a tilted setup's is turned.
+fn corners(frame: &Frame, b: Aabb) -> [[f64; 3]; 8] {
+    std::array::from_fn(|i| {
+        let pick = |bit: usize, lo: f64, hi: f64| if i & bit == 0 { lo } else { hi };
+        to_array(frame.to_model(DVec3::new(
+            pick(1, b.min.x, b.max.x),
+            pick(2, b.min.y, b.max.y),
+            pick(4, b.min.z, b.max.z),
+        )))
+    })
 }
 
 /// A row-major rigid 4x4 matrix as an affine map.

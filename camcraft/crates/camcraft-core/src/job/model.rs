@@ -87,6 +87,10 @@ pub struct StockDef {
 }
 
 /// The shape of a block, in model coordinates, millimetres.
+///
+/// For a tilted setup, whose axes are not the model's, its X, Y and Z are the
+/// setup's instead: a box round models is round them as the setup sees them,
+/// its margins along the setup's axes, and a bar lies along one of them.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 #[serde(tag = "kind", rename_all = "kebab-case")]

@@ -4,14 +4,16 @@
 //! The renderer's tests say what it means to write; this says what the text does.
 //! [`read`] interprets the words a program holds — units, distance mode, planes,
 //! arcs by centre or by radius, helices, drilling cycles, `G28` and `G53`,
-//! length offsets, tool changes — into steps in millimetres, and refuses
+//! length offsets, tool changes, rotaries positioned at rapid (`G0 A.. B..`,
+//! alone in their block) — into steps in millimetres, and refuses
 //! anything it does not understand rather than step over it. [`check`] replays
 //! those steps against the toolpath, or the holes, the program was made from:
 //! every move reached in order, no cut turned into a rapid, feeds as asked, arcs
 //! on the same curve turning the same way. And the program's safety: the tool
 //! never goes across from a height it does not know, nor across and down at
 //! once; the spindle is stopped for the tool change; the right tool, work
-//! offset, length offset, spindle and coolant are in force before it cuts; and
+//! offset, length offset, spindle, coolant and rotaries are in force before it
+//! cuts, the part turned only with the tool clear; and
 //! after the last cut it only goes up, and across only once it is clear.
 //!
 //! It is written from the G-code standard (NIST RS274/NGC), not from the
@@ -124,6 +126,8 @@ pub enum Action {
     LengthOffset(Option<u32>),
     /// A pause, in seconds (`G4`).
     Dwell(f64),
+    /// Rotaries turned (`G0 A.. B..`), each by its word, in degrees.
+    Rotary(Vec<(char, f64)>),
     /// The end of the program (`M2`, `M30`).
     End,
 }
@@ -294,6 +298,8 @@ struct Block {
     g: Vec<u32>,
     m: Vec<u32>,
     axes: [Option<f64>; 3],
+    /// A, B and C, in degrees.
+    rotary: [Option<f64>; 3],
     ijk: [Option<f64>; 3],
     r: Option<f64>,
     q: Option<f64>,
@@ -321,6 +327,9 @@ impl Block {
                 'X' => &mut b.axes[0],
                 'Y' => &mut b.axes[1],
                 'Z' => &mut b.axes[2],
+                'A' => &mut b.rotary[0],
+                'B' => &mut b.rotary[1],
+                'C' => &mut b.rotary[2],
                 'I' => &mut b.ijk[0],
                 'J' => &mut b.ijk[1],
                 'K' => &mut b.ijk[2],
@@ -533,6 +542,28 @@ impl Reader {
         }
 
         let has_axes = b.axes.iter().any(Option::is_some);
+        if b.rotary.iter().any(Option::is_some) {
+            // Positioning only: a rotary turned at rapid, alone.
+            if has_axes || b.has_g(28) || b.has_g(53) {
+                return Err("a rotary turns in the same block as X, Y or Z: only \
+                            positioning, a rotary alone, is understood"
+                    .into());
+            }
+            if self.motion != Some(0) {
+                return Err("a rotary turns other than at rapid (G0): only \
+                            positioning is understood"
+                    .into());
+            }
+            if self.absolute != Some(true) {
+                return Err("a rotary turned in incremental mode".into());
+            }
+            let at = ['A', 'B', 'C']
+                .into_iter()
+                .zip(b.rotary)
+                .filter_map(|(n, v)| Some((n, v?)))
+                .collect();
+            self.push(Action::Rotary(at));
+        }
         if b.has_g(28) {
             self.home(&b)?;
         } else if b.has_g(53) {
@@ -837,6 +868,8 @@ struct Tolerance {
     at: f64,
     /// mm/min, for feeds.
     feed: f64,
+    /// Degrees, for rotaries.
+    angle: f64,
 }
 
 impl Tolerance {
@@ -852,6 +885,7 @@ impl Tolerance {
         Self {
             at: 6.0 * half(places) + 1.0e-9,
             feed: half(profile.format.feed_decimals) * 1.0001 + 1.0e-9,
+            angle: 0.5 * 10f64.powi(-i32::from(profile.format.axis_decimals)) * 1.0001 + 1.0e-9,
         }
     }
 }
@@ -915,6 +949,8 @@ struct Checker<'a> {
     cut: bool,
     dwells: Vec<f64>,
     ended: bool,
+    /// Where each rotary was last sent, by its word.
+    rotary: Vec<(char, f64)>,
 }
 
 impl<'a> Checker<'a> {
@@ -936,6 +972,7 @@ impl<'a> Checker<'a> {
             cut: false,
             dwells: Vec::new(),
             ended: false,
+            rotary: Vec::new(),
         }
     }
 
@@ -1077,6 +1114,30 @@ impl<'a> Checker<'a> {
                 self.at[2] = None;
             }
             Action::Dwell(s) => self.dwells.push(*s),
+            Action::Rotary(at) => {
+                if cutting {
+                    return refuse("turns a rotary");
+                }
+                if self.spec.rotary.is_empty() {
+                    return Err(Problem::at(
+                        line,
+                        "turns a rotary, though the program has none to position",
+                    ));
+                }
+                if !self.clear() {
+                    return Err(Problem::at(
+                        line,
+                        "turns the part before the tool is clear of it",
+                    ));
+                }
+                for &(axis, degrees) in at {
+                    self.rotary.retain(|(a, _)| *a != axis);
+                    self.rotary.push((axis, degrees));
+                }
+                // Where the tool is over the turned part is not known; it is
+                // still as high as it was.
+                self.at = [None; 3];
+            }
             Action::End => {
                 if self.phase != Phase::After {
                     return Err(Problem::at(line, "the program ends before the path does"));
@@ -1132,6 +1193,15 @@ impl<'a> Checker<'a> {
                 line,
                 format!("cuts with the coolant not {:?}", self.spec.coolant),
             ));
+        }
+        for want in &self.spec.rotary {
+            let at = self.rotary.iter().find(|(a, _)| *a == want.axis);
+            if !at.is_some_and(|(_, d)| (d - want.degrees).abs() <= self.tol.angle) {
+                return Err(Problem::at(
+                    line,
+                    format!("cuts before {} is at {}", want.axis, want.degrees),
+                ));
+            }
         }
         self.cut = true;
         Ok(())

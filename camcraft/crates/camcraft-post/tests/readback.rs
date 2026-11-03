@@ -530,3 +530,73 @@ fn an_arc_too_short_to_write_reads_back_to_itself() {
         }
     }
 }
+
+/// A tilted setup posted for a machine with an A axis reads back for every
+/// profile and every way it can be set to write, the A positioned before it
+/// cuts; and each fault in the positioning is caught.
+#[test]
+fn rotary_positioning_reads_back_and_its_faults_are_caught() {
+    let (s, c) = 30f64.to_radians().sin_cos();
+    let tool = dvec3(0.0, -s, c);
+    let tilted = |p: &mut Profile| {
+        p.rotary = Some(toml::from_str("axes = [\"A\"]\n").unwrap());
+        p.rotary.as_ref().unwrap().position(tool, DVec3::X).unwrap()
+    };
+    for (what, mut p) in profiles() {
+        // A profile with rotaries has a safe retract: it is refused without.
+        if p.safe_retract.is_empty() {
+            continue;
+        }
+        let spec = ProgramSpec {
+            units: p.units,
+            tilt: Some(tool),
+            rotary: tilted(&mut p),
+            ..spec()
+        };
+        reads_back(&fixture(), &spec, &p, &what);
+    }
+
+    let mut p = Profile::builtin("masso").unwrap().unwrap();
+    let spec = ProgramSpec {
+        tilt: Some(tool),
+        rotary: tilted(&mut p),
+        ..spec()
+    };
+    let path = fixture();
+    let text = post(&path, &spec, &p);
+    check(&text, &path, &spec, &p).unwrap();
+    let fault = |from: &str, to: &str, spec: &ProgramSpec, what: &str| {
+        assert_eq!(text.matches(from).count(), 1, "{from:?} in\n{text}");
+        let broken = text.replace(from, to);
+        let e = check(&broken, &path, spec, &p).unwrap_err();
+        assert!(e.what.contains(what), "{from:?} -> {to:?}: {e}");
+    };
+    fault("N45 G0 A-30.\n", "", &spec, "cuts before A is at -30");
+    fault("G0 A-30.", "G0 A-20.", &spec, "cuts before A is at -30");
+    fault("G0 A-30.", "G0 A-30. X0", &spec, "positioning");
+    fault("G0 A-30.", "G1 A-30. F100", &spec, "rapid");
+    fault("N25 G28 G91 Z0\n", "", &spec, "before the tool is clear");
+    let upright = ProgramSpec {
+        rotary: Vec::new(),
+        ..spec.clone()
+    };
+    fault("G0 A-30.", "G0 A-30.", &upright, "none to position");
+    // Turned once it is cutting, it is refused.
+    fault(
+        "N90 Y9.5\n",
+        "N90 Y9.5\nG0 A0\n",
+        &spec,
+        "in the middle of the path",
+    );
+}
+
+/// A profile with rotaries and no way to send the tool clear is refused,
+/// since the part would turn under it.
+#[test]
+fn rotaries_need_a_safe_retract() {
+    let text = include_str!("../profiles/grbl.toml").to_string() + "\n[rotary]\naxes = [\"A\"]\n";
+    let mut p: toml::Table = toml::from_str(&text).unwrap();
+    p.insert("safe_retract".into(), toml::Value::Array(Vec::new()));
+    let e = Profile::from_toml(&toml::to_string(&p).unwrap()).unwrap_err();
+    assert!(e.to_string().contains("safe_retract"), "{e}");
+}

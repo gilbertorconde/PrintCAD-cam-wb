@@ -95,6 +95,32 @@ as deep as they cut it (`PartSurface::cut_into` in `camcraft-sim`), as
 negative stock to leave already was. In `camcraft-post`, a golden
 engraving (`grbl-engrave.nc`).
 
+And a setup's tool axis can be any direction, for 3+2 machining. In
+`camcraft-core`, an `Orientation`'s `z` and `x` are each a `Direction`: a
+model axis as before, a vector, a flat face's outward normal or a straight
+edge's direction (`toward` a rough one, as a view gives), picked on a model
+and found again by its point, either way (`reverse`). X is the one given
+made square to Z. `Orientation::resolve` works it out as a `Turn`:
+`Square`, axes given as axes, which turns as exactly as before, or
+`Tilted`, a rotation; a `Frame` holds a `Turn` where it held an
+`Orientation`. A tilted setup lays its stock out in its own axes
+(`setup::laid`): a box round the models is round them as it sees them, its
+margins, sizes and a bar's axis along its axes. In `camcraft-post`, a
+profile's `[rotary]` names its rotary axes, from the base out, each turning
+about the machine's X or Y with a sign and limits (`rotary.rs`);
+`Rotary::position` finds where they stand a tool axis up the spindle, within
+their limits, and refuses one they cannot reach, one past their limits, and
+one that leaves the setup's X off the machine's (`RotaryError`, a
+`LowerError`). `ProgramSpec` has `tilt` and `rotary`; lowering writes the
+tilt in the header (`Op::Comment`) and positions the rotaries
+(`Op::Rotary`, `G0 A.. B..`, the tool sent clear first) before the spindle
+starts; `readback` reads A, B and C at rapid alone in their block, and
+checks they are where the program needs them before it cuts, turned only
+with the tool clear and never while cutting. A profile with rotaries needs
+a `safe_retract`. `camcraft_session::program_spec` and `program` take the
+setup's `Frame`. Golden programs: `masso-rotary-a.nc` and
+`linuxcnc-rotary-ab.nc`.
+
 And one test: ogeom is 0.11.1 here, which printCAD's shapes need, and it
 meshes `round_edge_loose_fit.step`'s seam that 0.11.0 drew off the torus, so
 `a_loose_fit_is_refused_for_ogeoms_seam` became

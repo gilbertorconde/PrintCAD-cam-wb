@@ -116,7 +116,7 @@ fn a_native_solid_runs_and_posts() {
     let line = program.line_of(program.moves[first_cut] as usize);
     assert_eq!(line, Some(first_cut), "the line found again from its move");
     assert!(run.material.is_some());
-    assert!(run.stock[1][2] > run.stock[0][2]);
+    assert!(run.stock[7][2] > run.stock[0][2]);
     // Its boundary, the part's silhouette, drawn with where the tool may go
     // and what it cuts outside the part, at the stock's top.
     let drawn = op.outlines.as_ref().expect("a 3D operation's outlines");
@@ -124,7 +124,71 @@ fn a_native_solid_runs_and_posts() {
     assert!(!drawn.cut.is_empty());
     let ring = &drawn.boundary[0];
     assert_eq!(ring.first(), ring.last(), "a ring closes");
-    assert!((f64::from(ring[0][2]) - run.stock[1][2]).abs() < 1e-3);
+    assert!((f64::from(ring[0][2]) - run.stock[7][2]).abs() < 1e-3);
+}
+
+/// A setup tilted 30° about X runs and verifies, its stock box turned with
+/// it; posted for a machine with an A rotary, its program stands the part up
+/// first, and one past the A's limits is a failed check that says why.
+#[test]
+fn a_tilted_setup_runs_and_is_posted_with_its_rotary() {
+    let (s, c) = 30f64.to_radians().sin_cos();
+    let job = JOB.replace(
+        "post = \"grbl\"",
+        &format!(
+            "post = \"linuxcnc\"\norientation = {{ z = [0.0, {}, {c}], x = \"+x\" }}",
+            -s
+        ),
+    );
+    let profile = |rotary: &str| {
+        let mut text =
+            include_str!("../../camcraft/crates/camcraft-post/profiles/linuxcnc.toml").to_string();
+        text.push_str(rotary);
+        text
+    };
+    let request = |rotary: &str| Request {
+        version: VERSION,
+        job: job.clone(),
+        shapes: BTreeMap::from([(
+            "part".to_string(),
+            Shape {
+                text: native("hinge_jig.step"),
+                placement: IDENTITY,
+            },
+        )]),
+        post: Some(profile(rotary)),
+        ..Request::default()
+    };
+    let run = answer(&request("\n[rotary]\naxes = [\"A\"]\n")).unwrap();
+    for f in &run.findings {
+        assert_ne!(f.level, Level::Fail, "{f:?}");
+    }
+    assert!(run.passed);
+    // The box's X edge is the model's X, its Y edge leans with the tilt.
+    let edge =
+        |i: usize| -> [f64; 3] { std::array::from_fn(|k| run.stock[i][k] - run.stock[0][k]) };
+    let (along_x, along_y) = (edge(1), edge(2));
+    assert!(
+        along_x[1].abs() < 1e-9 && along_x[2].abs() < 1e-9,
+        "{along_x:?}"
+    );
+    let len = along_y.iter().map(|v| v * v).sum::<f64>().sqrt();
+    assert!((along_y[1] / len - c).abs() < 1e-9 && (along_y[2] / len - s).abs() < 1e-9);
+    let text = &run.operations[0].program.as_ref().unwrap().text;
+    assert!(text.lines().any(|l| l == "G0 A-30"), "{text}");
+    assert!(text.contains("tilted 30 deg"), "{text}");
+
+    let run = answer(&request(
+        "\n[rotary]\naxes = [\"A\"]\n[rotary.A]\nlimits = [0, 90]\n",
+    ))
+    .unwrap();
+    assert!(!run.passed);
+    let why = run
+        .findings
+        .iter()
+        .find(|f| f.level == Level::Fail)
+        .unwrap();
+    assert!(why.text.contains("past the machine's limits"), "{why:?}");
 }
 
 #[test]
@@ -184,7 +248,7 @@ fn the_heights_hold_and_come_back_as_planes() {
         ..Request::default()
     };
     let run = answer(&request).unwrap();
-    let top = run.stock[1][2];
+    let top = run.stock[7][2];
     let op = &run.operations[0];
     assert_eq!(op.made, "generated");
     let plane = |name: &str| {
@@ -203,7 +267,7 @@ fn the_heights_hold_and_come_back_as_planes() {
     // Each corner a little outside the stock, across it.
     let corners = plane("Bottom").corners;
     assert!(f64::from(corners[0][0]) < run.stock[0][0]);
-    assert!(f64::from(corners[2][0]) > run.stock[1][0]);
+    assert!(f64::from(corners[2][0]) > run.stock[7][0]);
 
     let full = Request {
         max_points: 1_000_000,
@@ -628,7 +692,7 @@ fn round_stock_is_drawn_round() {
     };
     let run = answer(&request).unwrap();
     let c = run.cylinder.expect("a cylinder");
-    let [lo, hi] = run.stock;
+    let (lo, hi) = (run.stock[0], run.stock[7]);
     let [a, b] = c.ends;
     // Up the tool, its ends' middles over each other, at the box's foot
     // and top, and the box as wide as it.
@@ -708,7 +772,8 @@ fn an_engraving_posts_its_arcs_and_draws_its_curves() {
         shapes: part.clone(),
         ..Request::default()
     };
-    let [lo, hi] = answer(&first).unwrap().stock;
+    let stock = answer(&first).unwrap().stock;
+    let (lo, hi) = (stock[0], stock[7]);
     let (x, y) = (
         f64::from(lo[0] + hi[0]) / 2.0,
         f64::from(lo[1] + hi[1]) / 2.0,
