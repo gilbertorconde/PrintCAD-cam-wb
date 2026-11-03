@@ -1109,7 +1109,7 @@ impl Bench for Cam {
                             ParamKind::List,
                             false,
                             "a list of sketch ids: their closed loops, text among them, are \
-                             what it follows or cuts within",
+                             what it follows or cuts within (a 2D cut's outline then)",
                         ),
                         param(
                             "direction",
@@ -1539,6 +1539,12 @@ impl Bench for Cam {
                         return Err(format!("sketches: '{bad}' is no sketch that closes a loop"));
                     }
                     data.sketches = ids;
+                    // A 2D cut given sketches cuts what they enclose, as
+                    // ticking them in its panel with the picks as its
+                    // outline does.
+                    if data.strategy().uses().outline && !data.sketches.is_empty() {
+                        data.operation.outline = camcraft_core::job::Outline::Selection;
+                    }
                 }
                 if let StrategySpec::Engrave {
                     direction, reverse, ..
