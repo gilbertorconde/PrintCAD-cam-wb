@@ -529,6 +529,9 @@ impl<'a> Writer<'a> {
             CycleKind::Drill => "G81",
             CycleKind::DrillDwell => "G82",
             CycleKind::Peck => "G83",
+            CycleKind::ChipBreak => "G73",
+            CycleKind::Tap => "G84",
+            CycleKind::TapLeft => "G74",
         };
         // Every word every time: a cycle is modal, but a program read by a person
         // should say where each hole is and how deep, whatever came before. In
@@ -547,7 +550,15 @@ impl<'a> Writer<'a> {
             // Seconds, whatever the units.
             let _ = write!(block, " P{}", self.p.seconds(p));
         }
-        let _ = write!(block, " F{}", self.p.feed_in(feed, self.inches));
+        let f = if matches!(kind, CycleKind::Tap | CycleKind::TapLeft) {
+            // A tap's feed is its pitch a turn, so the spindle's speed times
+            // the pitch: rounded to a feed's places it would gain or lose on
+            // the thread every turn, so it keeps three more.
+            self.p.feed_in_finely(feed, self.inches)
+        } else {
+            self.p.feed_in(feed, self.inches)
+        };
+        let _ = write!(block, " F{f}");
         self.raw(&block);
         // A cycle leaves the machine in its own modal group and moves the tool.
         self.lost();

@@ -350,6 +350,14 @@ impl Block {
     }
 }
 
+/// The drilling cycles understood: `G73`, `G74`, `G81` to `G84`.
+const CYCLES: [u32; 6] = [73, 74, 81, 82, 83, 84];
+
+/// How far `G73` backs off between pecks, in millimetres. The standard says
+/// only "a small distance", and a controller backs off as far as it is set to;
+/// what is checked holds however far that is.
+const CHIP_BREAK: f64 = 0.25;
+
 /// The settings that last only through one run of drilling cycles.
 #[derive(Default)]
 struct Cycle {
@@ -371,7 +379,8 @@ struct Reader {
     absolute: Option<bool>,
     /// 17, 18 or 19.
     plane: u32,
-    /// 0, 1, 2, 3, 81, 82 or 83, once set; none after `G80`.
+    /// 0, 1, 2, 3 or a drilling cycle's ([`CYCLES`]), once set; none after
+    /// `G80`.
     motion: Option<u32>,
     /// mm/min.
     feed: Option<f64>,
@@ -382,6 +391,8 @@ struct Reader {
     /// `G98` (true) or `G99`.
     to_initial: bool,
     cycle: Cycle,
+    /// Which way the spindle turns, if it does.
+    spin: Option<SpindleDirection>,
 }
 
 impl Default for Reader {
@@ -400,6 +411,7 @@ impl Default for Reader {
             wcs: None,
             to_initial: true,
             cycle: Cycle::default(),
+            spin: None,
         }
     }
 }
@@ -425,14 +437,15 @@ impl Reader {
         let b = Block::gather(words)?;
         let motions =
             b.g.iter()
-                .filter(|g| matches!(g, 0 | 1 | 2 | 3 | 80 | 81 | 82 | 83))
+                .filter(|g| matches!(g, 0..=3 | 80) || CYCLES.contains(*g))
                 .count();
         if motions > 1 {
             return Err("two motions in one block".into());
         }
         for &g in &b.g {
             match g {
-                0 | 1 | 2 | 3 | 81 | 82 | 83 => self.motion = Some(g),
+                0..=3 => self.motion = Some(g),
+                g if CYCLES.contains(&g) => self.motion = Some(g),
                 80 => {
                     self.motion = None;
                     self.cycle = Cycle::default();
@@ -449,7 +462,8 @@ impl Reader {
                 other => return Err(format!("G{other} is not understood")),
             }
         }
-        if !matches!(self.motion, Some(81..=83)) {
+        let cycling = self.motion.is_some_and(|g| CYCLES.contains(&g));
+        if !cycling {
             self.cycle = Cycle::default();
         }
         if let Some(f) = b.f {
@@ -482,8 +496,12 @@ impl Reader {
                         SpindleDirection::CounterClockwise
                     };
                     self.push(Action::SpindleOn { rpm, dir });
+                    self.spin = Some(dir);
                 }
-                5 => self.push(Action::SpindleOff),
+                5 => {
+                    self.push(Action::SpindleOff);
+                    self.spin = None;
+                }
                 7 => self.push(Action::Coolant(Coolant::Mist)),
                 8 => self.push(Action::Coolant(Coolant::Flood)),
                 9 => self.push(Action::Coolant(Coolant::Off)),
@@ -519,7 +537,7 @@ impl Reader {
             self.home(&b)?;
         } else if b.has_g(53) {
             self.machine(&b)?;
-        } else if has_axes || (b.r.is_some() && matches!(self.motion, Some(81..=83))) {
+        } else if has_axes || (b.r.is_some() && cycling) {
             match self.motion {
                 Some(0) => self.line_to(&b, None)?,
                 Some(1) => {
@@ -527,7 +545,7 @@ impl Reader {
                     self.line_to(&b, Some(f))?;
                 }
                 Some(g @ (2 | 3)) => self.arc_to(&b, g == 3)?,
-                Some(g @ 81..=83) => self.drill(&b, g)?,
+                Some(g) if cycling => self.drill(&b, g)?,
                 _ => return Err("axis words with no motion in force".into()),
             }
         } else if b.ijk.iter().any(Option::is_some) || b.r.is_some() {
@@ -697,7 +715,10 @@ impl Reader {
     /// One hole of a run of drilling cycles, in the XY plane: the moves the
     /// standard gives them. `G83` pecks back to R between pecks, and rapids
     /// back down to the depth already drilled, the deepest any controller
-    /// goes.
+    /// goes. `G73` backs off a little between pecks, as far as the controller
+    /// is set to: [`CHIP_BREAK`] here. `G84` and `G74` feed down and back up
+    /// to R, the spindle reversing at the bottom, and need it turning the
+    /// tap's way.
     fn drill(&mut self, b: &Block, g: u32) -> Result<(), String> {
         if self.absolute != Some(true) {
             return Err("drilling cycles in incremental mode are not understood".into());
@@ -745,6 +766,34 @@ impl Reader {
         self.go([x, y, z], None, None);
         self.go([x, y, Some(r)], None, None);
         match g {
+            73 => {
+                let q = peck.filter(|q| *q > 0.0).ok_or("G73 with no peck")?;
+                let mut depth = r;
+                loop {
+                    let next = (depth - q).max(bottom);
+                    self.go([x, y, Some(next)], Some(feed), None);
+                    depth = next;
+                    if depth <= bottom {
+                        break;
+                    }
+                    self.go([x, y, Some((depth + CHIP_BREAK).min(r))], None, None);
+                }
+            }
+            74 | 84 => {
+                let (want, m) = if g == 84 {
+                    (SpindleDirection::Clockwise, "M3")
+                } else {
+                    (SpindleDirection::CounterClockwise, "M4")
+                };
+                if self.spin != Some(want) {
+                    return Err(format!("G{g} without the spindle turning {m}"));
+                }
+                self.go([x, y, Some(bottom)], Some(feed), None);
+                if let Some(p) = dwell {
+                    self.push(Action::Dwell(p));
+                }
+                self.go([x, y, Some(r)], Some(feed), None);
+            }
             83 => {
                 let q = peck.filter(|q| *q > 0.0).ok_or("G83 with no peck")?;
                 let mut depth = r;
@@ -1270,12 +1319,23 @@ impl<'a> Checker<'a> {
 
     /// A drilling operation's holes, in order: across between them only at the
     /// clearance height, each drilled straight down to its bottom at its feed,
-    /// with no rapid into what is not yet drilled, and back up clear.
+    /// with no rapid into what is not yet drilled, and back up clear. A tapped
+    /// one at the pitch a turn of the spindle, and fed back out to its R plane:
+    /// a tap that rapids out strips its thread.
     fn holes(&mut self, d: &DrillCycles) -> Result<(), Problem> {
         let Some(first) = d.holes.first() else {
             return Ok(());
         };
         let tol = self.tol.at;
+        if let Some(t) = d.tap {
+            let want = t.feed(f64::from(self.spec.rpm));
+            if (d.feed - want).abs() > self.tol.feed {
+                return Err(Problem::whole(format!(
+                    "taps at {:.3} mm/min where {:.3} mm a turn at {} rev/min is {want:.3}",
+                    d.feed, t.pitch, self.spec.rpm
+                )));
+            }
+        }
         self.arrive(dvec3(first.at.x, first.at.y, d.clearance), true)?;
         self.phase = Phase::Cutting;
         self.high = d.clearance;
@@ -1324,9 +1384,19 @@ impl<'a> Checker<'a> {
                         },
                     ));
                 }
+                let from = known(&m.from);
                 self.at = m.to;
                 match m.feed {
                     None => {
+                        if d.tap.is_some()
+                            && let Some(a) = from
+                            && a.z < hole.retract() - tol
+                        {
+                            return Err(Problem::at(
+                                line,
+                                format!("rapids out of tapped hole {n} from Z{:.3}", a.z),
+                            ));
+                        }
                         if b.z < floor - tol {
                             return Err(Problem::at(
                                 line,
@@ -1358,8 +1428,10 @@ impl<'a> Checker<'a> {
                                 format!("drills hole {n} past its bottom"),
                             ));
                         }
-                        if let (Some(q), Some(a)) = (d.peck, known(&m.from))
-                            && a.z - b.z > q + tol
+                        // From the deepest drilled yet: a peck after backing
+                        // off to break the chip starts above it.
+                        if let (Some(q), Some(a)) = (d.peck, from)
+                            && a.z.min(floor) - b.z > q + tol
                         {
                             return Err(Problem::at(
                                 line,

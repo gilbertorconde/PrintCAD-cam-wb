@@ -289,20 +289,28 @@ pub(in crate::run) fn heights_of(
     })
 }
 
-/// Each of `holes` drilled straight down, pecking by `peck` if given; a hole the
-/// tool is not the size of is drilled, and said.
+/// Each of `holes` drilled straight down, pecking by `peck` if given and
+/// backing off by `chip_break` between, or tapped at `tap`'s pitch a turn; a
+/// hole the tool is not the size of is drilled, and said.
 pub(super) fn drill_paths(
     work: &Work<'_>,
-    peck: Option<f64>,
-    dwell: Option<f64>,
+    (peck, chip_break, dwell): (Option<f64>, Option<f64>, Option<f64>),
+    tap: Option<Tap>,
     holes: &[Hole],
     warnings: &mut Vec<String>,
 ) -> Result<Paths, RunError> {
     let (job, op) = (work.job, work.op);
+    let feed = match tap {
+        // The feed that keeps to the thread at the speed the spindle turns.
+        Some(t) => t.feed(f64::from(op.passes.rpm.unwrap_or(work.spec.rpm))),
+        None => op.linking.plunge_feed,
+    };
     let params = DrillParams {
         peck,
-        feed: op.linking.plunge_feed,
+        chip_break,
+        feed,
         retract_feed: op.linking.retract_feed,
+        tap,
     };
     let path = drill(holes, &params).map_err(in_op(op))?;
     let width = work.spec.diameter;
@@ -320,7 +328,9 @@ pub(super) fn drill_paths(
     let report = DrillReport {
         holes: holes.to_vec(),
         peck,
+        chip_break,
         dwell,
+        tap,
         feed: params.feed,
     };
     Ok((path, holes.len() as u64, StrategyDetail::Drill(report)))

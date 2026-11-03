@@ -102,8 +102,10 @@ fn pecks_back_out_between() {
     };
     let params = DrillParams {
         peck: Some(2.5),
+        chip_break: None,
         feed: 200.0,
         retract_feed: 1000.0,
+        tap: None,
     };
     let path = drill(&[hole], &params).unwrap();
     let downs: Vec<f64> = path
@@ -143,4 +145,78 @@ fn holes_are_drilled_nearest_first() {
         .collect();
     assert_eq!(order, [0.0, 3.0, 4.0, 10.0]);
     assert!(nearest_first(&[]).is_empty());
+}
+
+/// Breaking the chip, each peck backs off only so far, and goes on down from
+/// there; out of the hole only once it is at the bottom.
+#[test]
+fn chip_breaking_backs_off_a_little_between_pecks() {
+    let hole = Hole {
+        at: dvec2(1.0, 2.0),
+        top: 10.0,
+        bottom: 4.0,
+        radius: 3.0,
+    };
+    let params = DrillParams {
+        peck: Some(2.5),
+        chip_break: Some(0.4),
+        feed: 200.0,
+        retract_feed: 1000.0,
+        tap: None,
+    };
+    let path = drill(&[hole], &params).unwrap();
+    let ups: Vec<(f64, f64)> = path
+        .moves()
+        .windows(2)
+        .filter(|w| w[1].role == MoveRole::Retract)
+        .map(|w| (w[0].to.z, w[1].to.z))
+        .collect();
+    assert_eq!(ups, [(7.5, 7.9), (5.0, 5.4), (4.0, 12.0)]);
+    // Each peck from where it backed off, at the drilling feed.
+    let downs: Vec<f64> = path
+        .moves()
+        .iter()
+        .filter(|m| m.role == MoveRole::Plunge)
+        .map(|m| m.to.z)
+        .collect();
+    assert_eq!(downs, [7.5, 5.0, 4.0]);
+    assert!(path.moves().iter().all(|m| m.to.truncate() == hole.at));
+}
+
+/// A tap goes down to the bottom and back out to the R plane, both at the
+/// feed its pitch makes, without pecking.
+#[test]
+fn a_tap_goes_in_and_out_at_its_feed() {
+    let hole = Hole {
+        at: dvec2(0.0, 0.0),
+        top: 0.0,
+        bottom: -12.0,
+        radius: 4.0,
+    };
+    let tap = Tap {
+        pitch: 1.25,
+        hand: ThreadHand::Right,
+    };
+    assert_eq!(tap.feed(400.0), 500.0);
+    let params = DrillParams {
+        peck: None,
+        chip_break: None,
+        feed: tap.feed(400.0),
+        retract_feed: 3000.0,
+        tap: Some(tap),
+    };
+    let path = drill(&[hole], &params).unwrap();
+    let moves: Vec<(MoveRole, f64, Option<f64>)> = path
+        .moves()
+        .iter()
+        .map(|m| (m.role, m.to.z, m.feed))
+        .collect();
+    assert_eq!(
+        moves,
+        [
+            (MoveRole::Link, 2.0, Some(500.0)),
+            (MoveRole::Plunge, -12.0, Some(500.0)),
+            (MoveRole::Retract, 2.0, Some(500.0)),
+        ]
+    );
 }

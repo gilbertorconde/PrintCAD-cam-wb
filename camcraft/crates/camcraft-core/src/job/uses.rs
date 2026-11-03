@@ -158,7 +158,8 @@ impl StrategySpec {
                 holes: true,
                 stepover: false,
                 load: false,
-                // Each hole is fed down at the plunge feed.
+                // Each hole is fed down at the plunge feed, or a tap at its
+                // pitch a turn.
                 feed: false,
                 stock_to_leave: Leave::None,
                 // Its pecks are its own.

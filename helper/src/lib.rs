@@ -183,6 +183,10 @@ pub(crate) fn execute(
     let mut prepared: Option<Option<Prepared>> = None;
     let mut operations = Vec::new();
     let mut draws = Vec::new();
+    // Programs the post cannot write, as a tap for a controller without the
+    // tapping cycle: each a failed check, so the setup is not posted, while
+    // its run is still shown.
+    let mut refused = Vec::new();
     // Machining seconds before the operation under way.
     let mut elapsed = 0.0;
     for (k, op) in ran.result.operations.iter().enumerate() {
@@ -212,17 +216,29 @@ pub(crate) fn execute(
             let name = camcraft_session::program_name(&setup.name, k, &op.name);
             // As `camcraft_session::program` posts it, keeping which move
             // each line is of.
-            let (ops, made) = lower_counted(&op.path, &program_spec(op, setup.wcs, &profile))
-                .map_err(|e| e.to_string())?;
-            let (text, report) = render(&ops, &profile, &name);
-            Some(Program {
-                name,
-                extension: profile.extension.clone(),
-                post: profile.name.clone(),
-                lines: usize::try_from(report.lines).unwrap_or(usize::MAX),
-                moves: line_moves(&made, &report.op_lines, report.lines),
-                text,
-            })
+            match lower_counted(&op.path, &program_spec(op, setup.wcs, &profile)) {
+                Ok((ops, made)) => {
+                    let (text, report) = render(&ops, &profile, &name);
+                    Some(Program {
+                        name,
+                        extension: profile.extension.clone(),
+                        post: profile.name.clone(),
+                        lines: usize::try_from(report.lines).unwrap_or(usize::MAX),
+                        moves: line_moves(&made, &report.op_lines, report.lines),
+                        text,
+                    })
+                }
+                Err(e) => {
+                    refused.push(Finding {
+                        level: Level::Fail,
+                        code: "post".into(),
+                        text: format!("post {} {}: {e}", profile.name, op.name),
+                        operation: Some(k),
+                        at_move: None,
+                    });
+                    None
+                }
+            }
         } else {
             None
         };
@@ -280,8 +296,8 @@ pub(crate) fn execute(
     progress(total, total);
     let run = Run {
         version: VERSION,
-        passed: ran.passed(),
-        findings: findings(&ran),
+        passed: ran.passed() && refused.is_empty(),
+        findings: refused.into_iter().chain(findings(&ran)).collect(),
         notes: loaded
             .iter()
             .flat_map(|(_, m)| m.notes.iter().cloned())

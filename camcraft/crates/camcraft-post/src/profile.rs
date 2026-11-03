@@ -140,7 +140,10 @@ pub struct Profile {
     #[serde(default)]
     pub length_offset: bool,
     /// Whether the controller takes canned drilling cycles (`G81`, `G82`, `G83`,
-    /// `G80`). Off, a drilling operation is posted as its moves.
+    /// `G73`, `G84`, `G74`, `G80`). Off, a drilling operation is posted as its
+    /// moves, and a tapping one not at all ([`LowerError::TapsAsMoves`]).
+    ///
+    /// [`LowerError::TapsAsMoves`]: crate::op::LowerError::TapsAsMoves
     #[serde(default)]
     pub drill_cycles: bool,
     /// The slowest and fastest the spindle turns, in rev/min. A tool asked to
@@ -332,6 +335,18 @@ impl Profile {
         } else {
             mm_per_min
         })
+    }
+
+    /// Format a feed in mm/min for a feed word, in in/min if `inches`, to
+    /// three more places than other feeds: a tap's, which has to keep to its
+    /// pitch.
+    pub fn feed_in_finely(&self, mm_per_min: f64, inches: bool) -> String {
+        let v = if inches {
+            mm_per_min / MM_PER_INCH
+        } else {
+            mm_per_min
+        };
+        self.number(v, self.format.feed_decimals.saturating_add(3))
     }
 
     /// Format a value for a feed word.

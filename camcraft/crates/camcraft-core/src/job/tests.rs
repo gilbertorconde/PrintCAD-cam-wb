@@ -532,6 +532,9 @@ fn heights_from_the_selection_need_picks() {
     op.strategy = StrategySpec::Drill {
         peck: None,
         dwell: None,
+        chip_break: None,
+        pitch: None,
+        hand: Default::default(),
     };
     assert!(op.cannot_measure_from_picks().is_some());
 
@@ -622,6 +625,9 @@ fn drills_drill_and_only_drill() {
     j.setups[0].operations[1].strategy = StrategySpec::Drill {
         peck: Some(2.0),
         dwell: None,
+        chip_break: None,
+        pitch: None,
+        hand: Default::default(),
     };
     j.validate().unwrap();
     j.setups[0].operations[1].tool = Some("finish-4-ball".into());
@@ -630,11 +636,61 @@ fn drills_drill_and_only_drill() {
     j.setups[0].operations[1].strategy = StrategySpec::Drill {
         peck: Some(0.0),
         dwell: None,
+        chip_break: None,
+        pitch: None,
+        hand: Default::default(),
     };
     assert!(matches!(j.validate(), Err(JobError::BadValue { .. })));
 
     let text = toml::to_string(&j).unwrap();
     assert!(text.contains(r#"strategy = "drill""#), "{text}");
+}
+
+/// Chip breaking backs off between pecks, so it needs one; a tap goes in and
+/// out in one, so takes no peck, chip breaking or pause; and each is read
+/// from a job file by Fusion's names.
+#[test]
+fn chip_breaking_pecks_and_a_tap_does_not() {
+    let mut j = sample();
+    j.tools.insert(
+        "d".into(),
+        toml::from_str("kind = \"drill\"\ndiameter = 6.0\nnumber = 4\n").unwrap(),
+    );
+    j.setups[0].operations[1].tool = Some("d".into());
+    let set = |j: &mut Job, text: &str| {
+        j.setups[0].operations[1].strategy = toml::from_str(text).unwrap();
+        j.validate()
+    };
+    set(&mut j, "strategy = \"drill\"\npeck = 2.0\nchip_break = 0.3").unwrap();
+    let said = |r: Result<(), JobError>| r.unwrap_err().to_string();
+    assert!(said(set(&mut j, "strategy = \"drill\"\nchip_break = 0.3")).contains("with a peck"));
+    assert!(
+        said(set(
+            &mut j,
+            "strategy = \"drill\"\npeck = 2.0\nchip_break = 0.0"
+        ))
+        .contains("chip_break")
+    );
+    set(
+        &mut j,
+        "strategy = \"drill\"\npitch = 1.25\nhand = \"left\"",
+    )
+    .unwrap();
+    let tap = j.setups[0].operations[1].strategy.tap().unwrap();
+    assert_eq!((tap.pitch, tap.hand), (1.25, ThreadHand::Left));
+    assert_eq!(tap.hand.spindle(), SpindleDirection::CounterClockwise);
+    for clash in ["peck = 2.0", "dwell = 0.5"] {
+        let text = format!("strategy = \"drill\"\npitch = 1.25\n{clash}");
+        assert!(
+            said(set(&mut j, &text)).contains("left out when tapping"),
+            "{clash}"
+        );
+    }
+    assert!(said(set(&mut j, "strategy = \"drill\"\npitch = -1.0")).contains("pitch"));
+    // A tap is kept as a flat end mill its size, or a drill; not a ball.
+    set(&mut j, "strategy = \"drill\"\npitch = 1.25").unwrap();
+    j.setups[0].operations[1].tool = Some("finish-4-ball".into());
+    assert!(said(j.validate()).contains("tap with a tap"));
 }
 
 /// Every operation has stock to leave, and cuts with as much of it as its
@@ -660,6 +716,9 @@ fn stock_to_leave_is_what_the_strategy_uses() {
     op.strategy = StrategySpec::Drill {
         peck: None,
         dwell: None,
+        chip_break: None,
+        pitch: None,
+        hand: Default::default(),
     };
     op.tool = Some("d".into());
     assert_eq!(op.stock_to_leave(), StockToLeave::default());
@@ -786,6 +845,9 @@ fn each_strategy_says_what_it_uses() {
     let drill = StrategySpec::Drill {
         peck: None,
         dwell: None,
+        chip_break: None,
+        pitch: None,
+        hand: Default::default(),
     }
     .uses();
     assert_eq!(drill.stock_to_leave, Leave::None);
@@ -1215,6 +1277,9 @@ fn stepovers_default_as_fusions() {
     op.strategy = StrategySpec::Drill {
         peck: None,
         dwell: None,
+        chip_break: None,
+        pitch: None,
+        hand: Default::default(),
     };
     assert_eq!(
         op.default_stepover(&tool(ToolKind::Drill, 6.0, 0.0), 0.05),
@@ -1403,6 +1468,9 @@ fn a_2d_operation_has_an_outline_and_a_3d_one_a_boundary() {
         StrategySpec::Drill {
             peck: None,
             dwell: None,
+            chip_break: None,
+            pitch: None,
+            hand: Default::default(),
         },
     ];
     for s in strategies {
@@ -1464,6 +1532,9 @@ fn multiple_depths_are_shared_and_used_as_the_strategy_says() {
             StrategySpec::Drill {
                 peck: None,
                 dwell: None,
+                chip_break: None,
+                pitch: None,
+                hand: Default::default(),
             },
             None,
         ),
@@ -2019,6 +2090,9 @@ fn settings_a_strategy_does_not_use_are_not_required() {
     finish.strategy = StrategySpec::Drill {
         peck: None,
         dwell: None,
+        chip_break: None,
+        pitch: None,
+        hand: Default::default(),
     };
     finish.tool = Some("rough-6-flat".into());
     finish.passes.feed = 0.0;

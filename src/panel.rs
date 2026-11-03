@@ -1166,7 +1166,7 @@ pub fn operation_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
             SIDES.iter().position(|(x, _)| *x == side).unwrap_or(0),
         ));
     }
-    passes.extend(strategy_rows(&data, id));
+    passes.extend(strategy_rows(&data, spec, id));
     panel.push(group("Passes", passes));
     panel.extend(tabs_group(&data, id));
     panel.extend(finishing_group(&data, spec, id));

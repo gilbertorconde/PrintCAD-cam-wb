@@ -199,7 +199,7 @@ pub enum StrategySpec {
         #[serde(default, skip_serializing_if = "is_default")]
         stock_offset: f64,
     },
-    /// Holes, picked by their rims, each drilled straight down.
+    /// Holes, picked by their rims, each drilled straight down, or tapped.
     Drill {
         /// Depth of each peck, backing out between; all at once when not given.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -207,6 +207,20 @@ pub enum StrategySpec {
         /// Seconds to pause at the bottom, for a canned cycle that can.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dwell: Option<f64>,
+        /// Between pecks, back off only this far to break the chip, rather
+        /// than out of the hole: Fusion's chip breaking, and its chip break
+        /// distance (`G73`). Only with a peck.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        chip_break: Option<f64>,
+        /// Tap each hole, rather than drill it: the thread's pitch, in
+        /// millimetres a turn. The tap is fed in at the pitch a turn of the
+        /// spindle, which reverses at the bottom to feed it back out (`G84`,
+        /// `G74` left-hand). No peck, chip breaking or dwell.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pitch: Option<f64>,
+        /// Which way the thread turns, when tapping.
+        #[serde(default, skip_serializing_if = "is_default")]
+        hand: ThreadHand,
     },
 }
 
@@ -235,6 +249,18 @@ impl StrategySpec {
             StrategySpec::Pocket { .. } => "pocket",
             StrategySpec::Face { .. } => "face",
             StrategySpec::Drill { .. } => "drill",
+        }
+    }
+
+    /// The thread a drilling operation taps, if it taps.
+    pub fn tap(&self) -> Option<crate::strategy::drilling::Tap> {
+        match *self {
+            StrategySpec::Drill {
+                pitch: Some(pitch),
+                hand,
+                ..
+            } => Some(crate::strategy::drilling::Tap { pitch, hand }),
+            _ => None,
         }
     }
 
@@ -313,6 +339,27 @@ impl StrategySpec {
             // A finishing waterline's, as Fusion's Contour.
             _ if matches!(self, StrategySpec::Contour { .. }) => Some(1.0),
             _ => Some(2.0),
+        }
+    }
+}
+
+/// Which way a tapped thread turns.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ThreadHand {
+    /// Right-hand: tapped in with the spindle turning clockwise (`G84`).
+    #[default]
+    Right,
+    /// Left-hand: tapped in turning counter-clockwise (`G74`).
+    Left,
+}
+
+impl ThreadHand {
+    /// Which way the spindle turns to tap it in.
+    pub fn spindle(self) -> super::SpindleDirection {
+        match self {
+            ThreadHand::Right => super::SpindleDirection::Clockwise,
+            ThreadHand::Left => super::SpindleDirection::CounterClockwise,
         }
     }
 }

@@ -951,8 +951,8 @@ impl Bench for Cam {
                              pass_extension, tab_width, tab_height, tab_spacing, \
                              finishing_passes: numbers; centre, tabs, finishing, \
                              finishing_repeat: booleans; tab_shape: rectangular|triangular; \
-                             outer_radius, peck, dwell, finishing_stepover, finishing_feed: \
-                             {value, given}}",
+                             hand: right|left; outer_radius, peck, chip_break, dwell, pitch, \
+                             finishing_stepover, finishing_feed: {value, given}}",
                         ),
                         param("name", ParamKind::String, false, "the operation's name"),
                     ],
@@ -960,6 +960,11 @@ impl Bench for Cam {
                     notes: vec![
                         "Without a tool it takes the one the setup's last operation used.".into(),
                         "A library tool's first preset sets its feeds and speeds.".into(),
+                        "Drilling: peck backs out between pecks, and with chip_break only that \
+                         far (G73); pitch, mm a turn, taps each hole instead (G84, or G74 with \
+                         hand = left), fed at the pitch times the spindle's speed, and posted \
+                         only by a post with drill cycles."
+                            .into(),
                     ],
                     see_also: vec![id(TOOLS), id(RUN)],
                     ..Default::default()
