@@ -951,7 +951,7 @@ fn positive(v: f64) -> bool {
 
 /// The strategies a new operation may have, in the order the panel lists them,
 /// with what the panel calls them.
-pub const STRATEGIES: [(&str, &str); 16] = [
+pub const STRATEGIES: [(&str, &str); 17] = [
     ("adaptive", "Adaptive clearing (3D roughing)"),
     ("pocket-clearing", "Pocket clearing (3D roughing)"),
     ("parallel", "Parallel (3D finishing)"),
@@ -967,6 +967,7 @@ pub const STRATEGIES: [(&str, &str); 16] = [
     ("drill", "Drilling"),
     ("engrave", "Engrave (along curves)"),
     ("slot", "Slot (along curves)"),
+    ("chamfer", "Deburr / chamfer (along edges)"),
     ("v-carve", "V-carve"),
 ];
 
@@ -997,6 +998,7 @@ pub fn strategy_word(strategy: &StrategySpec) -> &'static str {
         StrategySpec::Engrave { .. } => "Engrave",
         StrategySpec::VCarve { .. } => "V-carve",
         StrategySpec::Slot { .. } => "Slot",
+        StrategySpec::Chamfer { .. } => "Chamfer",
     }
 }
 
@@ -1019,7 +1021,8 @@ fn start_on_silhouette(op: &mut Operation) {
         | StrategySpec::Drill { .. }
         | StrategySpec::Engrave { .. }
         | StrategySpec::VCarve { .. }
-        | StrategySpec::Slot { .. } => return,
+        | StrategySpec::Slot { .. }
+        | StrategySpec::Chamfer { .. } => return,
     };
     op.boundary.kind = Boundary::Silhouette;
     op.boundary.containment = containment;
@@ -1454,6 +1457,87 @@ mod tests {
                 .unwrap()
                 .contains("end mill its width")
         );
+    }
+
+    /// A chamfer of picked edges: its width, tip offset and side survive
+    /// the document, reach the job and read back; a cone too small for it,
+    /// or no cone, is a problem the panel says.
+    #[test]
+    fn a_chamfer_reads_back_as_camcraft_writes_it() {
+        use camcraft_core::job::{ChamferSide, ToolKind};
+        let mut setup = SetupData::new(vec!["b1".into()], "grbl", 0.05);
+        let vbit = ToolSpec {
+            kind: ToolKind::Cone,
+            diameter: 6.0,
+            angle: Some(90.0),
+            ..ToolSpec::default()
+        };
+        let name = setup.adopt("V 90", &vbit);
+        let mut chamfer =
+            OperationData::new(Some("s1".into()), StrategySpec::named("chamfer").unwrap());
+        assert_eq!(
+            (chamfer.passes.chamfer_width, chamfer.passes.tip_offset),
+            (0.5, 0.2)
+        );
+        chamfer.use_tool(&name, &vbit, None, 0.05);
+        chamfer.edges = vec![Pick {
+            body: "b1".into(),
+            at: [4.0, 0.0, 5.0],
+            name: None,
+            faces: None,
+        }];
+        chamfer.passes.chamfer_width = 1.0;
+        chamfer.passes.tip_offset = 0.3;
+        let flip = printcad_bench_sdk::api::PanelEvent::Choice {
+            id: "passes/chamfer_side".into(),
+            index: 1,
+        };
+        assert!(crate::passes::passes_event(
+            &mut chamfer,
+            "chamfer_side",
+            &flip,
+            None
+        ));
+        let back = OperationData::from(&chamfer.to_value()).unwrap();
+        assert_eq!(back, chamfer);
+        assert!(
+            chamfer.problem(&setup.tools).is_none(),
+            "{:?}",
+            chamfer.problem(&setup.tools)
+        );
+        let names: Vec<_> = chamfer
+            .passes
+            .parameters(&chamfer.operation(""))
+            .into_iter()
+            .map(|(_, n, ..)| n)
+            .collect();
+        assert!(names.contains(&"chamfer_width") && names.contains(&"tip_offset"));
+        let models = models_of(&setup, |_| Some("Part".into()));
+        let job = job("S", &setup, &models, &[("Deburr".to_string(), &chamfer)]);
+        let text = camcraft_session::job_text(&job).unwrap();
+        let back = camcraft_session::parse_job(&text, "t").unwrap();
+        assert_eq!(back, job);
+        assert_eq!(
+            back.setups[0].operations[0].strategy,
+            StrategySpec::Chamfer {
+                width: 1.0,
+                tip_offset: 0.3,
+                side: ChamferSide::Flipped,
+            }
+        );
+        assert!(back.check_setup(0).is_ok(), "{:?}", back.check_setup(0));
+
+        // Three millimetres of chamfer is more cone than a 6 mm V-bit has.
+        chamfer.passes.chamfer_width = 3.0;
+        let why = chamfer.problem(&setup.tools).unwrap();
+        assert!(why.contains("more of the cone"), "{why}");
+        let flat = ToolSpec {
+            diameter: 6.0,
+            ..ToolSpec::default()
+        };
+        let f = setup.adopt("Flat 6", &flat);
+        chamfer.use_tool(&f, &flat, None, 0.05);
+        assert!(chamfer.problem(&setup.tools).unwrap().contains("V-bit"));
     }
 
     #[test]

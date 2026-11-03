@@ -1175,6 +1175,10 @@ fn heights_group(data: &OperationData, feature: &str) -> Widget {
     }
     let uses = data.strategy().uses();
     let about = match data.strategy() {
+        StrategySpec::Chamfer { .. } => Some(
+            "It has no top or bottom: each edge is chamfered from its own height, as \
+             deep as the chamfer's width and the tip offset take the cone.",
+        ),
         _ if uses.top.is_none() && uses.bottom.is_none() => {
             Some("It follows the part all the way down, so it has no top or bottom.")
         }

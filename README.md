@@ -66,7 +66,13 @@ panels, the drawing and the helper that runs camcraft.
   deep unless set and a millimetre a level, both ways (back and forth,
   ramping down as an engraving does) or one way (each level from the
   start, lifting back, entered by a ramp along the slot or a plunge),
-  their arcs arcs at every level; and V-carving closed areas, letters among them, with a V-bit down
+  their arcs arcs at every level; deburring and chamfering with a chamfer
+  mill or V-bit along picked edges, a pocket's rim or a part's outline,
+  each from its own height: as wide as asked (0.5 mm unless set), the
+  tip a tip offset below the chamfer so its flank cuts it, the tool's
+  centre beside the edge away from the material, as the part either side
+  says, or flipped, and a cone too small for it a failed check; and
+  V-carving closed areas, letters among them, with a V-bit down
   their middle, as deep as each is wide: past its deepest it cuts the walls
   that deep and leaves the flat floor between, and says so, for a flat end
   mill to clear. An operation
@@ -190,6 +196,8 @@ local name = cam.operation{setup = setup.feature, strategy = "engrave", tool = "
 local keyway = cam.operation{setup = setup.feature, strategy = "slot", tool = "1/4 upcut",
                              sketches = {"<sketch id>"}, pattern = "directional",
                              passes = {depth = 4}, stepdown = 1}
+local deburr = cam.operation{setup = setup.feature, strategy = "chamfer", tool = "90° V-bit",
+                             passes = {chamfer_width = 0.8, tip_offset = 0.3}}
 local letters = cam.operation{setup = setup.feature, strategy = "v-carve", tool = "60° V-bit",
                               sketches = {"<sketch id>"}, passes = {max_depth = {value = 2, given = true}}}
 cam.status{id = setup.feature}          -- queued, running, ready (with its checks), failed

@@ -1099,7 +1099,8 @@ impl Bench for Cam {
                              pass_extension, tab_width, tab_height, tab_spacing, \
                              finishing_passes: numbers; centre, tabs, finishing, \
                              finishing_repeat: booleans; tab_shape: rectangular|triangular; \
-                             hand: right|left; depth: engrave's and slot's, mm; outer_radius, peck, \
+                             hand: right|left; depth: engrave's and slot's, mm; chamfer_width, \
+                             tip_offset: a chamfer's, mm; outer_radius, peck, \
                              chip_break, dwell, pitch, max_depth, finishing_stepover, \
                              finishing_feed: {value, given}}",
                         ),
@@ -1128,6 +1129,12 @@ impl Bench for Cam {
                             false,
                             "slot: bidirectional|directional (bidirectional)",
                         ),
+                        param(
+                            "side",
+                            ParamKind::String,
+                            false,
+                            "chamfer: auto|flipped (auto: away from the material)",
+                        ),
                         param("name", ParamKind::String, false, "the operation's name"),
                     ],
                     returns: "{feature}".into(),
@@ -1143,6 +1150,12 @@ impl Bench for Cam {
                          tool, passes.depth below the top (3 mm), a stepdown a level (1 mm): \
                          bidirectional ramps back and forth along each, directional cuts each \
                          level from its start, lifting back between them."
+                            .into(),
+                        "Chamfer (deburr) runs a chamfer mill or V-bit along picked edges, or \
+                         a sketch's loops, each from its own height: passes.chamfer_width wide \
+                         (0.5 mm), its tip passes.tip_offset (0.2 mm) below the chamfer, its \
+                         centre beside the edge away from the material. A cone too small for \
+                         it is a failed check."
                             .into(),
                         "A library tool's first preset sets its feeds and speeds.".into(),
                         "Drilling: peck backs out between pecks, and with chip_break only that \
@@ -1538,6 +1551,12 @@ impl Bench for Cam {
                     if let Some(r) = args.get("reverse").and_then(Value::as_bool) {
                         *reverse = r;
                     }
+                }
+                if let StrategySpec::Chamfer { side, .. } = &mut data.operation.strategy
+                    && let Some(d) = text("side")
+                {
+                    *side = serde_json::from_value(json!(d))
+                        .map_err(|_| format!("no chamfer side '{d}'"))?;
                 }
                 if let StrategySpec::Slot {
                     pattern, reverse, ..
