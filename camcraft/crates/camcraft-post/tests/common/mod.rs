@@ -81,6 +81,8 @@ pub fn spec() -> ProgramSpec {
         units: ProgramUnits::Mm,
         drill: None,
         taps: false,
+        tilt: None,
+        rotary: Vec::new(),
     }
 }
 

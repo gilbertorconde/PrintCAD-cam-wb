@@ -24,6 +24,7 @@ use camcraft_core::strategy::drilling::{Hole, Tap};
 use glam::{DVec2, DVec3, dvec3};
 
 use crate::profile::ProgramUnits;
+use crate::rotary::{RotaryAt, RotaryError, angles, short};
 
 /// A canned drilling cycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,6 +135,11 @@ pub enum Op {
     CycleEnd,
     /// Text passed through untouched, for manual NC and probe macros.
     Raw(String),
+    /// A comment for the operator, in the profile's way of writing one.
+    Comment(String),
+    /// Turn the rotaries to where they stand the setup's tool axis up the
+    /// spindle, with the tool clear: positioning only, before it cuts.
+    Rotary(Vec<RotaryAt>),
     /// Take the tool straight up clear of everything, as the profile does it.
     SafeRetract,
     /// Send the machine home across, as the profile does it.
@@ -174,6 +180,12 @@ pub struct ProgramSpec {
     ///
     /// [`drill`]: Self::drill
     pub taps: bool,
+    /// The setup's tool axis, a unit vector in the model, when it is not the
+    /// model's +Z: the program is in the setup's tilted frame, and says so.
+    pub tilt: Option<DVec3>,
+    /// Where the machine's rotaries go before it cuts: empty for a machine
+    /// without them, whose part is fixtured tilted by hand.
+    pub rotary: Vec<RotaryAt>,
 }
 
 /// A drilling operation's holes, as canned cycles.
@@ -211,6 +223,8 @@ impl Default for ProgramSpec {
             units: ProgramUnits::Mm,
             drill: None,
             taps: false,
+            tilt: None,
+            rotary: Vec::new(),
         }
     }
 }
@@ -243,6 +257,10 @@ pub enum LowerError {
     /// A tap whose spindle turns against its thread.
     #[error("a {0:?}-hand tap goes in with the spindle turning the other way")]
     TapTurnsAgainstThread(ThreadHand),
+    /// The machine's rotaries cannot stand the setup's tool axis up the
+    /// spindle.
+    #[error(transparent)]
+    Rotary(#[from] RotaryError),
 }
 
 /// Turn a linked toolpath into an instruction stream.
@@ -302,6 +320,7 @@ pub fn lower_counted(
         strategy: spec.strategy.clone(),
         wcs: spec.wcs,
     });
+    out.extend(tilt_notes(spec).into_iter().map(Op::Comment));
     // The spindle is stopped and the tool raised before any tool change, whatever
     // ran before this program.
     out.push(Op::SpindleOff);
@@ -311,6 +330,9 @@ pub fn lower_counted(
         comment: spec.tool_comment.clone(),
     });
     out.push(Op::WorkOffset(spec.wcs));
+    if !spec.rotary.is_empty() {
+        out.push(Op::Rotary(spec.rotary.clone()));
+    }
     out.push(Op::SpindleOn {
         rpm: spec.rpm,
         dir: spec.spin,
@@ -337,6 +359,34 @@ pub fn lower_counted(
     out.push(Op::ProgramEnd);
     made.resize(out.len(), path.len());
     Ok((out, made))
+}
+
+/// What the program's header says of a tilted setup: which way its tool
+/// axis is, how it is stood up the spindle, and that the coordinates are in
+/// the tilted frame. Nothing for one up the model's Z.
+fn tilt_notes(spec: &ProgramSpec) -> Vec<String> {
+    let Some(axis) = spec.tilt else {
+        return Vec::new();
+    };
+    let degrees = axis.z.clamp(-1.0, 1.0).acos().to_degrees();
+    let mut out = vec![format!(
+        "tool axis {} {} {} of the model, tilted {} deg from its Z",
+        short(axis.x),
+        short(axis.y),
+        short(axis.z),
+        short(degrees)
+    )];
+    if spec.rotary.is_empty() {
+        out.push("fixture the part tilted so this axis points up the spindle".into());
+    } else {
+        out.push(format!(
+            "{} stands it up the spindle; positioning only",
+            angles(&spec.rotary)
+        ));
+    }
+    out.push("coordinates are in the tilted frame: set the work offset in it".into());
+    out.push("or use the controller's tilted-plane feature where it has one".into());
+    out
 }
 
 /// Each hole as one canned cycle: across at the clearance height to the first,

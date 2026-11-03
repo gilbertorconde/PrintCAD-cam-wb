@@ -127,10 +127,7 @@ fn a_job_round_trips() {
     bottom.stocks = vec!["block".into(), "plate".into()];
     bottom.wcs = 55;
     bottom.post = "profiles/mine.toml".into();
-    bottom.orientation = Orientation {
-        z: Axis::NegZ,
-        x: Axis::PosY,
-    };
+    bottom.orientation = Orientation::square(Axis::NegZ, Axis::PosY);
     bottom.origin = Origin::BoxPoint {
         of: BoxOf::Stock,
         x: Along::Min,
@@ -1034,10 +1031,7 @@ fn a_model_transform_must_be_a_real_one() {
 #[test]
 fn a_bad_orientation_is_refused() {
     let mut j = sample();
-    j.setups[0].orientation = Orientation {
-        z: Axis::PosX,
-        x: Axis::NegX,
-    };
+    j.setups[0].orientation = Orientation::square(Axis::PosX, Axis::NegX);
     assert!(matches!(j.validate(), Err(JobError::BadOrientation { .. })));
 }
 

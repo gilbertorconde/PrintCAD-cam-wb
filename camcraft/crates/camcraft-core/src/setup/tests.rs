@@ -1,6 +1,6 @@
 use super::*;
 use crate::job::{Along, BarAxis, FixedBox, FixedCylinder, ModelDef, Place, StockDef};
-use crate::setup::frame::{Axis, Orientation};
+use crate::setup::frame::{Axis, Direction, Orientation};
 use camcraft_sim::stock::{Axis as FrameAxis, Bar, Block};
 use glam::dvec3;
 
@@ -163,10 +163,7 @@ fn two_setups_share_one_block() {
     });
     let mut bottom = j.setups[0].clone();
     bottom.name = "bottom".into();
-    bottom.orientation = Orientation {
-        z: Axis::NegZ,
-        x: Axis::PosX,
-    };
+    bottom.orientation = Orientation::square(Axis::NegZ, Axis::PosX);
     j.setups.push(bottom);
     let top = prepare(&j, 0, &meshes).unwrap();
     let under = prepare(&j, 1, &meshes).unwrap();
@@ -207,10 +204,7 @@ fn a_stock_in_frame_is_where_prepare_puts_it() {
         }),
     ] {
         let mut j = job(spec.clone());
-        j.setups[0].orientation = Orientation {
-            z: Axis::NegZ,
-            x: Axis::PosX,
-        };
+        j.setups[0].orientation = Orientation::square(Axis::NegZ, Axis::PosX);
         j.setups[0].origin = Origin::BoxPoint {
             of: BoxOf::Stock,
             x: Along::Max,
@@ -255,10 +249,7 @@ fn a_bar_is_round_the_bodies() {
 
     // The tool along the model's X, the machine's X along its Y: the bar
     // along the model's Z lies along the machine's Y.
-    j.setups[0].orientation = Orientation {
-        z: Axis::PosX,
-        x: Axis::PosY,
-    };
+    j.setups[0].orientation = Orientation::square(Axis::PosX, Axis::PosY);
     let p = prepare(&j, 0, &meshes).unwrap();
     let Block::Bar(turned) = p.stocks[0] else {
         panic!("{:?}", p.stocks[0]);
@@ -407,4 +398,168 @@ fn the_shadow_is_cast_once() {
     let heights = p.heights();
     assert_eq!((heights.model_bottom, heights.model_top), (0.0, 5.0));
     assert_eq!(heights.picked, None);
+}
+
+/// A unit cube's eight corners, as a mesh: (0, 0, 0) to (10, 10, 10).
+fn cube() -> TriMesh {
+    let v: Vec<DVec3> = (0..8)
+        .map(|i| {
+            dvec3(
+                f64::from(i & 1) * 10.0,
+                f64::from((i >> 1) & 1) * 10.0,
+                f64::from((i >> 2) & 1) * 10.0,
+            )
+        })
+        .collect();
+    TriMesh::new(v, vec![[0, 1, 2], [4, 5, 6], [3, 7, 1]]).unwrap()
+}
+
+/// Tilted 45° about X, a box round the bodies is the box round them as the
+/// setup sees them, grown by its margins along the setup's axes: wider in Y
+/// and Z than the cube is, by its diagonal.
+#[test]
+fn a_box_round_the_bodies_is_round_them_as_tilted() {
+    let body = Body::derived(cube());
+    let meshes: Bodies<'_> = [("m", &body)].into_iter().collect();
+    let mut j = job(StockSpec::AroundModels {
+        models: vec![],
+        margin: [1.0, 2.0, 3.0],
+        below: 4.0,
+    });
+    let (s, c) = 45f64.to_radians().sin_cos();
+    j.setups[0].orientation = Orientation {
+        z: Direction::Vector([0.0, -s, c]),
+        x: Direction::Axis(Axis::PosX),
+    };
+    let p = prepare(&j, 0, &meshes).unwrap();
+    let diagonal = 10.0 * 2f64.sqrt();
+    let m = p.model_bounds.extent();
+    assert!((m - dvec3(10.0, diagonal, diagonal)).length() < 1e-9, "{m}");
+    let b = p.stocks[0].bounds();
+    let want = p.model_bounds;
+    assert!((b.min - (want.min - dvec3(1.0, 2.0, 4.0))).length() < 1e-9);
+    assert!((b.max - (want.max + dvec3(1.0, 2.0, 3.0))).length() < 1e-9);
+    // Every corner of the part is inside the stock, as the setup sees both.
+    for v in cube().vertices() {
+        let q = p.frame.to_setup(*v);
+        assert!(q.cmpge(b.min).all() && q.cmple(b.max).all(), "{q}");
+    }
+    // And shown for the setup from outside, the stock is where it is.
+    let shown = stock_in_frame(&j.stocks[0].spec, &j.setups[0].models, &p.frame, &meshes);
+    assert!((shown.unwrap().min - b.min).length() < 1e-12);
+}
+
+/// Tilted, a fixed box and a bar lie along the setup's axes, centred on the
+/// bodies as it sees them.
+#[test]
+fn fixed_stock_lies_along_a_tilted_setup() {
+    let body = Body::derived(cube());
+    let meshes: Bodies<'_> = [("m", &body)].into_iter().collect();
+    let tilt = Orientation {
+        z: Direction::Vector([0.5, 0.0, 1.0]),
+        x: Direction::Axis(Axis::PosX),
+    };
+    let mut j = job(StockSpec::FixedBox(FixedBox::centred([30.0, 20.0, 25.0])));
+    j.setups[0].orientation = tilt.clone();
+    let p = prepare(&j, 0, &meshes).unwrap();
+    let b = p.stocks[0].bounds();
+    assert!((b.extent() - dvec3(30.0, 20.0, 25.0)).length() < 1e-9);
+    assert!((b.max.z - p.model_bounds.max.z).abs() < 1e-9, "top flush");
+    assert!((b.center().x - p.model_bounds.center().x).abs() < 1e-9);
+
+    let mut j = job(StockSpec::FixedCylinder(FixedCylinder {
+        models: vec![],
+        axis: BarAxis::Z,
+        diameter: 40.0,
+        length: 30.0,
+        place: Place::Center {},
+    }));
+    j.setups[0].orientation = tilt;
+    let p = prepare(&j, 0, &meshes).unwrap();
+    let Block::Bar(bar) = p.stocks[0] else {
+        panic!("a bar")
+    };
+    assert_eq!(bar.axis, FrameAxis::Z, "up the setup's tool");
+}
+
+/// The tool axis can be a flat face's normal, found on the model by a
+/// point on it, and X a straight edge's direction.
+#[test]
+fn the_tool_axis_can_be_picked() {
+    use crate::job::FeatureRef;
+    // A wedge: its sloping face rises 10 over 20 in Y.
+    let mesh = TriMesh::new(
+        vec![
+            dvec3(0.0, 0.0, 0.0),
+            dvec3(10.0, 0.0, 0.0),
+            dvec3(0.0, 20.0, 0.0),
+            dvec3(10.0, 20.0, 0.0),
+            dvec3(0.0, 20.0, 10.0),
+            dvec3(10.0, 20.0, 10.0),
+        ],
+        vec![
+            [0, 2, 1],
+            [1, 2, 3],
+            [0, 1, 5],
+            [0, 5, 4],
+            [2, 4, 5],
+            [2, 5, 3],
+            [0, 4, 2],
+            [1, 3, 5],
+        ],
+    )
+    .unwrap();
+    let body = Body::derived(mesh);
+    let meshes: Bodies<'_> = [("m", &body)].into_iter().collect();
+    let mut j = job(StockSpec::default());
+    j.setups[0].orientation = Orientation {
+        z: Direction::Face {
+            face: FeatureRef {
+                model: "m".into(),
+                index: u32::MAX,
+                at: [5.0, 10.0, 5.0],
+            },
+            reverse: false,
+        },
+        x: Direction::Axis(Axis::PosX),
+    };
+    let p = prepare(&j, 0, &meshes).unwrap();
+    let z = p.frame.turn.tool_axis();
+    assert!(
+        (z - dvec3(0.0, -1.0, 2.0).normalize()).length() < 1e-9,
+        "{z}"
+    );
+    // The sloping face lies level in the setup.
+    let a = p.frame.to_setup(dvec3(0.0, 0.0, 0.0));
+    let b = p.frame.to_setup(dvec3(10.0, 20.0, 10.0));
+    assert!((a.z - b.z).abs() < 1e-9);
+
+    j.setups[0].orientation.x = Direction::Edge {
+        edge: FeatureRef {
+            model: "m".into(),
+            index: u32::MAX,
+            at: [5.0, 0.0, 0.0],
+        },
+        toward: Some([0.9, 0.1, 0.0]),
+        reverse: false,
+    };
+    let p = prepare(&j, 0, &meshes).unwrap();
+    let [x, ..] = p.frame.turn.axes();
+    assert!((x - DVec3::X).length() < 1e-9, "{x}");
+    j.setups[0].orientation.x = j.setups[0].orientation.x.flipped();
+    let p = prepare(&j, 0, &meshes).unwrap();
+    let [x, ..] = p.frame.turn.axes();
+    assert!((x + DVec3::X).length() < 1e-9, "{x}");
+
+    // A face that is not there is said to be.
+    j.setups[0].orientation.z = Direction::Face {
+        face: FeatureRef {
+            model: "m".into(),
+            index: u32::MAX,
+            at: [50.0, 50.0, 50.0],
+        },
+        reverse: false,
+    };
+    let e = prepare(&j, 0, &meshes).unwrap_err();
+    assert!(e.to_string().contains("no longer there"), "{e}");
 }

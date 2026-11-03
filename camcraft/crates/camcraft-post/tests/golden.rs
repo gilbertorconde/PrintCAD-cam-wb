@@ -190,6 +190,54 @@ fn an_engraving_writes_its_arcs_as_arcs() {
     assert!(arcs.iter().any(|l| l.contains('Z')), "no helix: {arcs:?}");
 }
 
+/// A setup tilted 30° about X, for a machine with an A axis: the header says
+/// how it is tilted, and the A stands it up at rapid, alone, before it cuts.
+#[test]
+fn an_a_axis_positions_a_tilted_setup() {
+    let mut p = Profile::builtin("masso").unwrap().unwrap();
+    p.rotary = Some(toml::from_str("axes = [\"A\"]\n[A]\nlimits = [-120, 120]\n").unwrap());
+    let (s, c) = 30f64.to_radians().sin_cos();
+    let tool = glam::dvec3(0.0, -s, c);
+    let rotary = p
+        .rotary
+        .as_ref()
+        .unwrap()
+        .position(tool, glam::DVec3::X)
+        .unwrap();
+    let spec = ProgramSpec {
+        tilt: Some(tool),
+        rotary,
+        ..spec()
+    };
+    check_against(&p, &fixture(), &spec, "masso-rotary-a");
+}
+
+/// An A and B table stands any tool axis up, both turning, the setup's X
+/// lying where they leave the machine's.
+#[test]
+fn an_a_and_b_table_positions_a_tilted_setup() {
+    use camcraft_post::rotary::RotaryError;
+    let mut p = Profile::builtin("linuxcnc").unwrap().unwrap();
+    p.rotary = Some(
+        toml::from_str(
+            "axes = [\"A\", \"B\"]\n[A]\nsign = -1\nlimits = [-30, 110]\n\
+             [B]\nlimits = [-180, 180]\n",
+        )
+        .unwrap(),
+    );
+    let rotary = p.rotary.as_ref().unwrap();
+    let tool = glam::dvec3(0.3, -0.4, 0.8).normalize();
+    let Err(RotaryError::Twisted { want, .. }) = rotary.position(tool, glam::DVec3::X) else {
+        panic!("X turned off the machine's");
+    };
+    let spec = ProgramSpec {
+        tilt: Some(tool),
+        rotary: rotary.position(tool, want).unwrap(),
+        ..spec()
+    };
+    check_against(&p, &fixture(), &spec, "linuxcnc-rotary-ab");
+}
+
 /// Every builtin profile must have a golden file. Adding a profile without one
 /// would leave it untested by exactly the test meant to cover it.
 #[test]

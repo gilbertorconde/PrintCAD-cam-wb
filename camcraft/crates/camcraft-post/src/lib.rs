@@ -18,3 +18,4 @@ pub mod op;
 pub mod profile;
 pub mod readback;
 pub mod render;
+pub mod rotary;

@@ -16,7 +16,7 @@ pub const HELPER: &str = "camcraft-helper";
 
 /// Bumped whenever a request or response changes shape, so a package never
 /// reads an answer from a helper of another build.
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 
 /// One setup to run.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -88,8 +88,11 @@ pub struct Run {
     pub notes: Vec<String>,
     /// Everything worth a person's attention.
     pub warnings: Vec<String>,
-    /// The box around the stock, low and high corners.
-    pub stock: [[f64; 3]; 2],
+    /// The box around the stock, as the setup sees it, by its eight corners:
+    /// corner `i` is at the box's high X where `i & 1` is set, its high Y
+    /// where `i & 2` is and its high Z where `i & 4` is. Square to the
+    /// document's axes unless the setup is tilted.
+    pub stock: [[f64; 3]; 8],
     /// The stock, when it is a round bar: drawn as one, inside its box.
     #[serde(default)]
     pub cylinder: Option<Cylinder>,

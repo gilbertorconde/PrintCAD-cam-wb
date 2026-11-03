@@ -199,6 +199,35 @@ fn a_flipped_setup_machines_the_underside() {
     assert!(result.is_clean(), "{:?}", result.warnings());
 }
 
+/// Tilted 30° about X, the setup machines the dome as it leans, from a box
+/// round it as tilted: the same dome, so the same heights, and it verifies
+/// clean, in a frame that is a rotation and not a swap of axes.
+#[test]
+fn a_tilted_setup_machines_and_verifies() {
+    use crate::setup::frame::{Axis, Direction, Orientation};
+    let mut job: Job = toml::from_str(JOB).unwrap();
+    let (s, c) = 30f64.to_radians().sin_cos();
+    job.setups[0].orientation = Orientation {
+        z: Direction::Vector([0.0, -s, c]),
+        x: Direction::Axis(Axis::PosX),
+    };
+    let result = run_job(&job, &dome()).unwrap();
+    assert!(result.frame.turn.square().is_none());
+    assert!(
+        (result.heights.model_top - 8.0).abs() < 0.05,
+        "{:?}",
+        result.heights
+    );
+    let tip = result
+        .frame
+        .to_model(glam::dvec3(0.0, 0.0, result.heights.model_top));
+    let up = result.frame.turn.tool_axis();
+    assert!((up - glam::dvec3(0.0, -s, c)).length() < 1e-12);
+    assert!((tip.dot(up) - 8.0).abs() < 0.05, "{tip}");
+    assert!(result.is_clean(), "{:?}", result.warnings());
+    assert!(result.operations.iter().all(|o| o.passes > 0));
+}
+
 /// Two setups start from their own stock: the second's first stage is a whole
 /// block, not what the first left.
 #[test]

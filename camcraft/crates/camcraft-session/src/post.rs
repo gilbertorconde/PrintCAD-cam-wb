@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 
 use camcraft_core::job::Setup;
 use camcraft_core::run::{OperationResult, StrategyDetail};
-use camcraft_post::op::{DrillCycles, ProgramSpec, lower};
+use camcraft_core::setup::frame::Frame;
+use camcraft_post::op::{DrillCycles, LowerError, ProgramSpec, lower};
 use camcraft_post::profile::Profile;
 use camcraft_post::render::{RenderReport, render};
 
@@ -74,9 +75,21 @@ pub fn program_name(setup: &str, index: usize, op_name: &str) -> String {
     )
 }
 
-/// Everything one operation's program needs besides its path, for `profile`.
-pub fn program_spec(op: &OperationResult, wcs: u8, profile: &Profile) -> ProgramSpec {
-    ProgramSpec {
+/// Everything one operation's program needs besides its path, for `profile`,
+/// in a setup whose frame is `frame`: tilted, where the machine's rotaries go
+/// to stand its tool axis up the spindle, which they may not reach.
+pub fn program_spec(
+    op: &OperationResult,
+    wcs: u8,
+    frame: &Frame,
+    profile: &Profile,
+) -> Result<ProgramSpec, LowerError> {
+    let [x, _, z] = frame.turn.axes();
+    let rotary = match &profile.rotary {
+        Some(r) => r.position(z, x)?,
+        None => Vec::new(),
+    };
+    Ok(ProgramSpec {
         op_name: op.name.clone(),
         strategy: op.strategy.to_string(),
         tool: op.tool_number,
@@ -99,17 +112,24 @@ pub fn program_spec(op: &OperationResult, wcs: u8, profile: &Profile) -> Program
             _ => None,
         },
         taps: matches!(&op.detail, StrategyDetail::Drill(r) if r.tap.is_some()),
-    }
+        // Said in the header when the part is tilted, or turned by the
+        // rotaries; a part turned square by hand is written as it always was.
+        tilt: (z != glam::DVec3::Z && (frame.turn.square().is_none() || !rotary.is_empty()))
+            .then_some(z),
+        rotary,
+    })
 }
 
-/// Render one operation as a program for `profile`.
+/// Render one operation, of a setup whose frame is `frame`, as a program for
+/// `profile`.
 pub fn program(
     op: &OperationResult,
     wcs: u8,
+    frame: &Frame,
     profile: &Profile,
     name: &str,
 ) -> Result<(String, RenderReport), SessionError> {
-    let ops = lower(&op.path, &program_spec(op, wcs, profile))?;
+    let ops = lower(&op.path, &program_spec(op, wcs, frame, profile)?)?;
     Ok(render(&ops, profile, name))
 }
 
@@ -185,7 +205,8 @@ pub fn plan_posting(
         let made = ran.result.operations.iter().enumerate();
         for (k, op) in made.filter(|(_, op)| op.made.has_paths()) {
             let name = program_name(&setup.name, k, &op.name);
-            let (text, report) = program(op, setup.wcs, &loaded, &name).map_err(in_setup)?;
+            let (text, report) =
+                program(op, setup.wcs, &ran.result.frame, &loaded, &name).map_err(in_setup)?;
             let path = dir.join(format!("{name}.{}", loaded.extension));
             let whose = format!("setup '{}' operation '{}'", setup.name, op.name);
             let key = path.display().to_string().to_lowercase();

@@ -349,7 +349,7 @@ pub(super) fn level_circles(prepared: &Prepared, bodies: &Bodies<'_>) -> Vec<(DV
             let EdgeKind::Circle(c) = edge.kind else {
                 continue;
             };
-            if prepared.frame.orientation.apply(c.normal).z.abs() < 1.0 - 1e-6 {
+            if prepared.frame.turn.apply(c.normal).z.abs() < 1.0 - 1e-6 {
                 continue;
             }
             let centre = prepared.frame.to_setup(c.center).truncate();

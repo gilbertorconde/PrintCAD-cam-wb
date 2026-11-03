@@ -246,6 +246,25 @@ impl<'a> Writer<'a> {
                 self.raw(text);
                 self.lost();
             }
+            Op::Comment(text) => self.comment(text),
+            Op::Rotary(at) => {
+                // The part turns under the tool: only with the tool clear.
+                if !self.raised {
+                    let p = self.p;
+                    self.lines(&p.safe_retract);
+                    self.raised = !p.safe_retract.is_empty();
+                }
+                let words: Vec<String> = at
+                    .iter()
+                    .map(|a| format!("{}{}", a.axis, self.p.axis(a.degrees)))
+                    .collect();
+                let s = format!("G0 {}", words.join(" "));
+                self.raw(&s);
+                self.motion = Some("G0");
+                // Where the tool is in the turned work is not known; it is
+                // still as high as it goes.
+                self.at = None;
+            }
             Op::ProgramEnd => {}
         }
     }

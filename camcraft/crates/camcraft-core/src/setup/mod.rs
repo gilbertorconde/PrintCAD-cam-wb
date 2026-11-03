@@ -7,6 +7,12 @@
 //! is in model coordinates, and brought into the frame ([`crate::setup::features`]).
 //! [`Prepared::pieces`] names the models the part was merged from.
 //!
+//! A setup square to the model's axes lays its stock out in model coordinates
+//! and turns it, so two setups of one block see the same material. A tilted one
+//! ([`frame::Turn::Tilted`]) lays it out in its own axes instead, round the
+//! models as it sees them: a box turned by a tilt is not a box along the
+//! setup's axes, and the simulator's stock is.
+//!
 //! What every operation of the setup reads from the part alone is worked out
 //! once, when first asked for, and kept with it: its shadow from above.
 
@@ -25,7 +31,7 @@ use glam::DVec3;
 
 use crate::job::{BoxOf, HeightContext, Job, JobError, Origin, Setup, StockSpec};
 use features::FeatureError;
-use frame::{BadOrientation, Frame, Orientation};
+use frame::{BadOrientation, Frame, Turn};
 
 /// A setup's models, by name, in model coordinates, with their topology.
 pub type Bodies<'a> = BTreeMap<&'a str, &'a Body>;
@@ -42,7 +48,7 @@ pub enum PrepareError {
     /// A model it needs has no geometry.
     #[error("model '{0}' has no geometry")]
     EmptyModel(String),
-    /// Its orientation is not square.
+    /// Its orientation cannot be worked out.
     #[error(transparent)]
     Orientation(#[from] BadOrientation),
     /// The models could not be merged.
@@ -120,17 +126,31 @@ impl Prepared {
     }
 }
 
-/// The box around the named models, in model coordinates.
-fn bounds_of(names: &[String], bodies: &Bodies<'_>) -> Result<Aabb, PrepareError> {
+/// The box around the named models, in model coordinates, or with `view` in
+/// the coordinates it turns them into.
+fn bounds_of(
+    names: &[String],
+    bodies: &Bodies<'_>,
+    view: Option<&Turn>,
+) -> Result<Aabb, PrepareError> {
     let mut out: Option<Aabb> = None;
     for n in names {
         let body = bodies
             .get(n.as_str())
             .ok_or_else(|| PrepareError::NotLoaded(n.clone()))?;
-        let b = body
-            .mesh()
-            .bounds()
-            .ok_or_else(|| PrepareError::EmptyModel(n.clone()))?;
+        let b = match view {
+            None => body.mesh().bounds(),
+            Some(t) => body.mesh().vertices().iter().map(|v| t.apply(*v)).fold(
+                None,
+                |b: Option<Aabb>, p| {
+                    Some(b.map_or(Aabb { min: p, max: p }, |b| Aabb {
+                        min: b.min.min(p),
+                        max: b.max.max(p),
+                    }))
+                },
+            ),
+        }
+        .ok_or_else(|| PrepareError::EmptyModel(n.clone()))?;
         out = Some(out.map_or(b, |o| o.union(&b)));
     }
     out.ok_or_else(|| PrepareError::Job(JobError::NoModels(String::new())))
@@ -144,10 +164,15 @@ pub fn bounds_all(blocks: &[Block]) -> Option<Aabb> {
 
 /// A stock block in model coordinates. One around no named models is around
 /// `setup_models`, the models of the setup using it.
+///
+/// With `view`, a tilted setup's turn, it is laid out in the coordinates that
+/// turns the models into instead: its sides, margins and bar along the
+/// setup's axes, round the models as the setup sees them.
 fn block(
     spec: &StockSpec,
     setup_models: &[String],
     bodies: &Bodies<'_>,
+    view: Option<&Turn>,
 ) -> Result<Block, PrepareError> {
     let named = spec.models();
     let models = if named.is_empty() {
@@ -155,7 +180,7 @@ fn block(
     } else {
         named
     };
-    let around = bounds_of(models, bodies)?;
+    let around = bounds_of(models, bodies, view)?;
     Ok(match spec {
         StockSpec::AroundModels { margin, below, .. } => Block::Box(Aabb {
             min: DVec3::new(
@@ -195,7 +220,7 @@ fn block(
                     .get(n.as_str())
                     .ok_or_else(|| PrepareError::NotLoaded(n.clone()))?;
                 for v in body.mesh().vertices() {
-                    let off = *v - centre;
+                    let off = view.map_or(*v, |t| t.apply(*v)) - centre;
                     reach = reach.max((off - a * off.dot(a)).length());
                 }
             }
@@ -229,13 +254,30 @@ pub fn stock_block(
     models: &[String],
     bodies: &Bodies<'_>,
 ) -> Result<Aabb, PrepareError> {
-    Ok(block(spec, models, bodies)?.bounds())
+    Ok(block(spec, models, bodies, None)?.bounds())
 }
 
-/// `b` turned the way the part sits. The turn only swaps and negates, so a box
-/// stays a box, its corners' low and high ends the new box, and a bar along an
-/// axis lies along another.
-fn turn(o: Orientation, b: &Block) -> Block {
+/// A stock block as a setup turned by `t` has it, before its work zero: one
+/// laid out in model coordinates and turned, when the turn is square, and
+/// otherwise one laid out in the setup's axes ([`block`]), since a box turned
+/// any other way is not a box along them.
+fn laid(
+    spec: &StockSpec,
+    models: &[String],
+    bodies: &Bodies<'_>,
+    t: &Turn,
+) -> Result<Block, PrepareError> {
+    if t.square().is_some() {
+        Ok(turn(t, &block(spec, models, bodies, None)?))
+    } else {
+        block(spec, models, bodies, Some(t))
+    }
+}
+
+/// `b` turned the way the part sits, by a square turn. That only swaps and
+/// negates, so a box stays a box, its corners' low and high ends the new box,
+/// and a bar along an axis lies along another.
+fn turn(o: &Turn, b: &Block) -> Block {
     match b {
         Block::Box(b) => {
             let (a, c) = (o.apply(b.min), o.apply(b.max));
@@ -275,14 +317,13 @@ pub fn stock_in_frame(
     frame: &Frame,
     bodies: &Bodies<'_>,
 ) -> Result<Aabb, PrepareError> {
-    let b = turn(frame.orientation, &block(spec, models, bodies)?);
+    let b = laid(spec, models, bodies, &frame.turn)?;
     Ok(b.bounds().translated(-frame.origin))
 }
 
 /// Where setup `index`'s part and stock are, in its own frame.
 pub fn prepare(job: &Job, index: usize, bodies: &Bodies<'_>) -> Result<Prepared, PrepareError> {
     let setup: &Setup = job.setups.get(index).ok_or(JobError::NoSetups)?;
-    setup.orientation.check()?;
     if setup.models.is_empty() {
         return Err(JobError::NoModels(setup.name.clone()).into());
     }
@@ -298,17 +339,15 @@ pub fn prepare(job: &Job, index: usize, bodies: &Bodies<'_>) -> Result<Prepared,
                 .ok_or_else(|| PrepareError::NotLoaded(n.clone()))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let model_box = bounds_of(&setup.models, bodies)?;
-    let blocks = blocks_of(job, setup, bodies)?;
-
-    let o = setup.orientation;
-    let turned_blocks: Vec<Block> = blocks.iter().map(|b| turn(o, b)).collect();
-    let turned_model = turn(o, &Block::Box(model_box)).bounds();
-    let origin = work_zero(job, setup, bodies, &turned_blocks, turned_model)?;
-    let frame = Frame {
-        orientation: o,
-        origin,
+    let o = setup.orientation.resolve(bodies, job.tolerance)?;
+    let turned_blocks = blocks_of(job, setup, bodies, &o)?;
+    let turned_model = if o.square().is_some() {
+        turn(&o, &Block::Box(bounds_of(&setup.models, bodies, None)?)).bounds()
+    } else {
+        bounds_of(&setup.models, bodies, Some(&o))?
     };
+    let origin = work_zero(job, setup, bodies, &o, &turned_blocks, turned_model)?;
+    let frame = Frame { turn: o, origin };
 
     let merged;
     let part_in_model = if let [one] = parts.as_slice() {
@@ -339,16 +378,21 @@ pub fn prepare(job: &Job, index: usize, bodies: &Bodies<'_>) -> Result<Prepared,
     })
 }
 
-/// Each of `setup`'s stock blocks, in model coordinates. A block around no named
-/// models is around the setup's.
-fn blocks_of(job: &Job, setup: &Setup, bodies: &Bodies<'_>) -> Result<Vec<Block>, PrepareError> {
+/// Each of `setup`'s stock blocks, turned by `t` as the part sits ([`laid`]). A
+/// block around no named models is around the setup's.
+fn blocks_of(
+    job: &Job,
+    setup: &Setup,
+    bodies: &Bodies<'_>,
+    t: &Turn,
+) -> Result<Vec<Block>, PrepareError> {
     let mut blocks = Vec::with_capacity(setup.stocks.len());
     for name in &setup.stocks {
         let def = job.stock(name).ok_or_else(|| JobError::UnknownStock {
             setup: setup.name.clone(),
             stock: name.clone(),
         })?;
-        blocks.push(block(&def.spec, &setup.models, bodies)?);
+        blocks.push(laid(&def.spec, &setup.models, bodies, t)?);
     }
     if blocks.is_empty() {
         return Err(JobError::NoStock(setup.name.clone()).into());
@@ -356,16 +400,17 @@ fn blocks_of(job: &Job, setup: &Setup, bodies: &Bodies<'_>) -> Result<Vec<Block>
     Ok(blocks)
 }
 
-/// Where `setup`'s work zero is, with the part turned the way it sits: its blocks
-/// are `turned_blocks` and its models' box `turned_model`, both turned.
+/// Where `setup`'s work zero is, with the part turned the way it sits, by `o`:
+/// its blocks are `turned_blocks` and its models' box `turned_model`, both
+/// turned.
 fn work_zero(
     job: &Job,
     setup: &Setup,
     bodies: &Bodies<'_>,
+    o: &Turn,
     turned_blocks: &[Block],
     turned_model: Aabb,
 ) -> Result<DVec3, PrepareError> {
-    let o = setup.orientation;
     Ok(match &setup.origin {
         Origin::ModelOrigin { offset } => DVec3::from_array(*offset),
         Origin::Point { point, offset } => {
@@ -397,5 +442,10 @@ fn work_zero(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::float_cmp, clippy::indexing_slicing)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::float_cmp,
+    clippy::indexing_slicing,
+    clippy::panic
+)]
 mod tests;

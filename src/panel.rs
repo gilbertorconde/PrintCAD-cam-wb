@@ -89,7 +89,7 @@ fn axis_label(a: Axis) -> String {
 fn x_axes(z: Axis) -> Vec<Axis> {
     Axis::ALL
         .into_iter()
-        .filter(|&x| Orientation { z, x }.check().is_ok())
+        .filter(|&x| Orientation::square(z, x).check().is_ok())
         .collect()
 }
 

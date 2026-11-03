@@ -58,7 +58,9 @@ fn what_cannot_be_read_is_refused() {
     refused("G90\nG0 X1", 2, "units");
     refused("G21\nG0 X1", 2, "distance mode");
     refused("G21 G90\nG41 X1", 2, "G41");
-    refused("G21 G90\nG0 A10", 2, "A words");
+    refused("G21 G90\nG0 U10", 2, "U words");
+    refused("G21 G90\nG0 X1 A10", 2, "positioning");
+    refused("G21 G90\nG1 A10 F100", 2, "rapid");
     refused("G21 G90\nG0 X1 X2", 2, "twice");
     refused("G21 G90\nG0 G1 X1", 2, "two motions");
     refused("G21 G91\nG0 X1", 2, "not known");

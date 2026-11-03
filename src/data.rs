@@ -277,22 +277,21 @@ impl SetupData {
     /// it is set to lie along, as the part sits.
     fn cylinder_model_axis(&self) -> BarAxis {
         let along = match self.cylinder_axis {
-            CylinderAxis::Tool => self.z_axis,
-            CylinderAxis::X => self.x_axis,
-            CylinderAxis::Y => self.orientation().y(),
+            CylinderAxis::Tool => self.z_axis.vector(),
+            CylinderAxis::X => self.x_axis.vector(),
+            CylinderAxis::Y => self.z_axis.vector().cross(self.x_axis.vector()),
         };
-        match along {
-            Axis::PosX | Axis::NegX => BarAxis::X,
-            Axis::PosY | Axis::NegY => BarAxis::Y,
-            Axis::PosZ | Axis::NegZ => BarAxis::Z,
+        if along.x != 0.0 {
+            BarAxis::X
+        } else if along.y != 0.0 {
+            BarAxis::Y
+        } else {
+            BarAxis::Z
         }
     }
 
     pub fn orientation(&self) -> Orientation {
-        Orientation {
-            z: self.z_axis,
-            x: self.x_axis,
-        }
+        Orientation::square(self.z_axis, self.x_axis)
     }
 
     /// Make the X axis square to Z again after Z changed.
@@ -300,7 +299,7 @@ impl SetupData {
         if self.orientation().check().is_err() {
             self.x_axis = Axis::ALL
                 .into_iter()
-                .find(|&x| Orientation { z: self.z_axis, x }.check().is_ok())
+                .find(|&x| Orientation::square(self.z_axis, x).check().is_ok())
                 .unwrap_or(Axis::PosX);
         }
     }
