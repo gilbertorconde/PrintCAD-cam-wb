@@ -1014,6 +1014,14 @@ fn heights_group(data: &OperationData, feature: &str) -> Widget {
         StrategySpec::Face { .. } => {
             Some("Without a bottom, the stock is faced down to the part's top.")
         }
+        StrategySpec::Engrave { .. } => Some(
+            "It cuts its depth below the top: the part's, where a sketch drawn on it lies, \
+             or the picks' to cut from where the curves are.",
+        ),
+        StrategySpec::VCarve { .. } => Some(
+            "It carves down from the top, as deep as each area is wide, no deeper than its \
+             deepest.",
+        ),
         _ => None,
     };
     if let Some(about) = about {
@@ -1027,6 +1035,38 @@ fn heights_group(data: &OperationData, feature: &str) -> Widget {
         mono: false,
     });
     group("Heights", rows)
+}
+
+/// A toggle for each sketch of the document that closes something, on for
+/// those the operation takes: what their loops enclose, or, engraving, the
+/// loops themselves. A sketch taken that is gone is said.
+fn sketch_rows(data: &OperationData) -> Vec<Widget> {
+    let all = crate::sketches::sketches();
+    let mut rows = vec![Widget::Text {
+        text: if all.is_empty() {
+            "Sketches: none of the document's closes a loop.".into()
+        } else {
+            "Sketches (their closed loops, text among them):".into()
+        },
+        mono: false,
+    }];
+    rows.extend(all.iter().map(|(id, name)| Widget::Toggle {
+        id: format!("sketch:{id}"),
+        label: name.clone(),
+        on: data.sketches.contains(id),
+    }));
+    let gone = data
+        .sketches
+        .iter()
+        .filter(|s| !all.iter().any(|(id, _)| id == *s))
+        .count();
+    if gone > 0 {
+        rows.push(note(
+            NoteKind::Warning,
+            format!("{gone} sketch(es) it takes are gone, or close nothing."),
+        ));
+    }
+    rows
 }
 
 pub fn operation_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
@@ -1286,6 +1326,8 @@ pub fn operation_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
         ));
     }
     let picks = uses.holes
+        || uses.traces
+        || uses.carves
         || (uses.boundary && data.operation.boundary.kind == Boundary::Selection)
         || (uses.outline && data.operation.outline == Outline::Selection);
     if picks {
@@ -1304,17 +1346,22 @@ pub fn operation_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
             id: "edges".into(),
             label: if uses.holes {
                 "Hole rims".into()
+            } else if uses.traces {
+                "Edges".into()
             } else {
                 "Edge loops".into()
             },
             value: Some(format!("{} picked", data.edges.len())),
             armed: armed(Slot::Edges),
         });
+        if !uses.holes {
+            geometry.extend(sketch_rows(&data));
+        }
         geometry.push(button(
             "clear_picks",
             "Clear the picks",
             ButtonStyle::Small,
-            !(data.faces.is_empty() && data.edges.is_empty()),
+            !(data.faces.is_empty() && data.edges.is_empty() && data.sketches.is_empty()),
         ));
     }
     if !geometry.is_empty() {
@@ -1399,6 +1446,13 @@ pub fn operation_event(cam: &mut Cam, id: &str, event: PanelEvent) {
                 },
             };
             *slot = value;
+        }
+        PanelEvent::Toggle { id: t, on } if t.starts_with("sketch:") => {
+            let sketch = t.trim_start_matches("sketch:").to_string();
+            data.sketches.retain(|s| *s != sketch);
+            if on {
+                data.sketches.push(sketch);
+            }
         }
         PanelEvent::Toggle { id: t, on } => match t.as_str() {
             "enabled" => data.operation.enabled = on,
@@ -1589,6 +1643,7 @@ pub fn operation_event(cam: &mut Cam, id: &str, event: PanelEvent) {
         PanelEvent::Button { id: b } if b == "clear_picks" => {
             data.faces.clear();
             data.edges.clear();
+            data.sketches.clear();
         }
         PanelEvent::Button { id: b } if b == "generate" => {
             if let Some((s, _)) = setup {

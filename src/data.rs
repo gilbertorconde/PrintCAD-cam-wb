@@ -11,10 +11,10 @@
 use std::collections::BTreeMap;
 
 use camcraft_core::job::{
-    Along, BarAxis, Boundary, BoxOf, Containment, Depths, FeatureRef, FixedBox, FixedCylinder,
-    Height, HeightRef, Heights, Job, Leave, MachiningBoundary, ModelDef, Operation, Origin,
-    Outline, Place, PointRef, Preset, Selection, Setup, Snap, StockDef, StockSpec, StockToLeave,
-    StrategySpec, ToolSpec,
+    Along, BarAxis, Boundary, BoxOf, Containment, Curve, Depths, FeatureRef, FixedBox,
+    FixedCylinder, Height, HeightRef, Heights, Job, Leave, MachiningBoundary, ModelDef, Operation,
+    Origin, Outline, Place, PointRef, Preset, Selection, Setup, Snap, StockDef, StockSpec,
+    StockToLeave, StrategySpec, ToolSpec,
 };
 use camcraft_core::setup::frame::{Axis, Orientation};
 use printcad_bench_sdk::serde_json;
@@ -471,6 +471,13 @@ pub struct OperationData {
     pub faces: Vec<Pick>,
     #[serde(default)]
     pub edges: Vec<Pick>,
+    /// Sketches whose curves it follows or cuts, by feature id.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sketches: Vec<String>,
+    /// The sketches' curves, read from the document when a job is made; not
+    /// kept, since the sketches are.
+    #[serde(skip)]
+    pub curves: Vec<Curve>,
 }
 
 impl OperationData {
@@ -497,6 +504,8 @@ impl OperationData {
             passes: PassesData::default(),
             faces: Vec::new(),
             edges: Vec::new(),
+            sketches: Vec::new(),
+            curves: Vec::new(),
         };
         data.read_numbers();
         data
@@ -576,6 +585,8 @@ impl OperationData {
     /// The operation as the job has it: [`Self::operation`] with its picks.
     /// camcraft finds a pick by its point when its number does not match, so
     /// any number does; printCAD's face names are not camcraft's numbers.
+    /// Its sketches are their curves, once read ([`Self::curves`]); until
+    /// then each stands for some, enough to say what it picks.
     pub fn picked(&self, name: &str, model_of: impl Fn(&str) -> Option<String>) -> Operation {
         let refs = |picks: &[Pick]| -> Vec<FeatureRef> {
             picks
@@ -590,10 +601,15 @@ impl OperationData {
                 .collect()
         };
         let mut op = self.operation(name);
+        let curves = if self.curves.is_empty() {
+            self.sketches.iter().map(|_| Curve::default()).collect()
+        } else {
+            self.curves.clone()
+        };
         op.selection = Selection {
             faces: refs(&self.faces),
             edges: refs(&self.edges),
-            curves: Vec::new(),
+            curves,
         };
         op
     }
@@ -716,7 +732,7 @@ fn positive(v: f64) -> bool {
 
 /// The strategies a new operation may have, in the order the panel lists them,
 /// with what the panel calls them.
-pub const STRATEGIES: [(&str, &str); 13] = [
+pub const STRATEGIES: [(&str, &str); 15] = [
     ("adaptive", "Adaptive clearing (3D roughing)"),
     ("pocket-clearing", "Pocket clearing (3D roughing)"),
     ("parallel", "Parallel (3D finishing)"),
@@ -730,6 +746,8 @@ pub const STRATEGIES: [(&str, &str); 13] = [
     ("pocket", "2D pocket"),
     ("face", "Facing"),
     ("drill", "Drilling"),
+    ("engrave", "Engrave (along curves)"),
+    ("v-carve", "V-carve"),
 ];
 
 /// The panel's word for `strategy`.
@@ -1039,6 +1057,101 @@ mod tests {
         assert_eq!(setup.problem(), None);
         setup.diameter = 0.0;
         assert!(setup.problem().unwrap().contains("diameter"));
+    }
+
+    /// An engraving of a sketch, and a V-carving: their numbers and choices
+    /// survive the document, reach the job, and the job reads back; the
+    /// sketch's curves are the job's.
+    #[test]
+    fn an_engraving_and_a_v_carving_read_back_as_camcraft_writes_them() {
+        use camcraft_core::job::{Segment, ToolKind, TraceDirection};
+        let mut setup = SetupData::new(vec!["b1".into()], "grbl", 0.05);
+        let vbit = ToolSpec {
+            kind: ToolKind::Cone,
+            diameter: 6.0,
+            angle: Some(60.0),
+            ..ToolSpec::default()
+        };
+        let name = setup.adopt("V 60", &vbit);
+        let mut engrave =
+            OperationData::new(Some("s1".into()), StrategySpec::named("engrave").unwrap());
+        engrave.use_tool(&name, &vbit, None, 0.05);
+        engrave.sketches = vec!["sketch1".into()];
+        engrave.passes.depth = 0.8;
+        if let StrategySpec::Engrave {
+            direction, reverse, ..
+        } = &mut engrave.operation.strategy
+        {
+            *direction = TraceDirection::AsDrawn;
+            *reverse = true;
+        }
+        let back = OperationData::from(&engrave.to_value()).unwrap();
+        assert_eq!(back, engrave);
+        assert!(
+            engrave.problem(&setup.tools).is_none(),
+            "{:?}",
+            engrave.problem(&setup.tools)
+        );
+        let mut carve =
+            OperationData::new(Some("s1".into()), StrategySpec::named("v-carve").unwrap());
+        carve.use_tool(&name, &vbit, None, 0.05);
+        carve.sketches = vec!["sketch1".into()];
+        carve.passes.max_depth = crate::linking::Opt::of(Some(1.5));
+        assert!(
+            carve.problem(&setup.tools).is_none(),
+            "{:?}",
+            carve.problem(&setup.tools)
+        );
+
+        // The sketch's curves, as the document gives them when the job is made.
+        let square = Curve {
+            start: [0.0, 0.0, 5.0],
+            segments: [[10.0, 0.0], [10.0, 10.0], [0.0, 10.0], [0.0, 0.0]]
+                .iter()
+                .map(|p| Segment::Line {
+                    to: [p[0], p[1], 5.0],
+                })
+                .collect(),
+        };
+        engrave.curves = vec![square.clone()];
+        carve.curves = vec![square.clone()];
+        let models = models_of(&setup, |_| Some("Part".into()));
+        let named = [("E".to_string(), &engrave), ("V".to_string(), &carve)];
+        let job = job("S", &setup, &models, &named);
+        let text = camcraft_session::job_text(&job).unwrap();
+        let back = camcraft_session::parse_job(&text, "t").unwrap();
+        assert_eq!(back, job);
+        let [e, v] = back.setups[0].operations.as_slice() else {
+            panic!("{:?}", back.setups[0].operations);
+        };
+        assert_eq!(
+            e.strategy,
+            StrategySpec::Engrave {
+                depth: 0.8,
+                direction: TraceDirection::AsDrawn,
+                reverse: true,
+            }
+        );
+        assert_eq!(e.selection.curves, vec![square.clone()]);
+        assert_eq!(
+            v.strategy,
+            StrategySpec::VCarve {
+                max_depth: Some(1.5)
+            }
+        );
+        assert_eq!(v.selection.curves, vec![square]);
+        // Neither has a stepover; both cut to size.
+        assert_eq!(e.passes.stepdown, None);
+        assert!(back.check_setup(0).is_ok(), "{:?}", back.check_setup(0));
+
+        // A flat end mill is no V-bit.
+        let flat = ToolSpec {
+            diameter: 6.0,
+            ..ToolSpec::default()
+        };
+        let flat_name = setup.adopt("Flat 6", &flat);
+        carve.use_tool(&flat_name, &flat, None, 0.05);
+        assert!(carve.problem(&setup.tools).unwrap().contains("V-bit"));
     }
 
     #[test]

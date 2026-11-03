@@ -4,7 +4,8 @@
 //! build no solid. A setup names the bodies it machines, its stock, how the
 //! part sits and where its work zero is, and its post; each operation names
 //! its setup, its strategy (adaptive or pocket clearing, the finishing
-//! strategies, 2D profiles and pockets, facing, drilling) and its tool.
+//! strategies, 2D profiles and pockets, facing, drilling, engraving and
+//! V-carving) and its tool.
 //!
 //! None of the machining happens here. A setup runs as a job that hands it, as
 //! a camcraft job with each body's B-rep, to the package's native helper
@@ -29,6 +30,7 @@ mod picking;
 mod playback;
 mod runs;
 mod session;
+mod sketches;
 mod tools;
 
 use std::collections::BTreeMap;
@@ -217,15 +219,30 @@ fn request_for(node: &Node, setup: &SetupData) -> Result<String, String> {
     let models = models_of(setup, |b| {
         bodies.iter().find(|x| x.id == b).map(|x| x.name.clone())
     });
-    let operations = operations_of(&node.id);
+    let mut operations = operations_of(&node.id);
     if operations.is_empty() {
         return Err("The setup has no operations yet: add one.".into());
     }
-    for (op, data) in &operations {
+    for (op, data) in &mut operations {
         if data.operation.enabled
             && let Some(problem) = data.problem(&setup.tools)
         {
             return Err(format!("{}: {problem}", op.name));
+        }
+        // Each sketch's curves as they are now, at the setup's tolerance.
+        let sketches = if data.operation.enabled {
+            data.sketches.clone()
+        } else {
+            Vec::new()
+        };
+        for sketch in &sketches {
+            let curves = sketches::of(sketch, setup.tolerance).ok_or_else(|| {
+                format!(
+                    "{}: a sketch it follows is gone, or closes nothing.",
+                    op.name
+                )
+            })?;
+            data.curves.extend(curves);
         }
     }
     let named: Vec<(String, &OperationData)> = operations
@@ -401,9 +418,11 @@ impl Cam {
             .armed
             .as_ref()
             .is_some_and(|a| a.feature == feature && a.slot == slot);
+        let alone = operation_node(feature).is_some_and(|(_, d)| d.strategy().uses().traces);
         self.armed = (!again).then(|| picking::Armed {
             feature: feature.into(),
             slot,
+            alone,
             hover: None,
         });
     }
@@ -425,7 +444,7 @@ impl Cam {
         match &input.event {
             Event::Move => {
                 let up = self.axis_of(&armed.feature);
-                let hover = picking::hover(armed.slot, &input.pointer, up);
+                let hover = picking::hover(armed.slot, &input.pointer, up, armed.alone);
                 if let Some(a) = &mut self.armed {
                     a.hover = hover;
                 }
@@ -997,14 +1016,40 @@ impl Bench for Cam {
                              pass_extension, tab_width, tab_height, tab_spacing, \
                              finishing_passes: numbers; centre, tabs, finishing, \
                              finishing_repeat: booleans; tab_shape: rectangular|triangular; \
-                             hand: right|left; outer_radius, peck, chip_break, dwell, pitch, \
-                             finishing_stepover, finishing_feed: {value, given}}",
+                             hand: right|left; depth: engrave's, mm; outer_radius, peck, \
+                             chip_break, dwell, pitch, max_depth, finishing_stepover, \
+                             finishing_feed: {value, given}}",
+                        ),
+                        param(
+                            "sketches",
+                            ParamKind::List,
+                            false,
+                            "a list of sketch ids: their closed loops, text among them, are \
+                             what it follows or cuts within",
+                        ),
+                        param(
+                            "direction",
+                            ParamKind::String,
+                            false,
+                            "engrave: climb|conventional|as-drawn (climb)",
+                        ),
+                        param(
+                            "reverse",
+                            ParamKind::Bool,
+                            false,
+                            "engrave: each curve the other way",
                         ),
                         param("name", ParamKind::String, false, "the operation's name"),
                     ],
                     returns: "{feature}".into(),
                     notes: vec![
                         "Without a tool it takes the one the setup's last operation used.".into(),
+                        "Engrave follows its sketches' loops and its picked edges, open or \
+                         closed, passes.depth below the top (0.5 mm), ramping down along each, \
+                         a stepdown at most each time with multiple depths. V-carve cuts the \
+                         areas its sketches close down their middle with a V-bit, as deep as \
+                         they are wide, no deeper than passes.max_depth = {value, given}."
+                            .into(),
                         "A library tool's first preset sets its feeds and speeds.".into(),
                         "Drilling: peck backs out between pecks, and with chip_break only that \
                          far (G73); pitch, mm a turn, taps each hole instead (G84, or G74 with \
@@ -1328,6 +1373,26 @@ impl Bench for Cam {
                 if let Some(given) = args.get("linking") {
                     data.linking =
                         over(&data.linking, given).map_err(|e| format!("linking: {e}"))?;
+                }
+                if let Some(given) = args.get("sketches") {
+                    let ids: Vec<String> = serde_json::from_value(given.clone())
+                        .map_err(|_| "sketches: a list of sketch ids")?;
+                    if let Some(bad) = ids.iter().find(|s| host::profile(s).is_none()) {
+                        return Err(format!("sketches: '{bad}' is no sketch that closes a loop"));
+                    }
+                    data.sketches = ids;
+                }
+                if let StrategySpec::Engrave {
+                    direction, reverse, ..
+                } = &mut data.operation.strategy
+                {
+                    if let Some(d) = text("direction") {
+                        *direction = serde_json::from_value(json!(d))
+                            .map_err(|_| format!("no direction '{d}'"))?;
+                    }
+                    if let Some(r) = args.get("reverse").and_then(Value::as_bool) {
+                        *reverse = r;
+                    }
                 }
                 host::set_feature_data(&id, data.to_value())?;
                 self.refresh(&setup, false);
