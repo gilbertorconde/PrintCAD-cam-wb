@@ -135,6 +135,10 @@ pub enum Op {
     CycleEnd,
     /// Text passed through untouched, for manual NC and probe macros.
     Raw(String),
+    /// A Custom G-code operation's lines, written as typed with their
+    /// placeholders filled, between two comments that say where they begin
+    /// and end. Where the machine is afterwards is not known.
+    Custom(CustomGcode),
     /// A comment for the operator, in the profile's way of writing one.
     Comment(String),
     /// Turn the rotaries to where they stand the setup's tool axis up the
@@ -146,6 +150,26 @@ pub enum Op {
     Home,
     /// End of program.
     ProgramEnd,
+}
+
+/// A Custom G-code operation's text, for the program it is written into.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomGcode {
+    /// The operation's name.
+    pub name: String,
+    /// Its lines, as typed: their placeholders are filled as they are
+    /// written.
+    pub lines: Vec<String>,
+}
+
+impl CustomGcode {
+    /// A Custom G-code operation called `name` whose text is `text`.
+    pub fn new(name: &str, text: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            lines: text.lines().map(|l| l.trim_end().to_string()).collect(),
+        }
+    }
 }
 
 /// Everything a program needs that a toolpath does not carry.
@@ -186,6 +210,12 @@ pub struct ProgramSpec {
     /// Where the machine's rotaries go before it cuts: empty for a machine
     /// without them, whose part is fixtured tilted by hand.
     pub rotary: Vec<RotaryAt>,
+    /// Custom G-code written before the operation's own start: the Custom
+    /// G-code operations just before it in its setup.
+    pub before: Vec<CustomGcode>,
+    /// Custom G-code written after the operation ends, before the footer:
+    /// the Custom G-code operations after the last operation of its setup.
+    pub after: Vec<CustomGcode>,
 }
 
 /// A drilling operation's holes, as canned cycles.
@@ -225,6 +255,8 @@ impl Default for ProgramSpec {
             taps: false,
             tilt: None,
             rotary: Vec::new(),
+            before: Vec::new(),
+            after: Vec::new(),
         }
     }
 }
@@ -314,6 +346,12 @@ pub fn lower_counted(
     // would print it twice in every file.
     let mut out = Vec::with_capacity(path.len() + 16);
     out.push(Op::Units(spec.units));
+    // Custom G-code may have turned the coolant on; the operation's start
+    // stops the spindle itself.
+    out.extend(spec.before.iter().cloned().map(Op::Custom));
+    if !spec.before.is_empty() {
+        out.push(Op::CoolantOff);
+    }
     out.push(Op::SectionStart {
         op_name: spec.op_name.clone(),
         tool: spec.tool,
@@ -355,6 +393,13 @@ pub fn lower_counted(
     out.push(Op::SpindleOff);
     out.push(Op::SafeRetract);
     out.push(Op::Home);
+    // And at the end, it may have started the spindle or the coolant: both
+    // are stopped again before the program ends.
+    out.extend(spec.after.iter().cloned().map(Op::Custom));
+    if !spec.after.is_empty() {
+        out.push(Op::SpindleOff);
+        out.push(Op::CoolantOff);
+    }
     out.push(Op::SectionEnd);
     out.push(Op::ProgramEnd);
     made.resize(out.len(), path.len());
@@ -450,6 +495,22 @@ fn cycles(d: &DrillCycles, path: &Toolpath, out: &mut Vec<Op>, made: &mut Vec<us
     }
     out.push(Op::CycleEnd);
     made.push(count);
+}
+
+/// The lowest and highest the tool's tip goes along `path`, an arc's bulge
+/// included, in its coordinates; `None` for a path with no moves.
+pub fn extents(path: &Toolpath) -> Option<(DVec3, DVec3)> {
+    let first = path.moves().first()?.to;
+    let (mut low, mut high) = (first, first);
+    let mut at = first;
+    for m in path.moves() {
+        for p in m.chords(at, 0.001) {
+            low = low.min(p);
+            high = high.max(p);
+        }
+        at = m.to;
+    }
+    Some((low, high))
 }
 
 fn moves(path: &Toolpath, out: &mut Vec<Op>, made: &mut Vec<usize>) {
@@ -733,6 +794,30 @@ mod tests {
             lower(&path, &backwards),
             Err(LowerError::TapTurnsAgainstThread(ThreadHand::Left))
         );
+    }
+
+    /// A path's extents take in an arc's bulge, not only its ends.
+    #[test]
+    fn extents_take_in_an_arcs_bulge() {
+        use camcraft_core::path::toolpath::Arc;
+        let mut t = linked_path();
+        // Half a turn clockwise from (10, 0) round (5, 0) to (0, 0), out to
+        // y = -5.
+        t.arc_to(
+            dvec3(0.0, 0.0, 0.0),
+            Arc {
+                centre: dvec3(5.0, 0.0, 0.0),
+                axis: DVec3::Z,
+                sweep: -std::f64::consts::PI,
+            },
+            MoveRole::Cut,
+            1200.0,
+        )
+        .unwrap();
+        let (low, high) = extents(&t).unwrap();
+        assert!((low.y + 5.0).abs() < 0.01, "{low}");
+        assert_eq!((low.x, high.x, low.z, high.z), (0.0, 10.0, 0.0, 10.0));
+        assert_eq!(extents(&Toolpath::new()), None);
     }
 
     #[test]

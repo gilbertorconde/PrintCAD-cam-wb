@@ -166,6 +166,44 @@ and drilling never are, and passes left cutting the other way are a
 warning, as is a copy further outside the stock than the original. In
 `camcraft-session`, the finishing job's operation has no pattern.
 
+And a machine's own blocks, its travel, and Custom G-code. In
+`camcraft-post`, `placeholder` fills `@name@` placeholders (the program,
+the operation, its strategy, the tool and its description, the speed, the
+spindle's way, the coolant, the units, the work offset and the date) in a
+profile's `header`, `footer`, `safe_retract`, `end_home` and new
+`tool_change_lines` (written in place of the `tool_change` style's own,
+naming `@tool@`), `@@` an `@` and `{name}` as before; a name that is not
+one, or an `@` never closed, makes the profile invalid
+(`ProfileError::BadValue`, with the block and the line). `render_dated`
+renders with a date for `@date@`; `render` leaves it empty. A profile's
+optional `[travel]` gives each of `x`, `y` and `z` as `[lowest, highest]`
+in the program's coordinates and units, which `Profile::travel_problems`
+checks a program's extents against (`op::extents`, an arc's bulge
+included); `camcraft_session::travel_problems` checks an operation's, and
+`plan_posting` refuses a setup that goes past it. In `camcraft-core`,
+`StrategySpec::CustomGcode` is an operation of lines for the program
+(`Operation::gcode`): it needs no tool, is not worked out or cut, and its
+result is `Made::Text` with `StrategyDetail::CustomGcode`. In
+`camcraft-post`, `ProgramSpec::before` and `after` hold `op::CustomGcode`
+blocks, lowered as `Op::Custom`, which the renderer writes between two
+comments (`render::custom_begin`, `custom_end`), placeholders filled, and
+forgets where the machine is after; lowering stops the coolant after the
+blocks before an operation, and the spindle and coolant after those at the
+end. `custom::concern` says what a line may not do: an axis word, a G code
+but `G4`, `M6`, `M60`, `M2`, `M30` or `M99` refused, a subprogram or macro
+call (an `O` word, `M98`, `G65`, `G66`, `M100` up) not read. `readback`
+skips the lines between those comments (`custom_blocks`, `read_around`),
+refusing what `concern` refuses, counts the blocks against the spec, and
+after each (`Action::Custom`) takes the position, spindle, coolant, tool
+and work offset as not known, refusing one in the middle of the path. In
+`camcraft-session`, `custom_gcode` puts each Custom G-code operation
+before the next operation with a program, or after the last, and
+`plan_posting` and `program_with` post them; the checks add `CC108` (a
+line that moves or changes a mode, or a placeholder that is not one:
+fails), `CC216` (a call not read) and `CC217` (custom G-code in a setup
+with no program to go into). A golden program with all of it
+(`linuxcnc-custom.nc`).
+
 And one test: ogeom is 0.11.1 here, which printCAD's shapes need, and it
 meshes `round_edge_loose_fit.step`'s seam that 0.11.0 drew off the torus, so
 `a_loose_fit_is_refused_for_ogeoms_seam` became

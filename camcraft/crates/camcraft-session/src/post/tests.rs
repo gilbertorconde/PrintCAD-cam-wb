@@ -349,3 +349,95 @@ fn readback_job_from_the_environment() {
     println!("{moves} moves read back from {}", path.display());
     assert!(moves > 0, "nothing in {} to read back", path.display());
 }
+
+/// Custom G-code between the example's two operations, and after the last:
+/// each written into the program beside it, which reads back; no program of
+/// its own; and a profile whose travel the programs go past refuses them,
+/// saying which and why.
+#[test]
+fn custom_gcode_is_posted_beside_its_neighbours_and_travel_is_kept() {
+    use camcraft_core::job::{Operation, StrategySpec};
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+    let text = std::fs::read_to_string(dir.join("rail-jig.camcraft")).unwrap();
+    let text = text.replace("sled_base.step", "hinge_jig.step");
+    let mut job = parse_job(&text, "rail-jig").unwrap();
+    let custom = |name: &str, gcode: &str| Operation {
+        gcode: gcode.into(),
+        ..Operation::new(name, StrategySpec::CustomGcode {})
+    };
+    let ops = &mut job.setups[0].operations;
+    ops.insert(1, custom("flip", "M0 (turn T@tool@ round)"));
+    ops.push(custom("signal", "M64 P1"));
+    // As a job file writes it and reads it back.
+    let job = parse_job(&crate::job_text(&job).unwrap(), "again").unwrap();
+    let loaded = load_models(&job, &dir, &[0]).unwrap();
+    let ran = run_setup(&job, 0, &crate::models_of(&loaded)).unwrap();
+    assert!(ran.passed(), "{:?}", ran.checks.failure_lines());
+    let made: Vec<Made> = ran.result.operations.iter().map(|o| o.made).collect();
+    assert_eq!(
+        made,
+        [Made::Generated, Made::Text, Made::Generated, Made::Text]
+    );
+    let blocks = custom_gcode(&job.setups[0], &ran.result.operations);
+    assert!(blocks[0].0.is_empty() && blocks[0].1.is_empty());
+    assert_eq!(
+        blocks[2].0,
+        [CustomGcode::new("flip", "M0 (turn T@tool@ round)")]
+    );
+    assert_eq!(blocks[2].1, [CustomGcode::new("signal", "M64 P1")]);
+
+    let out = scratch("custom");
+    let p = plan_posting(&[(&job.setups[0], &ran)], &dir, &out, None).unwrap();
+    assert!(p.refused.is_empty(), "{:?}", p.refused);
+    assert_eq!(p.programs.len(), 2, "none of its own");
+    let finish = &p.programs[1].text;
+    // Masso numbers its blocks, the custom ones among them.
+    assert!(
+        finish.contains("(custom gcode: flip)\nN20 M0 (turn T2 round)\n"),
+        "{finish}"
+    );
+    assert!(
+        finish.contains("(custom gcode: signal)\n") && finish.contains(" M64 P1\n"),
+        "{finish}"
+    );
+    assert!(!p.programs[0].text.contains("custom gcode"));
+    let setup = &job.setups[0];
+    let profile = load_profile(&setup.post, None).unwrap();
+    for (k, op) in ran.result.operations.iter().enumerate() {
+        if !op.made.has_paths() {
+            continue;
+        }
+        let mut spec = program_spec(op, setup.wcs, &ran.result.frame, &profile).unwrap();
+        (spec.before, spec.after) = blocks[k].clone();
+        let name = program_name(&setup.name, k, &op.name);
+        let (text, _) = program_with(op, &spec, &profile, &name).unwrap();
+        if let Err(e) = camcraft_post::readback::check(&text, &op.path, &spec, &profile) {
+            panic!("{} does not read back: {e}\n{text}", op.name);
+        }
+    }
+
+    // A profile whose Z travel stops short of the depth the part is cut to.
+    let base = include_str!("../../../camcraft-post/profiles/grbl.toml");
+    let tight = base.replacen("\"GRBL\"", "\"Short Z\"", 1).replacen(
+        "[format]",
+        "[travel]\nz = [-1, 100]\n\n[format]",
+        1,
+    );
+    std::fs::create_dir_all(&out).unwrap();
+    let file = out.join("short.toml");
+    std::fs::write(&file, tight).unwrap();
+    let p = plan_posting(
+        &[(&job.setups[0], &ran)],
+        &dir,
+        &out.join("programs"),
+        Some(file.to_str().unwrap()),
+    )
+    .unwrap();
+    let (_, why) = &p.refused[0];
+    assert!(
+        why.iter()
+            .any(|w| w.starts_with("travel rough: Z goes from -")),
+        "{why:?}"
+    );
+    let _ = std::fs::remove_dir_all(&out);
+}

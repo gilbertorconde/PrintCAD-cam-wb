@@ -56,6 +56,10 @@ pub struct Operation {
     /// cut, checked or posted.
     #[serde(default = "yes", skip_serializing_if = "is_yes")]
     pub enabled: bool,
+    /// The lines a Custom G-code operation ([`StrategySpec::CustomGcode`])
+    /// writes into the program, one a line; no other reads them.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub gcode: String,
 }
 
 impl Operation {
@@ -82,6 +86,7 @@ impl Operation {
             linking: Linking::default(),
             transform: Pattern::default(),
             enabled: true,
+            gcode: String::new(),
         }
     }
 

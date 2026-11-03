@@ -285,6 +285,9 @@ pub(super) fn run_operation(
             Some(area) => vcarve_paths(work, max_depth, area, &mut warnings)?,
             None => return Err(in_op(op)(FeatureError::NothingToCarve)),
         },
+        // Never run as a cutting operation (`run_prepared_planned` leaves it
+        // out); were it, it has nothing to cut.
+        StrategySpec::CustomGcode {} => (Toolpath::new(), 0, StrategyDetail::CustomGcode),
     };
 
     // A pattern repeats the strategy's path before anything else is done to
@@ -497,6 +500,7 @@ pub(super) fn not_made(op: &Operation, spec: Option<&ToolSpec>, made: Made) -> O
             StrategyDetail::Engrave(Default::default())
         }
         StrategySpec::VCarve { .. } => StrategyDetail::VCarve(Default::default()),
+        StrategySpec::CustomGcode {} => StrategyDetail::CustomGcode,
         StrategySpec::Drill {
             peck,
             dwell,

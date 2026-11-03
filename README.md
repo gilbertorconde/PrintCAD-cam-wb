@@ -75,7 +75,19 @@ panels, the drawing and the helper that runs camcraft.
   V-carving closed areas, letters among them, with a V-bit down
   their middle, as deep as each is wide: past its deepest it cuts the walls
   that deep and leaves the flat floor between, and says so, for a flat end
-  mill to clear. An operation
+  mill to clear. And Custom G-code, Fusion's Manual NC: lines of your own,
+  typed a row at a time, written into the program where the operation
+  stands in its setup: before the next operation's start (its stop, tool
+  change and spindle), or, last in the setup, after the one before ends.
+  It has no tool and no toolpath, and the simulation does not see it.
+  Its lines take the same `@name@` placeholders as a profile's blocks
+  (below), filled from the program it goes into. They may not move the
+  machine or change a mode: an axis word, any G code but `G4` (a dwell),
+  `M6`, `M2` or `M30` is a failed check, so a `G91` cannot make the rest of
+  the program cut somewhere else; a subprogram or macro call (`O`, `M98`,
+  `G65`, `M100` up) is a warning, as nothing reads what it does. After the
+  lines the program stops the spindle and the coolant, and takes where the
+  machine is as not known, as after a tool change. An operation
   (`io.github.gilbertorconde.cam.operation`) belongs to a setup and runs in the
   document's order, each against what the one before left. Drag one in the
   tree to run it sooner or later, or under another setup.
@@ -166,7 +178,31 @@ panels, the drawing and the helper that runs camcraft.
   Masso, Centroid CNC12 (Avid) or LinuxCNC, in millimetres or inches, or through a
   machine profile of your own in camcraft's TOML, which a setup carries a
   copy of. A profile can give the spindle's range (`spindle = [6000, 24000]`),
-  and an operation whose tool turns outside it is warned about. A profile
+  and an operation whose tool turns outside it is warned about. It can give
+  its travel, in the program's own coordinates and units, so what your work
+  zero leaves room for each way:
+
+  ```toml
+  [travel]          # any of x, y and z; an axis left out goes anywhere
+  x = [-5, 295]     # the lowest and highest X the program may go to
+  z = [-80, 40]
+  ```
+
+  A program that goes past it (its rapids and arcs counted) is a failed
+  check on the operation that does, saying which axis and how far: past its
+  limits a machine stops part-way through the cut, or crashes into them, so
+  it is refused before it gets there, like the simulator's failures (Save
+  anyway still writes it). The lines a profile gives, `header`, `footer`,
+  `safe_retract`, `end_home` and its own tool change, `tool_change_lines`
+  (written in place of `T.. M6` or the pause, and naming `@tool@`), take
+  placeholders: `@name@` (the program), `@operation@`, `@strategy@`,
+  `@tool@`, `@tool_comment@`, `@rpm@`, `@spindle@` (`M3` or `M4`),
+  `@coolant@` (`flood`, `mist`, `off`), `@coolant_code@` (`M8`, `M7`, `M9`),
+  `@units@`, `@units_code@` (`G21`, `G20`), `@wcs@` (`G54`…) and `@date@`
+  (the day it was posted); `@@` is an `@`, and `{name}` still the program's
+  name. A placeholder that is not one makes the profile invalid: adding it
+  says which and on which line, and a setup carrying a copy that no longer
+  loads says so in its panel. A profile
   that takes canned cycles (`drill_cycles = true`) writes each hole as one:
   G81, G82 with a dwell, G83 pecking, G73 breaking the chip (backing off as
   far as the controller is set to), and G84, or G74 left-hand, tapping at the
@@ -215,6 +251,8 @@ local deburr = cam.operation{setup = setup.feature, strategy = "chamfer", tool =
                              passes = {chamfer_width = 0.8, tip_offset = 0.3}}
 local letters = cam.operation{setup = setup.feature, strategy = "v-carve", tool = "60° V-bit",
                               sketches = {"<sketch id>"}, passes = {max_depth = {value = 2, given = true}}}
+local clamps = cam.operation{setup = setup.feature, strategy = "custom-gcode",
+                             gcode = "M0 (move the clamps for @operation@)\nM7"}
 cam.status{id = setup.feature}          -- queued, running, ready (with its checks), failed
 cam.import_tools{text = fusion_csv}     -- a Fusion tool library, exported as CSV
 cam.add_post{text = profile_toml}       -- a machine profile of your own
@@ -247,6 +285,13 @@ useful there.
   its runs at once; elsewhere they run again.
 - Picked faces and edges follow camcraft's rules: a pick is a point on the
   face, found again on the solid by that point.
+- Custom G-code is checked word by word, not run: what a subprogram or
+  macro it calls does is not known, only warned about. A profile's own
+  blocks are written as it gives them, and only the built-in posts' are
+  read back in the tests.
+- Travel is one range an axis, from the work zero as you set it: a program
+  is not checked against the machine's limits in machine coordinates, nor
+  for a work offset other than the one the profile was written for.
 
 ## Install it
 

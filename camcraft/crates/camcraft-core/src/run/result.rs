@@ -60,6 +60,8 @@ pub enum StrategyDetail {
     Engrave(EngraveReport),
     /// V-carving down the middle of areas.
     VCarve(VCarveReport),
+    /// Custom G-code: only lines for the program.
+    CustomGcode,
 }
 
 /// How an operation's paths came to be in a run.
@@ -74,6 +76,9 @@ pub enum Made {
     Skipped,
     /// Turned off in the job: no paths, cuts nothing, and is not posted.
     Disabled,
+    /// Custom G-code: no paths, cuts nothing, and its lines are written into
+    /// the program beside it.
+    Text,
 }
 
 impl Made {

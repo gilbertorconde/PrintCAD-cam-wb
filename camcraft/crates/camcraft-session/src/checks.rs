@@ -25,9 +25,11 @@ use camcraft_core::cutter::dropcutter::{DropCutter, DropTest};
 use camcraft_core::cutter::tool::ToolProfile;
 use camcraft_core::job::Job;
 use camcraft_core::path::toolpath::{MoveRole, PLUNGE_RATIO, Toolpath};
-use camcraft_core::run::{OperationResult, StrategyDetail};
+use camcraft_core::run::{Made, OperationResult, StrategyDetail};
 use camcraft_core::strategy::parallel::ParallelReport;
 use camcraft_geom::mesh::TriMesh;
+use camcraft_post::custom::{self, Concern};
+use camcraft_post::placeholder;
 use camcraft_sim::stock::VerifyReport;
 use glam::DVec3;
 use rayon::prelude::*;
@@ -167,7 +169,61 @@ pub fn check(
         })
         .collect();
     groups.extend(per_op);
+    // Custom G-code has no path, but its lines go into a program as typed.
+    let programs = operations.iter().any(|op| op.made.has_paths());
+    for (i, op) in operations.iter().enumerate() {
+        if op.made != Made::Text {
+            continue;
+        }
+        let text = ops.and_then(|o| o.get(i)).map_or("", |o| o.gcode.as_str());
+        groups.push(Group {
+            op: Some(i),
+            title: format!("{}. {}", i + 1, op.name),
+            findings: sorted(custom_findings(text, programs)),
+        });
+    }
+    groups.sort_by_key(|g| g.op);
     Checks { groups }
+}
+
+/// CC108, CC216 and CC217: what a Custom G-code operation's `text` does, as
+/// far as it can be told, and whether it is written anywhere: only when the
+/// setup has a `program` for it to go into.
+fn custom_findings(text: &str, program: bool) -> Vec<Finding> {
+    let mut out = Vec::new();
+    for (k, line) in text.lines().enumerate() {
+        let at = |why: String| format!("line {}: {why}", k + 1);
+        if let Some(why) = placeholder::problem(line) {
+            out.push(finding(Level::Fail, "CC108", at(why), line.trim().into()));
+        }
+        match custom::concern(line) {
+            Some(Concern::Refused(why)) => {
+                out.push(finding(Level::Fail, "CC108", at(why), line.trim().into()));
+            }
+            Some(Concern::Unread(why)) => {
+                out.push(finding(Level::Warn, "CC216", at(why), line.trim().into()));
+            }
+            None => {}
+        }
+    }
+    if !out.iter().any(|f| f.code == "CC108") {
+        out.push(finding(
+            Level::Pass,
+            "CC108",
+            "custom G-code moves nothing and changes no mode".into(),
+            String::new(),
+        ));
+    }
+    if !program {
+        out.push(finding(
+            Level::Warn,
+            "CC217",
+            "custom G-code with no operation in its setup to be written with is written nowhere"
+                .into(),
+            String::new(),
+        ));
+    }
+    out
 }
 
 fn sorted(mut findings: Vec<Finding>) -> Vec<Finding> {
@@ -498,7 +554,10 @@ fn operation_findings(
         }
         // A hole the tool does not fit is among the run's own warnings, as
         // are a curve too short to ramp along and a floor wider than the V.
-        StrategyDetail::Drill(_) | StrategyDetail::Engrave(_) | StrategyDetail::VCarve(_) => {}
+        StrategyDetail::Drill(_)
+        | StrategyDetail::Engrave(_)
+        | StrategyDetail::VCarve(_)
+        | StrategyDetail::CustomGcode => {}
     }
     if op.links.suspicious_plunges > 0 {
         out.push(finding(
@@ -711,6 +770,46 @@ mod tests {
 
     fn failed(checks: &Checks) -> Vec<&'static str> {
         checks.failures().map(|(_, f)| f.code).collect()
+    }
+
+    /// Custom G-code that moves, or names a placeholder that is not one, is a
+    /// failure on its line; a call a warning; and with no program to go into,
+    /// it is said to be written nowhere.
+    #[test]
+    fn custom_gcode_is_checked_line_by_line() {
+        let codes = |text: &str, program: bool| -> Vec<(Level, &'static str, String)> {
+            custom_findings(text, program)
+                .into_iter()
+                .map(|f| (f.level, f.code, f.message))
+                .collect()
+        };
+        assert_eq!(
+            codes("M0\nG4 P1", true),
+            [(
+                Level::Pass,
+                "CC108",
+                "custom G-code moves nothing and changes no mode".to_string()
+            )]
+        );
+        let found = codes("M0\nG0 Z5\n(@toll@)\nM98 P1", false);
+        let short: Vec<(Level, &str)> = found.iter().map(|(l, c, _)| (*l, *c)).collect();
+        assert_eq!(
+            short,
+            [
+                (Level::Fail, "CC108"),
+                (Level::Fail, "CC108"),
+                (Level::Warn, "CC216"),
+                (Level::Warn, "CC217")
+            ],
+            "{found:?}"
+        );
+        assert!(found[0].2.starts_with("line 2: G0 "), "{found:?}");
+        assert!(
+            found[1]
+                .2
+                .starts_with("line 3: @toll@ is not a placeholder"),
+            "{found:?}"
+        );
     }
 
     /// A clean run passes every failure check, and says so check by check.

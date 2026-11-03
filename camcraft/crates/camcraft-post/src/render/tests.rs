@@ -551,3 +551,94 @@ fn each_instruction_says_how_far_the_lines_go() {
         assert!(line.contains(['X', 'Y', 'Z']), "{line}");
     }
 }
+
+/// A tool change of the profile's own is written in place of its style's,
+/// its placeholders filled, and the first move after it goes down to its
+/// height before across, as after a change by hand.
+#[test]
+fn a_tool_change_of_ones_own_replaces_the_styles() {
+    let mut p = masso();
+    p.tool_change_lines = vec![
+        "(change to @tool@: @tool_comment@)".into(),
+        "T@tool@ M6".into(),
+        "M0".into(),
+    ];
+    let spec = ProgramSpec {
+        tool: 7,
+        tool_comment: "6mm (flat)".into(),
+        ..ProgramSpec::default()
+    };
+    let ops = crate::op::lower(&path(), &spec).unwrap();
+    let g = render(&ops, &p, "test").0;
+    let lines: Vec<&str> = g.lines().collect();
+    let at = lines
+        .iter()
+        .position(|l| *l == "(change to 7: 6mm [flat])")
+        .unwrap_or_else(|| panic!("{g}"));
+    assert_eq!(lines[at + 1..at + 3], ["T7 M6", "M0"], "{g}");
+    assert_eq!(
+        g.matches("M6").count(),
+        1,
+        "the style's own is not written: {g}"
+    );
+    let first = lines[at..].iter().find(|l| l.starts_with("G0")).unwrap();
+    assert!(first.starts_with("G0 Z"), "down first: {g}");
+}
+
+/// The profile's blocks are filled from the program: the header, the safe
+/// retract, the end home and the footer; and a date only where it is given.
+#[test]
+fn every_block_takes_placeholders() {
+    let mut p = masso();
+    p.header = vec!["(@name@ @operation@ @date@)".into(), "G90".into()];
+    p.safe_retract = vec!["G53 G0 Z0 (@wcs@)".into()];
+    p.end_home = vec!["(home after @strategy@ T@tool@ S@rpm@ @spindle@)".into()];
+    p.footer = vec![
+        "(@units@ @units_code@ @coolant@ @coolant_code@)".into(),
+        "M30".into(),
+    ];
+    let ops = crate::op::lower(&path(), &ProgramSpec::default()).unwrap();
+    let g = render_dated(&ops, &p, "prog", Some("2026-11-03")).0;
+    assert!(g.starts_with("(prog operation 2026-11-03)\nG90\n"), "{g}");
+    assert!(g.contains("G53 G0 Z0 (G54)"), "{g}");
+    assert!(g.contains("(home after parallel T1 S18000 M3)"), "{g}");
+    assert!(g.ends_with("(mm G21 off M9)\nM30\n"), "{g}");
+    let undated = render(&ops, &p, "prog").0;
+    assert!(undated.starts_with("(prog operation )"), "{undated}");
+}
+
+/// Custom G-code is written as typed, its placeholders filled, between the
+/// comments that say where it begins and ends; before the operation's start,
+/// and after its end, where the spindle and coolant are stopped again.
+#[test]
+fn custom_gcode_goes_where_it_stands() {
+    use crate::op::CustomGcode;
+    let p = masso();
+    let spec = ProgramSpec {
+        before: vec![CustomGcode::new("Check", "M0 (check T@tool@)\nM7")],
+        after: vec![CustomGcode::new("Park", "M64 P1")],
+        ..ProgramSpec::default()
+    };
+    let ops = crate::op::lower(&path(), &spec).unwrap();
+    let g = render(&ops, &p, "test").0;
+    let lines: Vec<&str> = g.lines().collect();
+    let begin = lines
+        .iter()
+        .position(|l| *l == "(custom gcode: Check)")
+        .unwrap_or_else(|| panic!("{g}"));
+    assert_eq!(
+        lines[begin + 1..begin + 5],
+        ["M0 (check T1)", "M7", "(end custom gcode)", "M9"],
+        "{g}"
+    );
+    assert!(lines[begin - 1] == "G21", "after the units: {g}");
+    let park = lines
+        .iter()
+        .position(|l| *l == "(custom gcode: Park)")
+        .unwrap_or_else(|| panic!("{g}"));
+    assert_eq!(
+        lines[park + 1..],
+        ["M64 P1", "(end custom gcode)", "M5", "M9", "M30"],
+        "{g}"
+    );
+}

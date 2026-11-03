@@ -308,6 +308,11 @@ impl Operation {
     ) -> Result<(), JobError> {
         let at = format!("{setup}/{}", self.name);
         let field = |f: &str| format!("{at}.{f}");
+        // It has no tool and nothing it cuts; what its lines say is checked
+        // with the run's checks, where a person can see why.
+        if matches!(self.strategy, StrategySpec::CustomGcode {}) {
+            return Ok(());
+        }
         if let Some(why) = self.cannot_measure_from_picks() {
             return Err(JobError::BadHeight { op: at, why });
         }

@@ -217,6 +217,20 @@ impl StrategySpec {
                 bottom: None,
                 ..cuts_loops
             },
+            // Text for the program: nothing of a cutting operation's.
+            StrategySpec::CustomGcode {} => Uses {
+                boundary: false,
+                stepover: false,
+                feed: false,
+                stock_to_leave: Leave::None,
+                depths: Depths::None,
+                links: Links::Own,
+                stay_down: false,
+                ramp: false,
+                top: None,
+                bottom: None,
+                ..cuts_loops
+            },
             // Its picks are the edges it chamfers, each from its own height,
             // the edge's: no top or bottom. It cuts to size.
             StrategySpec::Chamfer { .. } => Uses {

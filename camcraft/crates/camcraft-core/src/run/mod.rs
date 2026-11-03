@@ -126,6 +126,15 @@ pub fn run_prepared_planned(
             continue;
         }
         progress(Stage::Operation(i));
+        // Lines for the program, which cut nothing.
+        if matches!(op.strategy, crate::job::StrategySpec::CustomGcode {}) {
+            operations.push(not_made(op, None, Made::Text));
+            let same = keyframes
+                .last()
+                .map_or_else(|| Arc::new(PackedStock::pack(&stock)), Arc::clone);
+            keyframes.push(same);
+            continue;
+        }
         let (spec, tool) = tool_of(job, op)?;
         if let Plan::Keep(before) = plan {
             let mut kept = (**before).clone();

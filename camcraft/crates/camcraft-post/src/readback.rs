@@ -16,6 +16,19 @@
 //! cuts, the part turned only with the tool clear; and
 //! after the last cut it only goes up, and across only once it is clear.
 //!
+//! Custom G-code, written between the comments the renderer puts round it
+//! ([`render::custom_begin`], [`render::custom_end`]), is not read: a person's
+//! own lines may hold words nothing here understands. Each of its lines must
+//! still pass [`custom::concern`], which refuses whatever moves the machine
+//! or changes how the program is read; after it, where the tool is, the
+//! spindle, the coolant, the tool and the work offset are taken as not known,
+//! so the program must set each again before it cuts, and it is refused in
+//! the middle of the path.
+//!
+//! [`render::custom_begin`]: crate::render::custom_begin
+//! [`render::custom_end`]: crate::render::custom_end
+//! [`custom::concern`]: crate::custom::concern
+//!
 //! It is written from the G-code standard (NIST RS274/NGC), not from the
 //! renderer, so the two can disagree; where they do, one of them is wrong.
 //!
@@ -31,8 +44,10 @@ use camcraft_core::job::{Coolant, SpindleDirection};
 use camcraft_core::path::toolpath::{Move, MoveKind, Toolpath};
 use glam::{DVec2, DVec3, dvec3};
 
+use crate::custom::{Concern, concern};
 use crate::op::{DrillCycles, ProgramSpec};
 use crate::profile::{Profile, ProgramUnits};
+use crate::render::{custom_end, custom_mark};
 
 /// Millimetres in an inch.
 const MM_PER_INCH: f64 = 25.4;
@@ -130,6 +145,8 @@ pub enum Action {
     Rotary(Vec<(char, f64)>),
     /// The end of the program (`M2`, `M30`).
     End,
+    /// Custom G-code, not read: what it did is not known.
+    Custom,
 }
 
 /// A move in work coordinates, in millimetres.
@@ -237,13 +254,59 @@ impl Motion {
 /// read, or something no controller could do, such as a move before its units
 /// are set.
 pub fn read(text: &str) -> Result<Vec<Step>, Problem> {
+    read_around(text, &[])
+}
+
+/// [`read`], but for the lines of custom G-code, each between a pair of
+/// `blocks` lines (from one): those are only checked for what custom G-code
+/// may not do ([`concern`]), and are [`Action::Custom`] once they end.
+pub fn read_around(text: &str, blocks: &[(usize, usize)]) -> Result<Vec<Step>, Problem> {
     let mut r = Reader::default();
     for (i, line) in text.lines().enumerate() {
         r.line = i + 1;
+        if blocks.iter().any(|(b, e)| r.line > *b && r.line < *e) {
+            if let Some(Concern::Refused(why)) = concern(line) {
+                return Err(Problem::at(r.line, format!("custom G-code: {why}")));
+            }
+            continue;
+        }
         let words = words(line).map_err(|what| Problem::at(r.line, what))?;
         r.block(&words).map_err(|what| Problem::at(r.line, what))?;
+        if blocks.iter().any(|(_, e)| r.line == *e) {
+            r.push(Action::Custom);
+            // Whatever it set, the program must set again.
+            r.feed = None;
+            r.speed = None;
+            r.motion = None;
+            r.spin = None;
+        }
     }
     Ok(r.steps)
+}
+
+/// Where `text`'s custom G-code is, as `profile` writes it: the line (from
+/// one) of each comment that begins it, with the line of the one that ends
+/// it. A beginning never ended is no beginning.
+pub fn custom_blocks(text: &str, profile: &Profile) -> Vec<(usize, usize)> {
+    let (mark, end) = (custom_mark(profile), custom_end(profile));
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while let Some(line) = lines.get(i) {
+        let ends = if line.starts_with(&mark) {
+            (i + 1..lines.len()).find(|&j| lines.get(j) == Some(&end.as_str()))
+        } else {
+            None
+        };
+        match ends {
+            Some(j) => {
+                out.push((i + 1, j + 1));
+                i = j + 1;
+            }
+            None => i += 1,
+        }
+    }
+    out
 }
 
 /// The words of a line, comments and line numbers left out.
@@ -899,7 +962,15 @@ pub fn check(
     spec: &ProgramSpec,
     profile: &Profile,
 ) -> Result<(), Problem> {
-    let steps = read(text)?;
+    let blocks = custom_blocks(text, profile);
+    let wanted = spec.before.len() + spec.after.len();
+    if blocks.len() != wanted {
+        return Err(Problem::whole(format!(
+            "{} block(s) of custom G-code are written, where the program has {wanted}",
+            blocks.len()
+        )));
+    }
+    let steps = read_around(text, &blocks)?;
     let mut c = Checker::new(&steps, spec, Tolerance::of(profile, spec.units));
     if let Some(d) = &spec.drill {
         c.holes(d)?;
@@ -1137,6 +1208,20 @@ impl<'a> Checker<'a> {
                 // Where the tool is over the turned part is not known; it is
                 // still as high as it was.
                 self.at = [None; 3];
+            }
+            Action::Custom => {
+                if cutting {
+                    return refuse("custom G-code");
+                }
+                // Nothing it did is known, so the program must make each
+                // of these so again before it cuts.
+                self.at = [None; 3];
+                self.raised = false;
+                self.spindle = Spindle::Unknown;
+                self.coolant = None;
+                self.tool = None;
+                self.selected = None;
+                self.wcs = None;
             }
             Action::End => {
                 if self.phase != Phase::After {

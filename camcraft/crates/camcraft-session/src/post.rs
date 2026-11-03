@@ -10,9 +10,9 @@
 use std::path::{Path, PathBuf};
 
 use camcraft_core::job::Setup;
-use camcraft_core::run::{OperationResult, StrategyDetail};
+use camcraft_core::run::{Made, OperationResult, StrategyDetail};
 use camcraft_core::setup::frame::Frame;
-use camcraft_post::op::{DrillCycles, LowerError, ProgramSpec, lower};
+use camcraft_post::op::{CustomGcode, DrillCycles, LowerError, ProgramSpec, extents, lower};
 use camcraft_post::profile::Profile;
 use camcraft_post::render::{RenderReport, render};
 
@@ -117,7 +117,47 @@ pub fn program_spec(
         tilt: (z != glam::DVec3::Z && (frame.turn.square().is_none() || !rotary.is_empty()))
             .then_some(z),
         rotary,
+        before: Vec::new(),
+        after: Vec::new(),
     })
+}
+
+/// For each of a setup's operations, as run (`ops`), the custom G-code
+/// written before its own start and after its end. Each Custom G-code
+/// operation of `setup` goes before the next operation with a program, or,
+/// with none after it, after the last; in a setup with no program at all it
+/// is written nowhere.
+pub fn custom_gcode(
+    setup: &Setup,
+    ops: &[OperationResult],
+) -> Vec<(Vec<CustomGcode>, Vec<CustomGcode>)> {
+    let mut out = vec![(Vec::new(), Vec::new()); ops.len()];
+    let mut waiting = Vec::new();
+    let mut last = None;
+    for (k, op) in ops.iter().enumerate() {
+        if op.made == Made::Text {
+            let text = setup.operations.get(k).map_or("", |o| o.gcode.as_str());
+            waiting.push(CustomGcode::new(&op.name, text));
+        } else if op.made.has_paths() {
+            if let Some((before, _)) = out.get_mut(k) {
+                before.append(&mut waiting);
+            }
+            last = Some(k);
+        }
+    }
+    if let Some((_, after)) = last.and_then(|k| out.get_mut(k)) {
+        after.append(&mut waiting);
+    }
+    out
+}
+
+/// What is wrong with operation `op`'s moves on `profile`'s machine: each
+/// axis they take past its `travel`.
+pub fn travel_problems(op: &OperationResult, profile: &Profile) -> Vec<String> {
+    match extents(&op.path) {
+        Some((low, high)) => profile.travel_problems(low, high),
+        None => Vec::new(),
+    }
 }
 
 /// Render one operation, of a setup whose frame is `frame`, as a program for
@@ -129,7 +169,18 @@ pub fn program(
     profile: &Profile,
     name: &str,
 ) -> Result<(String, RenderReport), SessionError> {
-    let ops = lower(&op.path, &program_spec(op, wcs, frame, profile)?)?;
+    program_with(op, &program_spec(op, wcs, frame, profile)?, profile, name)
+}
+
+/// Render one operation, with `spec` (from [`program_spec`], and its custom
+/// G-code), as a program for `profile`.
+pub fn program_with(
+    op: &OperationResult,
+    spec: &ProgramSpec,
+    profile: &Profile,
+    name: &str,
+) -> Result<(String, RenderReport), SessionError> {
+    let ops = lower(&op.path, spec)?;
     Ok(render(&ops, profile, name))
 }
 
@@ -194,19 +245,38 @@ pub fn plan_posting(
             source: Box::new(source),
         };
         let loaded = setup_profile(setup, job_dir, profile)?;
-        if !ran.passed() {
+        // Past the machine's travel, a program stops at its limits part-way
+        // through, or crashes into them.
+        let past: Vec<String> = ran
+            .result
+            .operations
+            .iter()
+            .flat_map(|op| {
+                travel_problems(op, &loaded)
+                    .into_iter()
+                    .map(|why| format!("travel {}: {why}", op.name))
+            })
+            .collect();
+        if !ran.passed() || !past.is_empty() {
             let mut why = ran.checks.failure_lines();
-            if why.is_empty() {
+            if why.is_empty() && !ran.passed() {
                 why.push("the simulator did not verify it".into());
             }
+            why.extend(past);
             out.refused.push((setup.name.clone(), why));
         }
+        let custom = custom_gcode(setup, &ran.result.operations);
         // An operation turned off or left out of the run has no program.
         let made = ran.result.operations.iter().enumerate();
         for (k, op) in made.filter(|(_, op)| op.made.has_paths()) {
             let name = program_name(&setup.name, k, &op.name);
-            let (text, report) =
-                program(op, setup.wcs, &ran.result.frame, &loaded, &name).map_err(in_setup)?;
+            let mut spec = program_spec(op, setup.wcs, &ran.result.frame, &loaded)
+                .map_err(|e| in_setup(e.into()))?;
+            if let Some((before, after)) = custom.get(k) {
+                spec.before.clone_from(before);
+                spec.after.clone_from(after);
+            }
+            let (text, report) = program_with(op, &spec, &loaded, &name).map_err(in_setup)?;
             let path = dir.join(format!("{name}.{}", loaded.extension));
             let whose = format!("setup '{}' operation '{}'", setup.name, op.name);
             let key = path.display().to_string().to_lowercase();
