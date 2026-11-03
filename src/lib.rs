@@ -39,7 +39,7 @@ use printcad_bench_sdk::api::*;
 use printcad_bench_sdk::{Bench, Value, bench, host, json, serde_json};
 
 use data::{OperationData, STRATEGIES, SetupData, models_of, strategy_word};
-use runs::{JOB, Runs, State};
+use runs::{Computed, JOB, Runs, State};
 
 /// The package's id: its feature kinds, tools, commands and menu entries all
 /// start with it.
@@ -307,6 +307,28 @@ fn run_status(run: &cam_protocol::Run, index: Option<usize>) -> FeatureStatus {
             FeatureState::Done,
             &format!("Every check passed ({:.1} s)", run.seconds),
         ),
+    }
+}
+
+/// How a setup's run stands, for its badge, or for operation `op`'s (its
+/// feature id) when one is given.
+fn computed_status(computed: &Computed, op: Option<&str>) -> FeatureStatus {
+    match &computed.state {
+        State::Queued => status(FeatureState::Running, "Waiting for another setup to finish"),
+        State::Running(job) => FeatureStatus {
+            job: Some(*job),
+            ..status(FeatureState::Running, "Working out the toolpaths")
+        },
+        State::Stopped => status(FeatureState::OutOfDate, "Its run was stopped"),
+        State::Failed(why) => status(FeatureState::Failed, why),
+        State::Ready(run) => match op {
+            None => run_status(run, None),
+            Some(id) => match computed.operations.iter().position(|o| o == id) {
+                Some(index) => run_status(run, Some(index)),
+                // Added since it ran: it runs with the next.
+                None => status(FeatureState::NotRun, "Not run yet"),
+            },
+        },
     }
 }
 
@@ -616,7 +638,10 @@ impl Cam {
             return;
         };
         match request_for(&node, &setup) {
-            Ok(request) => self.runs.want(id, request, again),
+            Ok(request) => {
+                let operations = operations_of(id).into_iter().map(|(n, _)| n.id).collect();
+                self.runs.want(id, request, operations, again);
+            }
             Err(why) => self.runs.refuse(id, why),
         }
         // The tree's badges follow the run.
@@ -625,28 +650,20 @@ impl Cam {
 
     /// How a setup's or an operation's work stands, for its badge in the
     /// tree: its setup's run, and of that run, what is the operation's.
+    ///
+    /// printCAD asks for it without the document, so the setup's operations
+    /// cannot be looked up then: the run says which of its operations this
+    /// is.
     fn status_of(&self, node: &Node) -> FeatureStatus {
-        let (setup, index) = if node.kind == SETUP_KIND {
+        let (setup, op) = if node.kind == SETUP_KIND {
             (Some(node.id.clone()), None)
         } else {
             let setup = OperationData::from(&node.data).and_then(|d| d.setup);
-            let index = setup
-                .as_ref()
-                .and_then(|s| operations_of(s).iter().position(|(n, _)| n.id == node.id));
-            (setup, index)
+            (setup, Some(node.id.as_str()))
         };
-        let Some(computed) = setup.and_then(|s| self.runs.get(&s)) else {
-            return status(FeatureState::NotRun, "Not run yet");
-        };
-        match &computed.state {
-            State::Queued => status(FeatureState::Running, "Waiting for another setup to finish"),
-            State::Running(job) => FeatureStatus {
-                job: Some(*job),
-                ..status(FeatureState::Running, "Working out the toolpaths")
-            },
-            State::Stopped => status(FeatureState::OutOfDate, "Its run was stopped"),
-            State::Failed(why) => status(FeatureState::Failed, why),
-            State::Ready(run) => run_status(run, index),
+        match setup.and_then(|s| self.runs.get(&s)) {
+            Some(computed) => computed_status(computed, op),
+            None => status(FeatureState::NotRun, "Not run yet"),
         }
     }
 
@@ -1769,5 +1786,45 @@ mod tests {
         assert_eq!(done.state, FeatureState::Done);
         assert_eq!(done.note.as_deref(), Some("2 passes"));
         assert_eq!(run_status(&run, None).state, FeatureState::Done);
+    }
+
+    #[test]
+    fn each_operation_shows_its_own_checks() {
+        use cam_protocol::{Finding, OperationRun, Run};
+        // A tap the post refuses fails its own check, and only its own.
+        let run = Run {
+            passed: false,
+            findings: vec![Finding {
+                level: Level::Fail,
+                code: "post".into(),
+                text: "post GRBL Tap: tapping is posted only as a cycle".into(),
+                operation: Some(1),
+                at_move: None,
+            }],
+            operations: vec![
+                OperationRun {
+                    made: "generated".into(),
+                    summary: "4 holes".into(),
+                    ..OperationRun::default()
+                },
+                OperationRun {
+                    made: "generated".into(),
+                    ..OperationRun::default()
+                },
+            ],
+            ..Run::default()
+        };
+        let computed = Computed::ready(run, vec!["chip".into(), "tap".into()]);
+        let setup = computed_status(&computed, None);
+        assert_eq!(setup.state, FeatureState::Failed);
+        assert!(setup.note.unwrap().contains("Tap"));
+        let chip = computed_status(&computed, Some("chip"));
+        assert_eq!(chip.state, FeatureState::Done);
+        assert_eq!(chip.note.as_deref(), Some("4 holes"));
+        let tap = computed_status(&computed, Some("tap"));
+        assert_eq!(tap.state, FeatureState::Failed);
+        // One added since the run is not the setup's failure.
+        let new = computed_status(&computed, Some("new"));
+        assert_eq!(new.state, FeatureState::NotRun);
     }
 }
