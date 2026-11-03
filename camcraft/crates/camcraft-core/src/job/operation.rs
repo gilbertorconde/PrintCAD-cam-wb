@@ -114,6 +114,29 @@ impl Operation {
                  depth; engrave with it instead",
             );
         }
+        // The chamfer is the cone's flank: a cone with flank enough for it.
+        if let StrategySpec::Chamfer {
+            width, tip_offset, ..
+        } = self.strategy
+        {
+            if tool.kind != ToolKind::Cone {
+                return Some("deburr with a chamfer mill or a V-bit: the chamfer is its flank");
+            }
+            let half = (tool.angle.unwrap_or(f64::NAN) / 2.0).to_radians();
+            let place = crate::strategy::chamfer::Place::new(
+                width,
+                tip_offset,
+                half,
+                tool.tip_diameter / 2.0,
+                tool.diameter / 2.0,
+            );
+            if place.is_err() {
+                return Some(
+                    "the chamfer needs more of the cone than the tool has: make it narrower, \
+                     the tip offset less, or take a wider tool",
+                );
+            }
+        }
         if matches!(self.strategy, StrategySpec::Face { .. }) && tool.kind == ToolKind::Ball {
             return Some("a ball end mill cannot face flat; use a flat or bull-nose end mill");
         }

@@ -171,3 +171,34 @@ fn restarting_and_reversing() {
             < 1e-9
     );
 }
+
+/// An open run moved to its side: its ends go square to the spans they
+/// end, a corner it opens is turned round, one it closes is cut, and an arc
+/// grows about its centre.
+#[test]
+fn an_open_run_offsets_as_a_ring_does_but_its_ends() {
+    // Along +X, then up +Y: a left turn.
+    let l = |x, y| Span::Line { to: dvec2(x, y) };
+    let (start, spans) = offset_open(dvec2(0.0, 0.0), &[l(10.0, 0.0), l(10.0, 10.0)], 1.0).unwrap();
+    // To the right, outside the turn: opened, an arc round the corner.
+    assert_eq!(start, dvec2(0.0, -1.0));
+    assert_eq!(spans.len(), 3, "{spans:?}");
+    assert!(matches!(spans[1], Span::Arc { centre, .. } if centre == dvec2(10.0, 0.0)));
+    assert!((spans[2].to() - dvec2(11.0, 10.0)).length() < 1e-9);
+    // To the left, inside: cut where they cross.
+    let (start, spans) =
+        offset_open(dvec2(0.0, 0.0), &[l(10.0, 0.0), l(10.0, 10.0)], -1.0).unwrap();
+    assert_eq!(start, dvec2(0.0, 1.0));
+    assert_eq!(spans.len(), 2);
+    assert!((spans[0].to() - dvec2(9.0, 1.0)).length() < 1e-9);
+    assert!((spans[1].to() - dvec2(9.0, 10.0)).length() < 1e-9);
+    // A half turn clockwise about the origin, moved out: its radius grows.
+    let arc = Span::Arc {
+        to: dvec2(-5.0, 0.0),
+        centre: DVec2::ZERO,
+        sweep: -PI,
+    };
+    let (start, spans) = offset_open(dvec2(5.0, 0.0), &[arc], -1.0).unwrap();
+    assert!((start - dvec2(6.0, 0.0)).length() < 1e-9, "{start}");
+    assert!((spans[0].to() - dvec2(-6.0, 0.0)).length() < 1e-9);
+}

@@ -531,6 +531,13 @@ impl Operation {
         {
             positive(&field("depth"), depth)?;
         }
+        if let StrategySpec::Chamfer {
+            width, tip_offset, ..
+        } = self.strategy
+        {
+            positive(&field("width"), width)?;
+            at_least_zero(&field("tip_offset"), tip_offset)?;
+        }
         if let StrategySpec::VCarve { max_depth: Some(d) } = self.strategy {
             positive(&field("max_depth"), d)?;
         }

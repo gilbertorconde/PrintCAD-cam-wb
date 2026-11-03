@@ -135,6 +135,22 @@ says, a ramp along the slot or a plunge, never a helix beside it. So
 not always a helix. Its arcs are arcs at every level. A golden slot
 (`grbl-slot.nc`).
 
+And deburring, Fusion's 2D Chamfer. In `camcraft-core`,
+`StrategySpec::Chamfer` (`width`, 0.5 mm; `tip_offset`, 0.2 mm; `side`,
+`ChamferSide`: auto or flipped) runs a cone along the curves and picked
+edges an engraving takes (`strategy::chamfer`). `Place` puts the cone:
+its tip `width / tan(half angle)` and the tip offset below each edge,
+its centre the cone's radius at the chamfer's foot off the edge; a cone
+with too little flank for the width is refused (`Operation::cannot_use`).
+The side away from the material is where the part, dropped onto either
+side of each curve, is lower. Each curve is moved that far to that side,
+its lines and arcs square to themselves, and run to climb, then engraved
+from its own height, the edge's: it has no top or bottom.
+`run::chamfer_centres` gives the curves, for drawing. In `camcraft-geom`,
+`ring::offset_open` moves open spans as `Ring::offset` moves a ring's,
+which it now shares, and `Ring::new` makes a ring of spans. What a
+chamfer cuts into the part is meant, as an engraving's is.
+
 And one test: ogeom is 0.11.1 here, which printCAD's shapes need, and it
 meshes `round_edge_loose_fit.step`'s seam that 0.11.0 drew off the torus, so
 `a_loose_fit_is_refused_for_ogeoms_seam` became

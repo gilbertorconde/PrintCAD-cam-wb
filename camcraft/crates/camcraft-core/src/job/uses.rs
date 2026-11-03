@@ -217,6 +217,20 @@ impl StrategySpec {
                 bottom: None,
                 ..cuts_loops
             },
+            // Its picks are the edges it chamfers, each from its own height,
+            // the edge's: no top or bottom. It cuts to size.
+            StrategySpec::Chamfer { .. } => Uses {
+                boundary: false,
+                traces: true,
+                stepover: false,
+                stock_to_leave: Leave::None,
+                tabs: false,
+                helix: HelixSize::Tool,
+                ramp: false,
+                top: None,
+                bottom: None,
+                ..cuts_loops
+            },
             // Its picks are the areas it carves, along their middles, each
             // round from where it is shallowest.
             StrategySpec::VCarve { .. } => Uses {

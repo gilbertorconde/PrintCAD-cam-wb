@@ -263,7 +263,7 @@ fn oriented(trace: &Trace, p: &EngraveParams) -> Trace {
 
 /// The curves in the order they are cut: each the one whose start is nearest
 /// where the last ended, from the first.
-fn in_order(traces: Vec<Trace>) -> Vec<Trace> {
+pub(crate) fn in_order(traces: Vec<Trace>) -> Vec<Trace> {
     let mut left = traces;
     let mut out = Vec::with_capacity(left.len());
     let mut at: Option<DVec2> = None;

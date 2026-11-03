@@ -1706,3 +1706,91 @@ fn a_slot_goes_down_both_ways_or_one_way_and_verifies() {
         assert!(refused.contains("end mill its width"), "{refused}");
     }
 }
+
+/// The plate's hole's top rim deburred with a 90° V-bit, a millimetre wide
+/// and the tip half a millimetre past: the tool's centre goes round inside
+/// the hole, away from the plate, half a millimetre in from the rim, its tip
+/// a millimetre and a half down, round it as arcs; what it cuts is meant,
+/// so the run verifies. Wider than the cone reaches is refused.
+#[test]
+fn a_chamfer_goes_beside_its_edge_as_deep_as_it_is_wide() {
+    use crate::job::{ChamferSide, FeatureRef, ToolKind};
+    use crate::path::toolpath::{MoveKind, MoveRole};
+    let body = Body::derived(synthetic::plate_with_hole(20.0, 5.0, 4.0, 48));
+    let chamfer = StrategySpec::Chamfer {
+        width: 1.0,
+        tip_offset: 0.5,
+        side: ChamferSide::Auto,
+    };
+    let mut job = sheet_job(chamfer);
+    job.tools.insert(
+        "vbit".into(),
+        crate::job::ToolSpec {
+            kind: ToolKind::Cone,
+            diameter: 6.0,
+            angle: Some(90.0),
+            number: 5,
+            ..crate::job::ToolSpec::default()
+        },
+    );
+    let op = &mut job.setups[0].operations[0];
+    op.tool = Some("vbit".into());
+    op.selection.edges = vec![FeatureRef {
+        model: "dome".into(),
+        index: u32::MAX,
+        at: [4.0, 0.0, 5.0],
+    }];
+    let bodies: Bodies<'_> = [("dome", &body)].into_iter().collect();
+    job.check_setup(0).unwrap();
+    let result = run_setup(&job, 0, &bodies).unwrap();
+    let op = &result.operations[0];
+    assert!(op.warnings.is_empty(), "{:?}", op.warnings);
+    let mut at = op.path.moves()[0].to;
+    let mut arcs = 0;
+    for m in op.path.moves() {
+        if matches!(m.role, MoveRole::Cut | MoveRole::Ramp)
+            && let MoveKind::Arc(a) = m.kind
+        {
+            arcs += 1;
+            assert!(a.centre.truncate().length() < 1e-6, "{a:?}");
+            assert!((a.radius(at) - 3.5).abs() < 1e-6, "{}", a.radius(at));
+        }
+        at = m.to;
+    }
+    assert!(arcs >= 4, "{arcs}");
+    let deepest = op
+        .path
+        .moves()
+        .iter()
+        .filter(|m| m.role == MoveRole::Cut)
+        .map(|m| m.to.z)
+        .fold(f64::MAX, f64::min);
+    assert!((deepest - 3.5).abs() < 1e-9, "{deepest}");
+    assert!(op.sim.removed_mm3 > 0.0);
+    assert!(result.is_clean(), "{:?}", result.warnings());
+    assert_eq!(result.verify.gouged, 0);
+
+    // As drawn: the run's own centres, round inside the rim.
+    let prepared = crate::setup::prepare(&job, 0, &bodies).unwrap();
+    let (centres, place) =
+        chamfer_centres(&job, &job.setups[0].operations[0], &prepared, &bodies).unwrap();
+    assert_eq!(centres.len(), 1);
+    assert!((place.reach - 1.5).abs() < 1e-12);
+    for p in centres[0].points(0.001) {
+        assert!((p.truncate().length() - 3.5).abs() < 1e-6, "{p}");
+    }
+
+    // A 3 mm cone has 1.5 mm of flank: a 1.2 mm chamfer half a millimetre
+    // down needs 1.7.
+    let small = job.tools.get_mut("vbit").unwrap();
+    small.diameter = 3.0;
+    if let StrategySpec::Chamfer { width, .. } = &mut job.setups[0].operations[0].strategy {
+        *width = 1.2;
+    }
+    let refused = job.check_setup(0).unwrap_err().to_string();
+    assert!(refused.contains("more of the cone"), "{refused}");
+    // A flat end mill has no flank.
+    job.tools.get_mut("vbit").unwrap().kind = ToolKind::Flat;
+    let refused = job.check_setup(0).unwrap_err().to_string();
+    assert!(refused.contains("chamfer mill or a V-bit"), "{refused}");
+}

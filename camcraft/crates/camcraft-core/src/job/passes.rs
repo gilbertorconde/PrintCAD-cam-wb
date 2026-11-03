@@ -275,7 +275,8 @@ impl Operation {
             | StrategySpec::Drill { .. }
             | StrategySpec::Engrave { .. }
             | StrategySpec::VCarve { .. }
-            | StrategySpec::Slot { .. } => None,
+            | StrategySpec::Slot { .. }
+            | StrategySpec::Chamfer { .. } => None,
         }
     }
 }
