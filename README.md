@@ -34,10 +34,27 @@ panels, the drawing and the helper that runs camcraft.
   size, or a cylinder: round bar up the tool, as a disc, or lying along the
   machine's X or Y, round the bodies with a margin all round and at each end,
   or of a fixed diameter and length centred on them), how the part sits (the
-  tool axis along any of the six directions),
+  tool axis along any of the six directions, or tilted, below),
   its work zero (a corner or the middle of the stock or of the bodies, or the
   document's origin, plus an offset), its post and its tolerance. New setup on
   the toolbar makes one on the selected body, or on every shown one.
+- **Tilted setups (3+2).** A setup's tool axis can be any direction: out of
+  a flat face picked on the part, along a straight edge picked on it (either
+  way), the document's Z tilted by angles about its X and then its Y, or a
+  direction typed in; each number takes a formula. Machine X is a document
+  axis made square to the tool (X unless the tool lies nearly along it), or
+  a straight edge picked on the part. Everything then happens square to the
+  tool: the toolpaths, the heights, the simulation and the checks, and the
+  stock, whose box round the bodies is round them as the tool sees them,
+  its margins along the setup's axes, as a fixed box's size and a cylinder's
+  axis are. A post with rotary axes stands the part up for each program,
+  positioning only: `G0 A.. B..` before it cuts, with the tool sent clear
+  first. Without them the part is fixtured tilted by hand, and the program's
+  header names the tilt. Either way the program's coordinates are in the
+  tilted frame: **set the work offset in the tilted frame**, or use the
+  controller's tilted-plane feature where it has one. A tilt the rotaries
+  cannot reach, or only past their limits, is a failed check that says
+  so.
 - **Operations**, after Fusion's: adaptive and pocket clearing; parallel,
   scallop, contour, flat, spiral, radial and morphed spiral finishing; 2D
   profiles and pockets; facing; drilling: at once, in pecks backing out,
@@ -61,7 +78,9 @@ panels, the drawing and the helper that runs camcraft.
   enclose, or the loops themselves for an engraving. A sketch's text is its
   letters' outlines. Its open curves close nothing, and a package cannot
   read them, so only picked edges give an engraving an open curve. A setup's
-  work zero can be a corner or a round edge's centre picked on the part.
+  work zero can be a corner or a round edge's centre picked on the part,
+  its tool axis a flat face or a straight edge, and its machine X a
+  straight edge.
 - **What an operation machines, drawn** while it is edited: its boundary as
   chosen, where the tool's centre may go against it, and, hatched, what the
   tool cuts outside the part or beside a 2D outline.
@@ -134,6 +153,21 @@ panels, the drawing and the helper that runs camcraft.
   refused, as a failed check, since no plain move keeps the feed to the
   spindle as it reverses at the bottom. A tap is kept in the tool library as
   a flat end mill its size, and turns the way its thread does.
+  A profile can name its rotary axes, for 3+2 machining:
+
+  ```toml
+  [rotary]
+  axes = ["A", "B"]     # from the machine's base out: A carries B, B the part
+  [rotary.A]
+  about = "x"           # the machine axis it turns about: x for A, y for B unless said
+  sign = -1             # 1: a positive angle turns the part right-handed about it
+  limits = [-30, 110]   # degrees; a full turn either way unless said
+  ```
+
+  With every rotary at zero the part sits as modelled. With two, the setup's
+  machine X must lie where they leave the machine's X; a check says which
+  way that is when it does not. A profile with rotaries needs a
+  `safe_retract`, since the part turns under the tool.
 - **Formulas.** Every number of a setup and of an operation takes a formula.
 - **Script commands**, for scripts and AI agents:
 
@@ -142,6 +176,9 @@ local cam = pc.io.github.gilbertorconde.cam
 local setup = cam.setup{bodies = {"<body id>"}, margin = 3, post = "grbl"}
 local disc = cam.setup{bodies = {"<body id>"}, stock = "cylinder", axis = "tool",
                        diameter = 80, length = 25}  -- or margin = 3 round the bodies
+local side = cam.setup{bodies = {"<body id>"}, tool_axis = "-y", machine_x = "+x"}
+local tilted = cam.setup{bodies = {"<body id>"}, tilt = {x = 30, y = 0}}
+                                        -- or tool_axis = {x = 0, y = -0.5, z = 0.866}
 local rough = cam.operation{setup = setup.feature, strategy = "adaptive", tool = "1/4 upcut",
                            heights = {bottom_from = "model-top", bottom = -6}}
 local name = cam.operation{setup = setup.feature, strategy = "engrave", tool = "60° V-bit",
@@ -171,6 +208,9 @@ useful there.
 
 ## What it does not do yet
 
+- Rotary axes only position the part, before each program cuts: nothing
+  moves on more than three axes at once, and no tilted-plane code (`G68.2`
+  and the like) is written.
 - A setup's run is not kept in the document. The helper keeps the newest 64
   runs in the user's cache folder (`printcad-cam`; `CAM_HELPER_CACHE` names
   another, or `off`), so a document opened again on the same machine shows

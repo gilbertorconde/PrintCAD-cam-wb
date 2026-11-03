@@ -11,7 +11,10 @@ use camcraft_post::profile::Profile;
 use printcad_bench_sdk::api::*;
 use printcad_bench_sdk::host;
 
-use crate::data::{CylinderAxis, OperationData, Pick, STRATEGIES, SetupData, StockKind, Zero};
+use crate::data::{
+    AxisPick, CylinderAxis, MachineX, OperationData, Pick, STRATEGIES, SetupData, StockKind,
+    ToolAxis, Zero,
+};
 use crate::linking::{linking_event, linking_group};
 use crate::passes::{finishing_group, passes_event, strategy_rows, tabs_group};
 use crate::picking::Slot;
@@ -91,6 +94,158 @@ fn x_axes(z: Axis) -> Vec<Axis> {
         .into_iter()
         .filter(|&x| Orientation::square(z, x).check().is_ok())
         .collect()
+}
+
+/// The X axes machine X may be taken from: those square to the tool axis
+/// when it is one of the document's, and when it is tilted, those not
+/// nearly along it, which are made square to it.
+fn machine_xs(setup: &SetupData) -> Vec<Axis> {
+    if setup.tool_axis == ToolAxis::Square {
+        return x_axes(setup.z_axis);
+    }
+    let up = setup.up();
+    Axis::ALL
+        .into_iter()
+        .filter(|a| {
+            let v = a.vector();
+            (v.x * up[0] + v.y * up[1] + v.z * up[2]).abs() < 0.999
+        })
+        .collect()
+}
+
+/// A face or an edge picked for an axis, as a pick row says it.
+fn axis_pick_text(what: &str, pick: Option<&AxisPick>) -> String {
+    match pick {
+        Some(p) => format!("{what} at {:.2}, {:.2}, {:.2}", p.at[0], p.at[1], p.at[2]),
+        None => "Nothing picked".into(),
+    }
+}
+
+/// The rows of a setup's orientation: where its tool axis comes from, and
+/// its machine X, with what each takes.
+fn orientation_rows(cam: &Cam, id: &str, setup: &SetupData) -> Vec<Widget> {
+    let armed = |slot: Slot| {
+        cam.armed
+            .as_ref()
+            .is_some_and(|a| a.feature == id && a.slot == slot)
+    };
+    let mut options: Vec<String> = Axis::ALL.into_iter().map(axis_label).collect();
+    options.extend(ToolAxis::TILTED.iter().map(|t| t.label().to_string()));
+    let selected = match setup.tool_axis {
+        ToolAxis::Square => Axis::ALL
+            .iter()
+            .position(|&a| a == setup.z_axis)
+            .unwrap_or(4),
+        t => Axis::ALL.len() + ToolAxis::TILTED.iter().position(|&o| o == t).unwrap_or(0),
+    };
+    let mut rows = vec![choice("z_axis", "Tool axis (Z) along", options, selected)];
+    let toggle = |id: &str, on: bool| Widget::Toggle {
+        id: id.into(),
+        label: "The other way".into(),
+        on,
+    };
+    match setup.tool_axis {
+        ToolAxis::Square => {}
+        ToolAxis::Face | ToolAxis::Edge => {
+            let (slot, what) = if setup.tool_axis == ToolAxis::Face {
+                ("axis_face", "Face")
+            } else {
+                ("axis_edge", "Edge")
+            };
+            rows.push(Widget::Pick {
+                id: slot.into(),
+                label: "Tool axis on the part".into(),
+                value: Some(axis_pick_text(what, setup.axis_pick.as_ref())),
+                armed: Slot::named(slot).is_some_and(armed),
+            });
+            rows.push(toggle(
+                "axis_reverse",
+                setup.axis_pick.as_ref().is_some_and(|p| p.reverse),
+            ));
+        }
+        ToolAxis::Tilt => {
+            rows.push(number(
+                "tilt_x",
+                "Tilt about X",
+                setup.tilt_x,
+                Dim::Angle,
+                2,
+                id,
+            ));
+            rows.push(number(
+                "tilt_y",
+                "Tilt about Y",
+                setup.tilt_y,
+                Dim::Angle,
+                2,
+                id,
+            ));
+        }
+        ToolAxis::Direction => {
+            rows.push(number(
+                "axis_dx",
+                "Direction X",
+                setup.axis_dx,
+                Dim::Number,
+                4,
+                id,
+            ));
+            rows.push(number(
+                "axis_dy",
+                "Direction Y",
+                setup.axis_dy,
+                Dim::Number,
+                4,
+                id,
+            ));
+            rows.push(number(
+                "axis_dz",
+                "Direction Z",
+                setup.axis_dz,
+                Dim::Number,
+                4,
+                id,
+            ));
+        }
+    }
+    let xs = machine_xs(setup);
+    let mut x_options: Vec<String> = xs.iter().copied().map(axis_label).collect();
+    x_options.push("Along an edge picked on the part".into());
+    let x_selected = match setup.machine_x {
+        MachineX::Axis => xs.iter().position(|&a| a == setup.x_axis).unwrap_or(0),
+        MachineX::Edge => xs.len(),
+    };
+    rows.push(choice("x_axis", "Machine X along", x_options, x_selected));
+    if setup.machine_x == MachineX::Edge {
+        rows.push(Widget::Pick {
+            id: "x_edge".into(),
+            label: "Machine X on the part".into(),
+            value: Some(axis_pick_text("Edge", setup.x_pick.as_ref())),
+            armed: armed(Slot::XEdge),
+        });
+        rows.push(toggle(
+            "x_reverse",
+            setup.x_pick.as_ref().is_some_and(|p| p.reverse),
+        ));
+    }
+    let unpicked =
+        matches!(setup.tool_axis, ToolAxis::Face | ToolAxis::Edge) && setup.axis_pick.is_none();
+    if !setup.square() && !unpicked {
+        let up = setup.up();
+        let degrees = up[2].clamp(-1.0, 1.0).acos().to_degrees();
+        rows.push(note(
+            NoteKind::Info,
+            format!(
+                "Tilted for 3+2 machining: the tool axis points along ({:.3}, {:.3}, {:.3}) \
+                 of the document, {degrees:.1}° from its Z, and machine X is made square to \
+                 it. The stock is laid out square to the tool. A post with rotary axes \
+                 turns the part up; without, fixture it tilted, and set the work offset \
+                 in the tilted frame either way.",
+                up[0], up[1], up[2]
+            ),
+        ));
+    }
+    rows
 }
 
 /// The posts to choose from: camcraft's built-in ones, then the user's.
@@ -461,58 +616,41 @@ pub fn setup_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
         }
     }
     panel.push(group("Stock", stock));
-    let xs = x_axes(setup.z_axis);
-    panel.push(group(
-        "Orientation and work zero",
-        vec![
-            choice(
-                "z_axis",
-                "Tool axis (Z) along",
-                Axis::ALL.into_iter().map(axis_label).collect(),
-                Axis::ALL
-                    .iter()
-                    .position(|&a| a == setup.z_axis)
-                    .unwrap_or(4),
-            ),
-            choice(
-                "x_axis",
-                "Machine X along",
-                xs.iter().copied().map(axis_label).collect(),
-                xs.iter().position(|&a| a == setup.x_axis).unwrap_or(0),
-            ),
-            choice(
-                "zero",
-                "Work zero",
-                Zero::ALL.iter().map(|z| z.label().to_string()).collect(),
-                Zero::ALL.iter().position(|&z| z == setup.zero).unwrap_or(0),
-            ),
-            Widget::Pick {
-                id: "zero_pick".into(),
-                label: "On the part".into(),
-                value: Some(match &setup.zero_point {
-                    Some(z) if setup.zero == Zero::Picked => format!(
-                        "{} at {:.2}, {:.2}, {:.2}",
-                        if z.snap == camcraft_core::job::Snap::Vertex {
-                            "Corner"
-                        } else {
-                            "Centre"
-                        },
-                        z.at[0],
-                        z.at[1],
-                        z.at[2]
-                    ),
-                    _ => "Nothing picked".into(),
-                }),
-                armed: cam
-                    .armed
-                    .as_ref()
-                    .is_some_and(|a| a.feature == id && a.slot == Slot::Zero),
-            },
-            number("offset_x", "Offset X", setup.offset_x, Dim::Length, 2, id),
-            number("offset_y", "Offset Y", setup.offset_y, Dim::Length, 2, id),
-            number("offset_z", "Offset Z", setup.offset_z, Dim::Length, 2, id),
-        ],
-    ));
+    let mut orientation = orientation_rows(cam, id, &setup);
+    orientation.extend([
+        choice(
+            "zero",
+            "Work zero",
+            Zero::ALL.iter().map(|z| z.label().to_string()).collect(),
+            Zero::ALL.iter().position(|&z| z == setup.zero).unwrap_or(0),
+        ),
+        Widget::Pick {
+            id: "zero_pick".into(),
+            label: "On the part".into(),
+            value: Some(match &setup.zero_point {
+                Some(z) if setup.zero == Zero::Picked => format!(
+                    "{} at {:.2}, {:.2}, {:.2}",
+                    if z.snap == camcraft_core::job::Snap::Vertex {
+                        "Corner"
+                    } else {
+                        "Centre"
+                    },
+                    z.at[0],
+                    z.at[1],
+                    z.at[2]
+                ),
+                _ => "Nothing picked".into(),
+            }),
+            armed: cam
+                .armed
+                .as_ref()
+                .is_some_and(|a| a.feature == id && a.slot == Slot::Zero),
+        },
+        number("offset_x", "Offset X", setup.offset_x, Dim::Length, 2, id),
+        number("offset_y", "Offset Y", setup.offset_y, Dim::Length, 2, id),
+        number("offset_z", "Offset Z", setup.offset_z, Dim::Length, 2, id),
+    ]);
+    panel.push(group("Orientation and work zero", orientation));
     let mut posts = posts(cam);
     // A post of someone else's the setup carries, though this library has
     // not got it.
@@ -624,6 +762,11 @@ pub fn setup_event(cam: &mut Cam, id: &str, event: PanelEvent) {
                 "offset_x" => &mut setup.offset_x,
                 "offset_y" => &mut setup.offset_y,
                 "offset_z" => &mut setup.offset_z,
+                "tilt_x" => &mut setup.tilt_x,
+                "tilt_y" => &mut setup.tilt_y,
+                "axis_dx" => &mut setup.axis_dx,
+                "axis_dy" => &mut setup.axis_dy,
+                "axis_dz" => &mut setup.axis_dz,
                 "wcs" => &mut setup.wcs,
                 "tolerance" => &mut setup.tolerance,
                 _ => return,
@@ -644,15 +787,41 @@ pub fn setup_event(cam: &mut Cam, id: &str, event: PanelEvent) {
                     setup.cylinder_axis = CylinderAxis::ALL.get(index).copied().unwrap_or_default();
                 }
                 "cylinder_size" => setup.cylinder_fixed = index == 1,
-                "z_axis" => {
-                    setup.z_axis = Axis::ALL.get(index).copied().unwrap_or(Axis::PosZ);
-                    setup.square_axes();
-                }
-                "x_axis" => {
-                    if let Some(&x) = x_axes(setup.z_axis).get(index) {
+                "z_axis" => match Axis::ALL.get(index) {
+                    Some(&z) => {
+                        setup.tool_axis = ToolAxis::Square;
+                        setup.z_axis = z;
+                        setup.square_axes();
+                    }
+                    None => {
+                        let t = ToolAxis::TILTED
+                            .get(index - Axis::ALL.len())
+                            .copied()
+                            .unwrap_or(ToolAxis::Tilt);
+                        if t != setup.tool_axis {
+                            setup.axis_pick = None;
+                        }
+                        setup.tool_axis = t;
+                        // A face or an edge to pick: pick it now.
+                        match t {
+                            ToolAxis::Face => cam.arm(id, Some(Slot::AxisFace)),
+                            ToolAxis::Edge => cam.arm(id, Some(Slot::AxisEdge)),
+                            _ => {}
+                        }
+                    }
+                },
+                "x_axis" => match machine_xs(&setup).get(index) {
+                    Some(&x) => {
+                        setup.machine_x = MachineX::Axis;
                         setup.x_axis = x;
                     }
-                }
+                    None => {
+                        setup.machine_x = MachineX::Edge;
+                        if setup.x_pick.is_none() {
+                            cam.arm(id, Some(Slot::XEdge));
+                        }
+                    }
+                },
                 "zero" => {
                     setup.zero = Zero::ALL.get(index).copied().unwrap_or_default();
                     // A zero to pick: pick it now.
@@ -689,6 +858,20 @@ pub fn setup_event(cam: &mut Cam, id: &str, event: PanelEvent) {
             }
         }
         PanelEvent::Pick { id: pick } if pick == "zero_pick" => cam.arm(id, Some(Slot::Zero)),
+        PanelEvent::Pick { id: pick } if Slot::named(&pick).is_some() => {
+            cam.arm(id, Slot::named(&pick));
+        }
+        PanelEvent::Toggle { id: t, on } if t == "axis_reverse" || t == "x_reverse" => {
+            let pick = if t == "axis_reverse" {
+                &mut setup.axis_pick
+            } else {
+                &mut setup.x_pick
+            };
+            if let Some(p) = pick {
+                p.reverse = on;
+                cam.write_setup(id, &setup);
+            }
+        }
         PanelEvent::Pick { id: pick } if pick == "body" => {
             match cam
                 .pointer

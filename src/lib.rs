@@ -37,6 +37,7 @@ use std::collections::BTreeMap;
 
 use cam_protocol::{HELPER, IDENTITY, Level, Request as HelperRequest, Shape, VERSION};
 use camcraft_core::job::{StrategySpec, ToolSpec};
+use camcraft_core::setup::frame::Axis;
 use printcad_bench_sdk::api::*;
 use printcad_bench_sdk::{Bench, Value, bench, host, json, serde_json};
 
@@ -431,10 +432,7 @@ impl Cam {
     /// loop is flat along.
     fn axis_of(&self, feature: &str) -> [f32; 3] {
         let setup = self.setup_of(feature).and_then(|s| setup_node(&s));
-        setup.map_or([0.0, 0.0, 1.0], |(_, d)| {
-            let v = d.z_axis.vector();
-            [v.x as f32, v.y as f32, v.z as f32]
-        })
+        setup.map_or([0.0, 0.0, 1.0], |(_, d)| d.up().map(|v| v as f32))
     }
 
     /// An armed slot's share of `input`: what a click would take as the
@@ -454,8 +452,14 @@ impl Cam {
             Event::Press {
                 button: Button::Left,
             } => {
-                let hover = armed.hover?;
-                self.take(&armed.feature, hover);
+                // What the pointer is over now, when no move since said:
+                // the view can tell an input what is under it before it has
+                // found it.
+                let hover = armed.hover.or_else(|| {
+                    let up = self.axis_of(&armed.feature);
+                    picking::hover(armed.slot, &input.pointer, up, armed.alone)
+                })?;
+                self.take(&armed.feature, armed.slot, hover, &input.pointer);
                 Some(true)
             }
             Event::Key { key, down: true } if key == "Escape" => {
@@ -469,8 +473,58 @@ impl Cam {
     /// What an armed slot's click takes, into `feature`'s data: a face or an
     /// edge loop for an operation, taken out again when it is in already; a
     /// work zero for a setup, which disarms it.
-    fn take(&mut self, feature: &str, hover: picking::Hover) {
-        use picking::Hover;
+    fn take(
+        &mut self,
+        feature: &str,
+        slot: picking::Slot,
+        hover: picking::Hover,
+        pointer: &Pointer,
+    ) {
+        use picking::{Hover, Slot};
+        if matches!(slot, Slot::AxisFace | Slot::AxisEdge | Slot::XEdge) {
+            // Which way it points, as the view has it under the pointer.
+            let (body, at, toward) = match hover {
+                Hover::Face { body, at, .. } => {
+                    let normal = pointer
+                        .hover_face
+                        .as_ref()
+                        .or(self.pointer.hover_face.as_ref())
+                        .map(|f| f.normal);
+                    (body, at, normal)
+                }
+                Hover::Edge { body, at, .. } => {
+                    let along = pointer
+                        .hover_edge
+                        .as_ref()
+                        .or(self.pointer.hover_edge.as_ref())
+                        .map(|e| e.direction);
+                    (body, at, along)
+                }
+                Hover::Point { .. } => return,
+            };
+            if let (Some((_, mut setup)), Some(toward)) = (setup_node(feature), toward) {
+                let pick = data::AxisPick {
+                    body,
+                    at: at.map(f64::from),
+                    toward: toward.map(f64::from),
+                    reverse: false,
+                };
+                if slot == Slot::XEdge {
+                    setup.machine_x = data::MachineX::Edge;
+                    setup.x_pick = Some(pick);
+                } else {
+                    setup.tool_axis = if slot == Slot::AxisFace {
+                        data::ToolAxis::Face
+                    } else {
+                        data::ToolAxis::Edge
+                    };
+                    setup.axis_pick = Some(pick);
+                }
+                self.write_setup(feature, &setup);
+            }
+            self.armed = None;
+            return;
+        }
         match hover {
             Hover::Point { body, snap, at, .. } => {
                 if let Some((_, mut setup)) = setup_node(feature) {
@@ -943,6 +997,29 @@ impl Bench for Cam {
                         ),
                         param("length", ParamKind::Number, false, "a fixed cylinder's, mm"),
                         param(
+                            "tool_axis",
+                            ParamKind::Any,
+                            false,
+                            "+x, -x, +y, -y, +z (the default) or -z: the document axis the \
+                             tool points up; or {x, y, z}, a direction, which tilts the part \
+                             for 3+2 machining",
+                        ),
+                        param(
+                            "tilt",
+                            ParamKind::Any,
+                            false,
+                            "{x, y}: the tool axis tilted from the document's +Z, degrees \
+                             about its X then its Y, for 3+2 machining",
+                        ),
+                        param(
+                            "machine_x",
+                            ParamKind::String,
+                            false,
+                            "+x, -x, +y, -y, +z or -z: the document axis machine X lies \
+                             along, made square to a tilted tool axis (+x, or one square to \
+                             the tool)",
+                        ),
+                        param(
                             "post",
                             ParamKind::String,
                             false,
@@ -959,6 +1036,12 @@ impl Bench for Cam {
                     returns: "{feature}".into(),
                     notes: vec![
                         "The work zero is the stock's top, front-left corner.".into(),
+                        "A tilted setup (tool_axis as a direction, or tilt) lays its stock out \
+                         square to the tool. Its programs are in the tilted frame: a post with \
+                         rotary axes stands the part up with G0 A.. B.. first; without, the part \
+                         is fixtured tilted by hand. Pick a face or an edge for the tool axis in \
+                         the setup's panel."
+                            .into(),
                         "A setup runs when it has operations; io.github.gilbertorconde.cam.status \
                          says where it stands."
                             .into(),
@@ -1200,6 +1283,11 @@ impl Bench for Cam {
                 p("offset_x", "Work zero X offset", Dim::Length),
                 p("offset_y", "Work zero Y offset", Dim::Length),
                 p("offset_z", "Work zero Z offset", Dim::Length),
+                p("tilt_x", "Tool axis tilt about X", Dim::Angle),
+                p("tilt_y", "Tool axis tilt about Y", Dim::Angle),
+                p("axis_dx", "Tool axis direction X", Dim::Number),
+                p("axis_dy", "Tool axis direction Y", Dim::Number),
+                p("axis_dz", "Tool axis direction Z", Dim::Number),
                 p("tolerance", "Tolerance", Dim::Length),
             ];
         }
@@ -1295,8 +1383,54 @@ impl Bench for Cam {
                     Some("y") => CylinderAxis::Y,
                     Some(other) => return Err(format!("no axis '{other}': tool, x or y")),
                 };
+                let axis_named = |key: &str| -> Result<Option<Axis>, String> {
+                    match text(key) {
+                        None => Ok(None),
+                        Some(name) => Axis::ALL
+                            .into_iter()
+                            .find(|a| a.label().replace('−', "-").eq_ignore_ascii_case(&name))
+                            .map(Some)
+                            .ok_or_else(|| format!("no axis '{name}': +x, -x, +y, -y, +z or -z")),
+                    }
+                };
+                // The document axis it points up, or a direction.
+                let (up_axis, up_along) = match args.get("tool_axis") {
+                    Some(Value::String(_)) => (axis_named("tool_axis")?, None),
+                    Some(v) => {
+                        let d: Direction3 = serde_json::from_value(v.clone())
+                            .map_err(|_| "tool_axis is +z or the like, or {x, y, z}")?;
+                        (None, Some([d.x, d.y, d.z]))
+                    }
+                    None => (None, None),
+                };
+                let tilt: Option<Tilt2> = match args.get("tilt") {
+                    Some(v) => Some(
+                        serde_json::from_value(v.clone())
+                            .map_err(|_| "tilt is {x, y} in degrees")?,
+                    ),
+                    None => None,
+                };
+                let machine_x = axis_named("machine_x")?;
                 let id = self.make_setup(bodies, text("name").as_deref())?;
                 if let Some((_, mut data)) = setup_node(&id) {
+                    if let Some(z) = up_axis {
+                        data.z_axis = z;
+                        data.square_axes();
+                    }
+                    if let Some([x, y, z]) = up_along {
+                        data.tool_axis = data::ToolAxis::Direction;
+                        (data.axis_dx, data.axis_dy, data.axis_dz) = (x, y, z);
+                    }
+                    if let Some(t) = tilt {
+                        data.tool_axis = data::ToolAxis::Tilt;
+                        (data.tilt_x, data.tilt_y) = (t.x, t.y);
+                    }
+                    if let Some(x) = machine_x {
+                        data.x_axis = x;
+                        if data.tool_axis == data::ToolAxis::Square {
+                            data.square_axes();
+                        }
+                    }
                     if let Some(m) = number("margin") {
                         data.margin_side = m;
                         data.margin_top = m;
@@ -1838,6 +1972,26 @@ impl Cam {
 }
 
 bench!(Cam);
+
+/// A direction a script gives, `{x, y, z}`.
+#[derive(serde::Deserialize)]
+struct Direction3 {
+    #[serde(default)]
+    x: f64,
+    #[serde(default)]
+    y: f64,
+    #[serde(default)]
+    z: f64,
+}
+
+/// Tilts a script gives, `{x, y}` in degrees.
+#[derive(serde::Deserialize)]
+struct Tilt2 {
+    #[serde(default)]
+    x: f64,
+    #[serde(default)]
+    y: f64,
+}
 
 /// `now` with the fields of `given`, an object, over it: what a script command
 /// sets of a group of numbers.

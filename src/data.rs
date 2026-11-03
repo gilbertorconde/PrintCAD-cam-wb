@@ -16,7 +16,7 @@ use camcraft_core::job::{
     Origin, Outline, Place, PointRef, Preset, Selection, Setup, Snap, StockDef, StockSpec,
     StockToLeave, StrategySpec, ToolSpec,
 };
-use camcraft_core::setup::frame::{Axis, Orientation};
+use camcraft_core::setup::frame::{Axis, Direction, Orientation};
 use printcad_bench_sdk::serde_json;
 use serde::{Deserialize, Serialize};
 
@@ -58,6 +58,80 @@ impl CylinderAxis {
             CylinderAxis::X => "Along machine X",
             CylinderAxis::Y => "Along machine Y",
         }
+    }
+}
+
+/// Where a setup's tool axis comes from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ToolAxis {
+    /// Along one of the document's axes, `z_axis`: the part square on the
+    /// table.
+    #[default]
+    Square,
+    /// Out of a flat face picked on the part, along its normal.
+    Face,
+    /// Along a straight edge picked on the part.
+    Edge,
+    /// The document's +Z tilted `tilt_x` about its X, then `tilt_y` about its
+    /// Y.
+    Tilt,
+    /// Along a direction typed in, `axis_dx`, `axis_dy`, `axis_dz`.
+    Direction,
+}
+
+impl ToolAxis {
+    /// The ways that tilt the part, after the six axes, as the panel lists
+    /// them.
+    pub const TILTED: [ToolAxis; 4] = [
+        ToolAxis::Face,
+        ToolAxis::Edge,
+        ToolAxis::Tilt,
+        ToolAxis::Direction,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ToolAxis::Square => "One of the document's axes",
+            ToolAxis::Face => "Out of a face picked on the part",
+            ToolAxis::Edge => "Along an edge picked on the part",
+            ToolAxis::Tilt => "Tilted by angles",
+            ToolAxis::Direction => "Along a direction",
+        }
+    }
+}
+
+/// Where a setup's machine X comes from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MachineX {
+    /// Along one of the document's axes, `x_axis`, made square to a tilted
+    /// tool axis.
+    #[default]
+    Axis,
+    /// Along a straight edge picked on the part, made square to the tool
+    /// axis.
+    Edge,
+}
+
+/// A face or an edge an axis is taken from, by a point on it in document
+/// coordinates, as camcraft finds it again, and which way it points as the
+/// view saw it: a face's outward normal, an edge's direction there.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AxisPick {
+    pub body: String,
+    pub at: [f64; 3],
+    pub toward: [f64; 3],
+    /// The other way.
+    #[serde(default)]
+    pub reverse: bool,
+}
+
+impl AxisPick {
+    /// Which way it points, as the view saw it, reversed when it is.
+    pub fn up(&self) -> [f64; 3] {
+        let s = if self.reverse { -1.0 } else { 1.0 };
+        self.toward.map(|v| v * s)
     }
 }
 
@@ -171,6 +245,32 @@ pub struct SetupData {
     pub z_axis: Axis,
     /// The document direction that becomes the machine's X.
     pub x_axis: Axis,
+    /// Where the tool axis comes from: `z_axis`, or tilted for 3+2
+    /// machining.
+    #[serde(default)]
+    pub tool_axis: ToolAxis,
+    /// The face or edge picked for [`ToolAxis::Face`] or [`ToolAxis::Edge`].
+    #[serde(default)]
+    pub axis_pick: Option<AxisPick>,
+    /// [`ToolAxis::Tilt`]'s angles, degrees: about the document's X, then
+    /// its Y.
+    #[serde(default)]
+    pub tilt_x: f64,
+    #[serde(default)]
+    pub tilt_y: f64,
+    /// [`ToolAxis::Direction`]'s direction.
+    #[serde(default)]
+    pub axis_dx: f64,
+    #[serde(default)]
+    pub axis_dy: f64,
+    #[serde(default = "one")]
+    pub axis_dz: f64,
+    /// Where machine X comes from.
+    #[serde(default)]
+    pub machine_x: MachineX,
+    /// The edge picked for [`MachineX::Edge`].
+    #[serde(default)]
+    pub x_pick: Option<AxisPick>,
     #[serde(default)]
     pub zero: Zero,
     /// The point picked for [`Zero::Picked`].
@@ -216,6 +316,15 @@ impl SetupData {
             length: hundred(),
             z_axis: Axis::PosZ,
             x_axis: Axis::PosX,
+            tool_axis: ToolAxis::Square,
+            axis_pick: None,
+            tilt_x: 0.0,
+            tilt_y: 0.0,
+            axis_dx: 0.0,
+            axis_dy: 0.0,
+            axis_dz: 1.0,
+            machine_x: MachineX::Axis,
+            x_pick: None,
             zero: Zero::StockCorner,
             zero_point: None,
             offset_x: 0.0,
@@ -254,9 +363,10 @@ impl SetupData {
                     diameter: self.diameter,
                     length: self.length,
                     // Up the tool, its top flush with the bodies', as a
-                    // fixed box's; lying, centred on them.
+                    // fixed box's; lying, centred on them. A tilted setup
+                    // lays it out in its own axes, up the tool its Z.
                     place: match self.cylinder_axis {
-                        CylinderAxis::Tool if is_positive(self.z_axis) => {
+                        CylinderAxis::Tool if !self.square() || is_positive(self.z_axis) => {
                             Place::Max { offset: 0.0 }
                         }
                         CylinderAxis::Tool => Place::Min { offset: 0.0 },
@@ -273,13 +383,22 @@ impl SetupData {
         }
     }
 
-    /// The document axis a cylinder of stock lies along: the setup's axis
-    /// it is set to lie along, as the part sits.
+    /// The axis a cylinder of stock lies along: the setup's axis it is set
+    /// to lie along, as the part sits, as a document axis; for a tilted
+    /// setup, which lays its stock out in its own axes, that axis itself.
     fn cylinder_model_axis(&self) -> BarAxis {
+        if !self.square() {
+            return match self.cylinder_axis {
+                CylinderAxis::Tool => BarAxis::Z,
+                CylinderAxis::X => BarAxis::X,
+                CylinderAxis::Y => BarAxis::Y,
+            };
+        }
+        let y = self.z_axis.vector().cross(self.x_axis.vector());
         let along = match self.cylinder_axis {
             CylinderAxis::Tool => self.z_axis.vector(),
             CylinderAxis::X => self.x_axis.vector(),
-            CylinderAxis::Y => self.z_axis.vector().cross(self.x_axis.vector()),
+            CylinderAxis::Y => y,
         };
         if along.x != 0.0 {
             BarAxis::X
@@ -290,13 +409,98 @@ impl SetupData {
         }
     }
 
-    pub fn orientation(&self) -> Orientation {
-        Orientation::square(self.z_axis, self.x_axis)
+    /// Whether the part sits square on the table, its tool axis and machine
+    /// X both along the document's axes; otherwise it is tilted.
+    pub fn square(&self) -> bool {
+        self.tool_axis == ToolAxis::Square && self.machine_x == MachineX::Axis
+    }
+
+    /// The tool axis [`ToolAxis::Tilt`] gives: the document's +Z turned
+    /// `tilt_x` about its X, then `tilt_y` about its Y. What rounds to
+    /// nothing is nothing, so no tilt is +Z exactly.
+    pub fn tilted(&self) -> [f64; 3] {
+        let (sa, ca) = self.tilt_x.to_radians().sin_cos();
+        let (sb, cb) = self.tilt_y.to_radians().sin_cos();
+        [ca * sb, -sa, ca * cb].map(|v| if v.abs() < 1e-12 { 0.0 } else { v })
+    }
+
+    /// Which way the tool axis points, as near as the panel knows: a picked
+    /// one as the view saw it. The helper finds it exactly.
+    pub fn up(&self) -> [f64; 3] {
+        let unit = |v: [f64; 3]| {
+            let l = v.iter().map(|c| c * c).sum::<f64>().sqrt();
+            if l > 0.0 && l.is_finite() {
+                v.map(|c| c / l)
+            } else {
+                [0.0, 0.0, 1.0]
+            }
+        };
+        let axis = self.z_axis.vector().to_array();
+        match self.tool_axis {
+            ToolAxis::Square => axis,
+            ToolAxis::Face | ToolAxis::Edge => {
+                self.axis_pick.as_ref().map_or(axis, |p| unit(p.up()))
+            }
+            ToolAxis::Tilt => self.tilted(),
+            ToolAxis::Direction => unit([self.axis_dx, self.axis_dy, self.axis_dz]),
+        }
+    }
+
+    /// The document axis machine X is taken from for a tilted tool axis:
+    /// `x_axis`, or, where the tool points nearly along it, the first of X
+    /// and Y that it does not, so X can be made square to the tool.
+    fn level_x(&self) -> Axis {
+        let up = self.up();
+        let off = |a: Axis| {
+            let v = a.vector();
+            (v.x * up[0] + v.y * up[1] + v.z * up[2]).abs() < 0.999
+        };
+        [self.x_axis, Axis::PosX, Axis::PosY]
+            .into_iter()
+            .find(|&a| off(a))
+            .unwrap_or(Axis::PosZ)
+    }
+
+    /// How the part sits, as camcraft has it: picks on the bodies by the
+    /// models `model_of` names them as.
+    pub fn orientation(&self, model_of: impl Fn(&str) -> Option<String>) -> Orientation {
+        let pick = |p: &AxisPick| FeatureRef {
+            model: model_of(&p.body).unwrap_or_else(|| p.body.clone()),
+            // Found again by its point, as a pick is.
+            index: u32::MAX,
+            at: p.at,
+        };
+        let edge = |p: &AxisPick| Direction::Edge {
+            edge: pick(p),
+            toward: Some(p.toward),
+            reverse: p.reverse,
+        };
+        let z = match (self.tool_axis, &self.axis_pick) {
+            (ToolAxis::Face, Some(p)) => Direction::Face {
+                face: pick(p),
+                reverse: p.reverse,
+            },
+            (ToolAxis::Edge, Some(p)) => edge(p),
+            (ToolAxis::Tilt, _) => Direction::Vector(self.tilted()),
+            (ToolAxis::Direction, _) => {
+                Direction::Vector([self.axis_dx, self.axis_dy, self.axis_dz])
+            }
+            _ => Direction::Axis(self.z_axis),
+        };
+        let x = match (self.machine_x, &self.x_pick) {
+            (MachineX::Edge, Some(p)) => edge(p),
+            _ if self.tool_axis == ToolAxis::Square => Direction::Axis(self.x_axis),
+            _ => Direction::Axis(self.level_x()),
+        };
+        Orientation { z, x }
     }
 
     /// Make the X axis square to Z again after Z changed.
     pub fn square_axes(&mut self) {
-        if self.orientation().check().is_err() {
+        if Orientation::square(self.z_axis, self.x_axis)
+            .check()
+            .is_err()
+        {
             self.x_axis = Axis::ALL
                 .into_iter()
                 .find(|&x| Orientation::square(self.z_axis, x).check().is_ok())
@@ -353,7 +557,19 @@ impl SetupData {
         if !(1.0..=99.0).contains(&self.wcs) {
             return Some("The work offset must be 54 to 59, or another the machine has.".into());
         }
-        if let Err(e) = self.orientation().check() {
+        match (self.tool_axis, &self.axis_pick) {
+            (ToolAxis::Face, None) => {
+                return Some("Pick the flat face the tool axis comes out of.".into());
+            }
+            (ToolAxis::Edge, None) => {
+                return Some("Pick the straight edge the tool axis lies along.".into());
+            }
+            _ => {}
+        }
+        if self.machine_x == MachineX::Edge && self.x_pick.is_none() {
+            return Some("Pick the straight edge machine X lies along.".into());
+        }
+        if let Err(e) = self.orientation(|b| Some(b.to_string())).check() {
             return Some(e.to_string());
         }
         None
@@ -720,6 +936,10 @@ fn hundred() -> f64 {
     100.0
 }
 
+fn one() -> f64 {
+    1.0
+}
+
 /// Whether `a` points the way its document axis does.
 fn is_positive(a: Axis) -> bool {
     matches!(a, Axis::PosX | Axis::PosY | Axis::PosZ)
@@ -887,7 +1107,7 @@ pub fn job(
     camcraft.stocks = vec!["stock".into()];
     camcraft.wcs = setup.wcs.round().clamp(1.0, 99.0) as u8;
     camcraft.post = setup.post.clone();
-    camcraft.orientation = setup.orientation();
+    camcraft.orientation = setup.orientation(model_of);
     let offset = [setup.offset_x, setup.offset_y, setup.offset_z];
     camcraft.origin = match (&setup.zero, &setup.zero_point) {
         (Zero::Picked, Some(z)) if let Some(model) = model_of(&z.body) => Origin::Point {
@@ -1274,5 +1494,108 @@ mod tests {
         let text = camcraft_session::job_text(&job).unwrap();
         assert_eq!(camcraft_session::parse_job(&text, "t").unwrap(), job);
         assert_eq!(SetupData::from(&setup.to_value()).unwrap(), setup);
+    }
+
+    /// A tilted setup survives the document and camcraft's job file: its
+    /// tool axis picked on a face, by its body's model, and machine X along
+    /// a picked edge, the way the view saw it.
+    #[test]
+    fn a_tilted_setup_reads_back_as_camcraft_writes_it() {
+        use camcraft_core::setup::frame::Direction;
+        let mut setup = SetupData::new(vec!["b1".into()], "linuxcnc", 0.05);
+        let models = models_of(&setup, |_| Some("Wedge".into()));
+        let round_trip = |setup: &SetupData| {
+            assert_eq!(SetupData::from(&setup.to_value()).unwrap(), *setup);
+            let job = job("S", setup, &models, &[]);
+            let text = camcraft_session::job_text(&job).unwrap();
+            let back = camcraft_session::parse_job(&text, "t").unwrap();
+            assert_eq!(back, job);
+            back.setups[0].orientation.clone()
+        };
+        assert_eq!(round_trip(&setup), Orientation::default());
+        assert!(setup.square());
+
+        setup.tool_axis = ToolAxis::Face;
+        assert!(setup.problem().unwrap().contains("Pick the flat face"));
+        setup.axis_pick = Some(AxisPick {
+            body: "b1".into(),
+            at: [5.0, 10.0, 5.0],
+            toward: [0.0, -0.447, 0.894],
+            reverse: false,
+        });
+        assert_eq!(setup.problem(), None);
+        setup.machine_x = MachineX::Edge;
+        assert!(setup.problem().unwrap().contains("machine X"));
+        setup.x_pick = Some(AxisPick {
+            body: "b1".into(),
+            at: [5.0, 0.0, 0.0],
+            toward: [-1.0, 0.0, 0.0],
+            reverse: true,
+        });
+        let o = round_trip(&setup);
+        let Direction::Face { face, reverse } = &o.z else {
+            panic!("{o:?}");
+        };
+        assert_eq!(
+            (face.model.as_str(), face.at, *reverse),
+            ("Wedge", [5.0, 10.0, 5.0], false)
+        );
+        let Direction::Edge {
+            toward, reverse, ..
+        } = &o.x
+        else {
+            panic!("{o:?}");
+        };
+        assert_eq!((*toward, *reverse), (Some([-1.0, 0.0, 0.0]), true));
+        let up = setup.up();
+        let l = (0.447f64 * 0.447 + 0.894 * 0.894).sqrt();
+        assert!((up[1] + 0.447 / l).abs() < 1e-12 && (up[2] - 0.894 / l).abs() < 1e-12);
+        assert!(!setup.square());
+
+        // Tilted by angles: 30° about X leans the tool toward -Y; machine X
+        // stays the document's, made square to it.
+        setup.tool_axis = ToolAxis::Tilt;
+        setup.machine_x = MachineX::Axis;
+        setup.tilt_x = 30.0;
+        let o = round_trip(&setup);
+        let (s, c) = 30f64.to_radians().sin_cos();
+        let Direction::Vector(v) = o.z else {
+            panic!("{o:?}");
+        };
+        assert!((v[0]).abs() < 1e-15 && (v[1] + s).abs() < 1e-15 && (v[2] - c).abs() < 1e-15);
+        assert_eq!(o.x, Direction::Axis(Axis::PosX));
+        // Tilted on its side, nearly along X: machine X is taken from Y.
+        setup.tilt_x = 0.0;
+        setup.tilt_y = 90.0;
+        assert_eq!(round_trip(&setup).x, Direction::Axis(Axis::PosY));
+        assert_eq!(setup.tilted(), [1.0, 0.0, 0.0]);
+
+        // A direction of no length is said to be.
+        setup.tool_axis = ToolAxis::Direction;
+        (setup.axis_dx, setup.axis_dy, setup.axis_dz) = (0.0, 0.0, 0.0);
+        assert!(setup.problem().unwrap().contains("no length"));
+        setup.axis_dz = 1.0;
+        assert_eq!(setup.problem(), None);
+    }
+
+    /// A tilted setup lays its stock out in its own axes: a cylinder up the
+    /// tool is along its Z, and a fixed one's top flush with the bodies'.
+    #[test]
+    fn a_tilted_setups_cylinder_lies_along_its_own_axes() {
+        let mut setup = SetupData::new(vec!["b1".into()], "grbl", 0.05);
+        setup.tool_axis = ToolAxis::Tilt;
+        setup.tilt_x = 20.0;
+        setup.z_axis = Axis::NegY;
+        setup.stock = StockKind::Cylinder;
+        setup.cylinder_fixed = true;
+        let StockSpec::FixedCylinder(c) = setup.stock_spec() else {
+            panic!();
+        };
+        assert_eq!((c.axis, c.place), (BarAxis::Z, Place::Max { offset: 0.0 }));
+        setup.cylinder_axis = CylinderAxis::Y;
+        let StockSpec::FixedCylinder(c) = setup.stock_spec() else {
+            panic!();
+        };
+        assert_eq!((c.axis, c.place), (BarAxis::Y, Place::Center {}));
     }
 }
