@@ -3,8 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    Depths, FixedBox, JOB_VERSION, Job, JobError, Operation, Origin, Retraction, StockSpec,
-    StockToLeave, StrategySpec, ToolSpec,
+    Depths, FixedBox, FixedCylinder, JOB_VERSION, Job, JobError, Operation, Origin, Retraction,
+    StockSpec, StockToLeave, StrategySpec, ToolSpec,
 };
 use crate::is_positive;
 
@@ -75,43 +75,43 @@ impl Job {
 
         for stock in &self.stocks {
             let field = |f: &str| format!("stock '{}'.{f}", stock.name);
+            for m in stock.spec.models() {
+                if self.model(m).is_none() {
+                    return Err(JobError::UnknownModel {
+                        owner: format!("stock '{}'", stock.name),
+                        model: m.clone(),
+                    });
+                }
+            }
             match &stock.spec {
-                StockSpec::AroundModels {
-                    models,
-                    margin,
-                    below,
-                } => {
-                    for m in models {
-                        if self.model(m).is_none() {
-                            return Err(JobError::UnknownModel {
-                                owner: format!("stock '{}'", stock.name),
-                                model: m.clone(),
-                            });
-                        }
-                    }
+                StockSpec::AroundModels { margin, below, .. } => {
                     for (i, v) in margin.iter().chain(std::iter::once(below)).enumerate() {
                         at_least_zero(&field(if i < 3 { "margin" } else { "below" }), *v)?;
                     }
                 }
-                StockSpec::FixedBox(FixedBox {
-                    size,
-                    models,
-                    place,
-                }) => {
-                    for m in models {
-                        if self.model(m).is_none() {
-                            return Err(JobError::UnknownModel {
-                                owner: format!("stock '{}'", stock.name),
-                                model: m.clone(),
-                            });
-                        }
-                    }
+                StockSpec::FixedBox(FixedBox { size, place, .. }) => {
                     for v in place.iter().filter_map(|p| p.value()) {
                         finite(&field("place"), v)?;
                     }
                     for v in size {
                         positive(&field("size"), *v)?;
                     }
+                }
+                StockSpec::CylinderAroundModels { margin, ends, .. } => {
+                    at_least_zero(&field("margin"), *margin)?;
+                    at_least_zero(&field("ends"), *ends)?;
+                }
+                StockSpec::FixedCylinder(FixedCylinder {
+                    diameter,
+                    length,
+                    place,
+                    ..
+                }) => {
+                    if let Some(v) = place.value() {
+                        finite(&field("place"), v)?;
+                    }
+                    positive(&field("diameter"), *diameter)?;
+                    positive(&field("length"), *length)?;
                 }
             }
         }

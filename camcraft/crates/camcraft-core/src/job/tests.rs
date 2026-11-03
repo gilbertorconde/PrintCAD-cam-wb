@@ -150,6 +150,25 @@ fn a_job_round_trips() {
             ],
         }),
     });
+    j.stocks.push(StockDef {
+        name: "bar".into(),
+        spec: StockSpec::CylinderAroundModels {
+            models: vec!["part".into()],
+            axis: BarAxis::X,
+            margin: 2.0,
+            ends: 1.5,
+        },
+    });
+    j.stocks.push(StockDef {
+        name: "puck".into(),
+        spec: StockSpec::FixedCylinder(FixedCylinder {
+            models: vec![],
+            axis: BarAxis::Z,
+            diameter: 80.0,
+            length: 20.0,
+            place: Place::Max { offset: 1.0 },
+        }),
+    });
     let mut unfinished = j.setups[0].operations[1].clone();
     unfinished.tool = None;
     bottom.operations = vec![unfinished];
@@ -166,6 +185,31 @@ fn a_job_round_trips() {
     assert!(!plain.contains("orientation"), "{plain}");
     assert!(!plain.contains("below"), "{plain}");
     assert!(!plain.contains("transform"), "{plain}");
+}
+
+/// A round bar is read as written, its place along its axis centred when
+/// not given; and one with no size is refused.
+#[test]
+fn a_cylinder_reads_as_written() {
+    let text = format!(
+        "{SAMPLE}\n[[stock]]\nname = \"bar\"\nkind = \"fixed-cylinder\"\naxis = \"y\"\n\
+         diameter = 25.0\nlength = 120.0\n"
+    );
+    let j: Job = toml::from_str(&text).unwrap();
+    assert_eq!(
+        j.stock("bar").unwrap().spec,
+        StockSpec::FixedCylinder(FixedCylinder {
+            models: vec![],
+            axis: BarAxis::Y,
+            diameter: 25.0,
+            length: 120.0,
+            place: Place::Center {},
+        })
+    );
+    j.validate().unwrap();
+    let flat = text.replace("diameter = 25.0", "diameter = 0.0");
+    let j: Job = toml::from_str(&flat).unwrap();
+    assert!(j.validate().is_err());
 }
 
 /// A fixed box is written with a place on each axis, and read back the same.

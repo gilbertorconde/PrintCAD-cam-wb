@@ -15,15 +15,15 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use cam_protocol::{
-    Finding, HeightPlane, IDENTITY, Level, Mark, Material, OperationRun, Program, Request, Run,
-    Stroke, VERSION,
+    Cylinder, Finding, HeightPlane, IDENTITY, Level, Mark, Material, OperationRun, Program,
+    Request, Run, Stroke, VERSION,
 };
 use camcraft_core::job::{HeightContext, Operation, Outline};
 use camcraft_core::path::toolpath::{MoveRole, Toolpath};
 use camcraft_core::run::Made;
 use camcraft_core::run::{PLUNGE_RATIO, Stage};
 use camcraft_core::setup::frame::Frame;
-use camcraft_core::setup::{Bodies, Prepared, features, prepare};
+use camcraft_core::setup::{Bodies, Prepared, bounds_all, features, prepare};
 use camcraft_geom::mesh::Aabb;
 use camcraft_import::native::load_native;
 use camcraft_post::op::lower_counted;
@@ -33,6 +33,7 @@ use camcraft_session::checks::Level as CheckLevel;
 use camcraft_session::{
     Model, Models, Ran, load_profile, parse_job, program_spec, run_setup_planned,
 };
+use camcraft_sim::stock::{Axis, Block};
 use glam::{DAffine3, DMat4, DVec2, DVec3};
 
 /// How many columns a side the drawn material has, at most.
@@ -177,7 +178,7 @@ pub(crate) fn execute(
 
     let frame = ran.result.frame;
     let tolerance = job.tolerance.max(0.02);
-    let stock_box = Aabb::union_all(&ran.result.stocks);
+    let stock_box = bounds_all(&ran.result.stocks);
     let bodies: Bodies<'_> = loaded.iter().map(|(n, m)| (*n, &m.body)).collect();
     // Laid out again only for a height measured from the picks.
     let mut prepared: Option<Option<Prepared>> = None;
@@ -305,6 +306,7 @@ pub(crate) fn execute(
             .collect(),
         warnings: ran.warnings.clone(),
         stock,
+        cylinder: cylinder(&frame, &ran.result.stocks),
         origin: to_array(frame.to_model(DVec3::ZERO)),
         operations,
         material: material(&ran),
@@ -466,6 +468,66 @@ fn planes(op: &Operation, ctx: &HeightContext, stock: Aabb, frame: &Frame) -> Ve
         })
     })
     .collect()
+}
+
+/// The stock as a round bar, in the model's coordinates, when it is one.
+fn cylinder(frame: &Frame, blocks: &[Block]) -> Option<Cylinder> {
+    let [Block::Bar(bar)] = blocks else {
+        return None;
+    };
+    let along = match bar.axis {
+        Axis::X => DVec3::X,
+        Axis::Y => DVec3::Y,
+        Axis::Z => DVec3::Z,
+    } * (bar.length * 0.5);
+    Some(Cylinder {
+        ends: [
+            to_array(frame.to_model(bar.centre - along)),
+            to_array(frame.to_model(bar.centre + along)),
+        ],
+        radius: bar.radius,
+    })
+}
+
+/// Whether there is stock at the start, or within `grow` of it, under each
+/// corner of a square of a grid from `lo` to `lo + step`: a square of a grid
+/// drawn over the stock's box is drawn only where there is, so round stock
+/// leaves its box's corners empty rather than flat at its foot, and its edge
+/// is not drawn falling to it.
+pub(crate) fn stocked(blocks: &[Block], lo: DVec2, step: DVec2, grow: f64) -> bool {
+    [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)]
+        .into_iter()
+        .all(|(i, j)| {
+            let p = lo + step * DVec2::new(i, j);
+            blocks.iter().any(|b| b.top_near(p, grow).is_some())
+        })
+}
+
+/// The triangles of a grid of `nx` by `ny` points, row by row from
+/// `origin`, `step` apart: two a square, of each square over the stock.
+pub(crate) fn grid_indices(
+    nx: usize,
+    ny: usize,
+    origin: DVec2,
+    step: DVec2,
+    blocks: &[Block],
+) -> Vec<u32> {
+    let mut indices = Vec::with_capacity((nx - 1) * (ny - 1) * 6);
+    for j in 0..ny - 1 {
+        for i in 0..nx - 1 {
+            let corner = origin + step * DVec2::new(i as f64, j as f64);
+            // A rounding error past the box's edge is on it.
+            if !stocked(blocks, corner, step, 1e-6 * step.max_element()) {
+                continue;
+            }
+            let a = (j * nx + i) as u32;
+            let b = a + 1;
+            let c = a + nx as u32;
+            let d = c + 1;
+            indices.extend([a, b, d, a, d, c]);
+        }
+    }
+    indices
 }
 
 /// A box in the setup's frame as low and high corners in the model's.
@@ -641,16 +703,7 @@ fn material(ran: &Ran) -> Option<Material> {
             positions.push(to_f32(r.frame.to_model(p.extend(z))));
         }
     }
-    let mut indices = Vec::with_capacity((nx - 1) * (ny - 1) * 6);
-    for j in 0..ny - 1 {
-        for i in 0..nx - 1 {
-            let a = (j * nx + i) as u32;
-            let b = a + 1;
-            let c = a + nx as u32;
-            let d = c + 1;
-            indices.extend([a, b, d, a, d, c]);
-        }
-    }
+    let indices = grid_indices(nx, ny, lo, step, &r.stocks);
     Some(Material { positions, indices })
 }
 

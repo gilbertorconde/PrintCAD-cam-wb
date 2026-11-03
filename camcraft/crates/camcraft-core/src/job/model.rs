@@ -109,6 +109,96 @@ pub enum StockSpec {
     },
     /// A box of a fixed size, placed against models.
     FixedBox(FixedBox),
+    /// A round bar around models: its axis along `axis` through the middle of
+    /// their box, its radius `margin` more than the farthest they reach from
+    /// it, and `ends` longer than they are at each end.
+    CylinderAroundModels {
+        /// The models it is around, by name. Empty means the models of whichever
+        /// setup uses it.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        models: Vec<String>,
+        /// The model axis it lies along.
+        axis: BarAxis,
+        /// Extra material all round.
+        #[serde(default)]
+        margin: f64,
+        /// Extra length at each end.
+        #[serde(default)]
+        ends: f64,
+    },
+    /// A round bar of a fixed size, placed against models.
+    FixedCylinder(FixedCylinder),
+}
+
+impl StockSpec {
+    /// The models it is placed against, by name. Empty means the models of
+    /// whichever setup uses it.
+    pub fn models(&self) -> &[String] {
+        match self {
+            StockSpec::AroundModels { models, .. }
+            | StockSpec::FixedBox(FixedBox { models, .. })
+            | StockSpec::CylinderAroundModels { models, .. }
+            | StockSpec::FixedCylinder(FixedCylinder { models, .. }) => models,
+        }
+    }
+}
+
+/// A model axis, as a round bar lies along it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BarAxis {
+    /// Along X.
+    X,
+    /// Along Y.
+    Y,
+    /// Along Z.
+    #[default]
+    Z,
+}
+
+impl BarAxis {
+    /// Which coordinate (0, 1 or 2).
+    pub fn index(self) -> usize {
+        match self {
+            BarAxis::X => 0,
+            BarAxis::Y => 1,
+            BarAxis::Z => 2,
+        }
+    }
+
+    /// The unit vector along it.
+    pub fn vector(self) -> DVec3 {
+        match self {
+            BarAxis::X => DVec3::X,
+            BarAxis::Y => DVec3::Y,
+            BarAxis::Z => DVec3::Z,
+        }
+    }
+}
+
+/// A round bar of a fixed size, as one bought to size is: centred on the box of
+/// the models across its axis, and placed against it along its axis as a fixed
+/// box is on each of its, so it follows them when they move.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FixedCylinder {
+    /// The models it is placed against, by name. Empty means the models of
+    /// whichever setup uses it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<String>,
+    /// The model axis it lies along.
+    pub axis: BarAxis,
+    /// Its diameter.
+    pub diameter: f64,
+    /// Its length.
+    pub length: f64,
+    /// Where it sits along its axis; centred when not said.
+    #[serde(default = "centred")]
+    pub place: Place,
+}
+
+fn centred() -> Place {
+    Place::Center {}
 }
 
 impl Default for StockSpec {

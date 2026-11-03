@@ -3,8 +3,7 @@
 
 use std::sync::Arc;
 
-use camcraft_geom::mesh::Aabb;
-use camcraft_sim::stock::{PackedStock, PartSurface, SimReport, VerifyReport};
+use camcraft_sim::stock::{Block, PackedStock, PartSurface, SimReport, VerifyReport};
 use glam::DVec2;
 
 use crate::job::{Coolant, HeightContext, SpindleDirection};
@@ -165,7 +164,7 @@ pub struct SetupResult {
     /// Tolerance the comparison allowed.
     pub verify_budget: f64,
     /// Each block of stock.
-    pub stocks: Vec<Aabb>,
+    pub stocks: Vec<Block>,
     /// Footprint of all the stock in XY, lower corner.
     pub stock_min: DVec2,
     /// Footprint of all the stock in XY, upper corner.

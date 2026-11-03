@@ -9,9 +9,10 @@
 
 use std::io::{BufRead, Write};
 
-use cam_protocol::{SessionIn, SessionOut, SessionReady, StockPatch, base64, class};
+use cam_protocol::{SessionIn, SessionOut, SessionReady, StockPatch, base64, class, pack_bare};
 use camcraft_core::replay::{Changed, Live, Position, Replay};
-use glam::DVec3;
+use camcraft_sim::stock::Block;
+use glam::{DVec2, DVec3};
 
 use crate::{Executed, execute, to_f32};
 
@@ -115,12 +116,12 @@ fn open(request: &cam_protocol::Request) -> Result<(Kept, SessionReady), String>
     let low = r
         .stocks
         .iter()
-        .map(|b| b.min.z)
+        .map(|b| b.bounds().min.z)
         .fold(f64::INFINITY, f64::min);
     let high = r
         .stocks
         .iter()
-        .map(|b| b.max.z)
+        .map(Block::top)
         .fold(f64::NEG_INFINITY, f64::max);
     if (high - low).partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
         return Err("the stock has no height".into());
@@ -138,6 +139,22 @@ fn open(request: &cam_protocol::Request) -> Result<(Kept, SessionReady), String>
             t
         })
         .collect();
+    // Squares with no stock at the start, so round stock's box's corners
+    // are not drawn.
+    let squares = (0..rows.saturating_sub(1))
+        .flat_map(|j| (0..cols.saturating_sub(1)).map(move |i| (i, j)))
+        .map(|(i, j)| {
+            let corner = field.origin() + DVec2::new(f64::from(i), f64::from(j)) * step;
+            // The grid runs on past the box to whole cells, and the stock
+            // with it, a cell past a round edge at most.
+            !crate::stocked(&r.stocks, corner, DVec2::splat(step), pitch)
+        });
+    let bare: Vec<bool> = squares.collect();
+    let bare = if bare.contains(&true) {
+        base64(&pack_bare(bare))
+    } else {
+        String::new()
+    };
     let ready = SessionReady {
         cols,
         rows,
@@ -148,6 +165,7 @@ fn open(request: &cam_protocol::Request) -> Result<(Kept, SessionReady), String>
         low: low as f32,
         step: quantum as f32,
         times,
+        bare,
     };
     let band = r.verify_budget.max(1e-3);
     Ok((

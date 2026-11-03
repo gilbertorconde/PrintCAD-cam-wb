@@ -329,7 +329,10 @@ fn a_flat_face_between_levels_gets_a_level_of_its_own() {
         .collect();
     assert_eq!(p.flats, vec![10.5]);
     let area = rect(-20.0, -20.0, 60.0, 40.0);
-    let stocks = [(dvec2(-10.0, -10.0), dvec2(50.0, 30.0), 14.0)];
+    let stocks = [Block::Box(camcraft_geom::mesh::Aabb {
+        min: dvec3(-10.0, -10.0, 0.0),
+        max: dvec3(50.0, 30.0, 14.0),
+    })];
     let (path, report) = adaptive_rough(&mut reach, &area, &stocks, tool.base(), &p).unwrap();
     assert_eq!(report.flat_levels, 1, "{report:?}");
     // Something cut at the flat level, over the top of the block.

@@ -1,6 +1,7 @@
 use super::*;
-use crate::job::{Along, FixedBox, ModelDef, Place, StockDef};
+use crate::job::{Along, BarAxis, FixedBox, FixedCylinder, ModelDef, Place, StockDef};
 use crate::setup::frame::{Axis, Orientation};
+use camcraft_sim::stock::{Axis as FrameAxis, Bar, Block};
 use glam::dvec3;
 
 fn job(stock: StockSpec) -> Job {
@@ -49,8 +50,8 @@ fn the_default_setup_is_the_model_as_drawn() {
     });
     let p = prepare(&j, 0, &meshes).unwrap();
     assert_eq!(p.part, mesh);
-    assert_eq!(p.stocks[0].min, dvec3(-2.0, -2.0, 0.0));
-    assert_eq!(p.stocks[0].max, dvec3(12.0, 22.0, 8.0));
+    assert_eq!(p.stocks[0].bounds().min, dvec3(-2.0, -2.0, 0.0));
+    assert_eq!(p.stocks[0].bounds().max, dvec3(12.0, 22.0, 8.0));
 }
 
 /// A fixed box sits against the models' box on each axis, as Fusion's does:
@@ -66,7 +67,7 @@ fn a_fixed_box_is_placed_against_the_models() {
             models: vec![],
             place,
         });
-        prepare(&job(spec), 0, &meshes).unwrap().stocks[0]
+        prepare(&job(spec), 0, &meshes).unwrap().stocks[0].bounds()
     };
     // The brick is (0, 0, 0) to (10, 20, 5).
     let b = block([
@@ -108,7 +109,7 @@ fn a_fixed_box_can_be_placed_against_named_models() {
         units: None,
         transform: Default::default(),
     });
-    let b = prepare(&j, 0, &meshes).unwrap().stocks[0];
+    let b = prepare(&j, 0, &meshes).unwrap().stocks[0].bounds();
     assert_eq!(b.min, dvec3(100.0, 0.0, -1.0));
     assert_eq!(b.max, dvec3(110.0, 20.0, 5.0));
     assert_eq!(
@@ -137,7 +138,7 @@ fn a_flipped_setup_sees_the_underside() {
         offset: [0.0; 3],
     };
     let p = prepare(&j, 0, &meshes).unwrap();
-    let s = p.stocks[0];
+    let s = p.stocks[0].bounds();
     assert_eq!(s.max.z, 0.0);
     assert_eq!(s.min.z, -7.0);
     assert_eq!((s.min.x + s.max.x) / 2.0, 0.0);
@@ -169,7 +170,7 @@ fn two_setups_share_one_block() {
     j.setups.push(bottom);
     let top = prepare(&j, 0, &meshes).unwrap();
     let under = prepare(&j, 1, &meshes).unwrap();
-    let (a, b) = (top.stocks[0], under.stocks[0]);
+    let (a, b) = (top.stocks[0].bounds(), under.stocks[0].bounds());
     assert_eq!(a.extent(), b.extent());
     // Model zero stays zero, so the block's top is the top's 6 and the
     // bottom's 2.
@@ -191,6 +192,19 @@ fn a_stock_in_frame_is_where_prepare_puts_it() {
             below: 4.0,
         },
         StockSpec::FixedBox(FixedBox::at([-5.0, -5.0, -1.0], [30.0, 40.0, 9.0])),
+        StockSpec::CylinderAroundModels {
+            models: vec![],
+            axis: BarAxis::Y,
+            margin: 1.0,
+            ends: 2.0,
+        },
+        StockSpec::FixedCylinder(FixedCylinder {
+            models: vec![],
+            axis: BarAxis::Z,
+            diameter: 30.0,
+            length: 8.0,
+            place: Place::Max { offset: 1.0 },
+        }),
     ] {
         let mut j = job(spec.clone());
         j.setups[0].orientation = Orientation {
@@ -206,8 +220,90 @@ fn a_stock_in_frame_is_where_prepare_puts_it() {
         };
         let p = prepare(&j, 0, &meshes).unwrap();
         let placed = stock_in_frame(&spec, &j.setups[0].models, &p.frame, &meshes).unwrap();
-        assert_eq!(placed, p.stocks[0]);
+        assert_eq!(placed, p.stocks[0].bounds());
     }
+}
+
+/// A round bar round the bodies: its axis through the middle of their box,
+/// its radius the margin past the farthest of them from it, and the ends past
+/// theirs; turned with the part, it lies along the setup's axis the model's
+/// became.
+#[test]
+fn a_bar_is_round_the_bodies() {
+    let mesh = brick();
+    let body = Body::derived(mesh.clone());
+    let meshes: Bodies<'_> = [("m", &body)].into_iter().collect();
+    let mut j = job(StockSpec::CylinderAroundModels {
+        models: vec![],
+        axis: BarAxis::Z,
+        margin: 1.0,
+        ends: 2.0,
+    });
+    j.setups[0].origin = Origin::ModelOrigin { offset: [0.0; 3] };
+    let p = prepare(&j, 0, &meshes).unwrap();
+    // Every corner of the brick is 5 by 10 from its middle.
+    let reach = 125.0_f64.sqrt();
+    let Block::Bar(bar) = p.stocks[0] else {
+        panic!("{:?}", p.stocks[0]);
+    };
+    assert_eq!(bar.axis, FrameAxis::Z);
+    assert_eq!(bar.centre, dvec3(5.0, 10.0, 2.5));
+    assert!((bar.radius - (reach + 1.0)).abs() < 1e-12);
+    assert_eq!(bar.length, 9.0);
+    assert_eq!(p.heights().stock_top, 7.0);
+    assert_eq!(p.heights().stock_bottom, -2.0);
+
+    // The tool along the model's X, the machine's X along its Y: the bar
+    // along the model's Z lies along the machine's Y.
+    j.setups[0].orientation = Orientation {
+        z: Axis::PosX,
+        x: Axis::PosY,
+    };
+    let p = prepare(&j, 0, &meshes).unwrap();
+    let Block::Bar(turned) = p.stocks[0] else {
+        panic!("{:?}", p.stocks[0]);
+    };
+    assert_eq!(turned.axis, FrameAxis::Y);
+    assert_eq!(turned.centre, dvec3(10.0, 2.5, 5.0));
+    assert_eq!(p.heights().stock_top, 5.0 + bar.radius);
+}
+
+/// A round bar of a fixed size is centred on the bodies across its axis, and
+/// placed along it as a fixed box is: here its top a millimetre over theirs.
+#[test]
+fn a_fixed_bar_is_placed_against_the_bodies() {
+    let mesh = brick();
+    let body = Body::derived(mesh.clone());
+    let meshes: Bodies<'_> = [("m", &body)].into_iter().collect();
+    let mut j = job(StockSpec::FixedCylinder(FixedCylinder {
+        models: vec![],
+        axis: BarAxis::Z,
+        diameter: 30.0,
+        length: 8.0,
+        place: Place::Max { offset: 1.0 },
+    }));
+    j.setups[0].origin = Origin::ModelOrigin { offset: [0.0; 3] };
+    let p = prepare(&j, 0, &meshes).unwrap();
+    assert_eq!(
+        p.stocks[0],
+        Block::Bar(Bar {
+            axis: FrameAxis::Z,
+            centre: dvec3(5.0, 10.0, 2.0),
+            radius: 15.0,
+            length: 8.0,
+        })
+    );
+    // Lying along X, centred on them every way.
+    j.stocks[0].spec = StockSpec::FixedCylinder(FixedCylinder {
+        models: vec![],
+        axis: BarAxis::X,
+        diameter: 30.0,
+        length: 40.0,
+        place: Place::Center {},
+    });
+    let b = prepare(&j, 0, &meshes).unwrap().stocks[0].bounds();
+    assert_eq!(b.min, dvec3(-15.0, -5.0, -12.5));
+    assert_eq!(b.max, dvec3(25.0, 25.0, 17.5));
 }
 
 #[test]

@@ -51,6 +51,7 @@ use camcraft_geom::arc::Arc;
 use camcraft_geom::contour::{Contour, Region};
 use camcraft_geom::engagement::engaged;
 use camcraft_geom::mesh::TriMesh;
+use camcraft_sim::stock::Block;
 use glam::{DVec2, dvec3};
 use rayon::prelude::*;
 
@@ -211,13 +212,12 @@ pub fn flat_heights(mesh: &TriMesh, tolerance: f64) -> Vec<f64> {
 ///
 /// `reach` gives where the tool may not be, from the model. `area` is where its
 /// centre may go: past the stock's sides, so passes can start outside it, and
-/// within the operation's boundary. `stocks` are the blocks of material, each
-/// its footprint's corners and its top. `cutter` is the real tool, whose width
+/// within the operation's boundary. `stocks` are the blocks of material. `cutter` is the real tool, whose width
 /// at each height says how much of a terrace a level below cleared.
 pub fn adaptive_rough(
     reach: &mut LevelReach<'_>,
     area: &Region,
-    stocks: &[(DVec2, DVec2, f64)],
+    stocks: &[Block],
     cutter: &Cutter,
     params: &AdaptiveParams,
 ) -> Result<(Toolpath, AdaptiveReport), StrategyError> {
@@ -273,7 +273,12 @@ pub fn adaptive_rough(
             let Some(region) = allowed_at(*z) else {
                 return Ok(cuts);
             };
-            cuts.push(clear_level(*z, region, &material(stocks, *z)?, &level)?);
+            cuts.push(clear_level(
+                *z,
+                region,
+                &material(stocks, *z, level.arc)?,
+                &level,
+            )?);
             // Each flat level over what the levels of the slab below it left.
             for &f in flats {
                 let Some(region) = allowed_at(f) else {
@@ -350,12 +355,12 @@ pub fn adaptive_rough(
 fn clear_flat(
     f: f64,
     allowed: &Region,
-    stocks: &[(DVec2, DVec2, f64)],
+    stocks: &[Block],
     below: &[LevelCut],
     cutter: &Cutter,
     p: &LevelParams,
 ) -> Result<LevelCut, StrategyError> {
-    let mut uncut = Tiles::new(&material(stocks, f)?, 16.0 * p.radius)?;
+    let mut uncut = Tiles::new(&material(stocks, f, p.arc)?, 16.0 * p.radius)?;
     for cut in below {
         // The real tool's width that far above its tip.
         let wide = cutter.radius_at(f - cut.z);
@@ -440,12 +445,13 @@ fn helix(
     Some((start, turns))
 }
 
-/// The material at level `z`: every block whose top stands above it.
-fn material(stocks: &[(DVec2, DVec2, f64)], z: f64) -> Result<Region, StrategyError> {
+/// The material at level `z`: where each block stands above it, a round one's
+/// edge taken at most `tolerance` outside it.
+fn material(stocks: &[Block], z: f64, tolerance: f64) -> Result<Region, StrategyError> {
     let rings: Vec<Contour> = stocks
         .iter()
-        .filter(|(_, _, top)| *top > z + MATERIAL_THICKNESS)
-        .filter_map(|&(lo, hi, _)| Region::rectangle(lo, hi).rings().first().cloned())
+        .filter_map(|b| b.above(z + MATERIAL_THICKNESS, tolerance))
+        .filter_map(Contour::new)
         .collect();
     Ok(Region::union_of(&rings)?)
 }

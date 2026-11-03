@@ -84,7 +84,9 @@ pub use error::JobError;
 pub use geometry::{Boundary, Containment, MachiningBoundary, Outline, Selection};
 pub use heights::{Height, HeightContext, HeightRef, Heights, Picks};
 pub use linking::{Entry, LeadSizes, Leads, Linking, Retraction};
-pub use model::{FixedBox, LengthUnit, ModelDef, Place, StockDef, StockSpec, Transform};
+pub use model::{
+    BarAxis, FixedBox, FixedCylinder, LengthUnit, ModelDef, Place, StockDef, StockSpec, Transform,
+};
 pub use operation::Operation;
 pub use passes::{Finishing, FinishingSizes, Passes, StockToLeave, TabShape, Tabs};
 pub use pick::{FeatureRef, PointRef, Snap};
@@ -209,9 +211,7 @@ impl Job {
         };
         let mut want: BTreeSet<&str> = setup.models.iter().map(String::as_str).collect();
         for s in setup.stocks.iter().filter_map(|s| self.stock(s)) {
-            let (StockSpec::AroundModels { models, .. }
-            | StockSpec::FixedBox(FixedBox { models, .. })) = &s.spec;
-            want.extend(models.iter().map(String::as_str));
+            want.extend(s.spec.models().iter().map(String::as_str));
         }
         self.models
             .iter()

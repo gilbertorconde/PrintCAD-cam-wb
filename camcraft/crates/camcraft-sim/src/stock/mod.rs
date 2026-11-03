@@ -32,6 +32,7 @@
 //! its own types. The restriction is useful rather than merely tolerated: it keeps
 //! the simulator a geometry service that cannot quietly grow CAM opinions.
 
+mod block;
 mod packed;
 mod part;
 mod sweep;
@@ -45,6 +46,7 @@ use camcraft_geom::heightmap::{HeightMap, HeightMapError, cell_index};
 use glam::{DVec2, DVec3};
 use rayon::prelude::*;
 
+pub use block::{Axis, Bar, Block};
 pub use packed::PackedStock;
 pub use part::PartSurface;
 
@@ -295,6 +297,28 @@ pub fn classify(stock: f64, part: Option<(f64, f64)>, budget: f64, leftover_limi
     }
 }
 
+/// Raise `field` to `top` over the box from `lo` to `hi`: from the cell at or
+/// below its low edge to the one at or beyond its high edge, so a lone box
+/// covers the whole grid laid over it.
+fn raise_box(field: &mut HeightMap, lo: DVec2, hi: DVec2, top: f64) {
+    let (nx, ny, origin, pitch) = (field.nx(), field.ny(), field.origin(), field.pitch());
+    let span = |lo: f64, hi: f64, o: f64, n: u32| {
+        (
+            cell_index(((lo - o) / pitch + 1.0e-9).floor(), n),
+            cell_index(((hi - o) / pitch - 1.0e-9).ceil(), n),
+        )
+    };
+    let (x0, x1) = span(lo.x, hi.x, origin.x, nx);
+    let (y0, y1) = span(lo.y, hi.y, origin.y, ny);
+    for iy in y0..=y1 {
+        for ix in x0..=x1 {
+            if field.get(ix, iy).is_none_or(|h| h < top) {
+                field.set(ix, iy, top);
+            }
+        }
+    }
+}
+
 /// Cells added up as one part of a volume: fixed, so the parts, and the order
 /// they are added in, do not depend on how many threads there are.
 const VOLUME_CELLS: usize = 1 << 14;
@@ -328,6 +352,60 @@ impl Stock {
         floor: f64,
         pitch: f64,
     ) -> Result<Self, StockError> {
+        let mut field = Self::laid_over(boxes, floor, pitch)?;
+        for &(lo, hi, top) in boxes {
+            raise_box(&mut field, lo, hi, top);
+        }
+        Ok(Self { field, floor })
+    }
+
+    /// Several blocks, boxes or round bars, as one stock.
+    ///
+    /// As [`Stock::from_boxes`]: the field covers all of them, a cell takes the
+    /// highest top over it, and a cell none covers holds `floor`. A box is
+    /// taken to the cells at and beyond its edges, as there; a round bar is
+    /// taken to every point within half a cell of it, at the highest it stands
+    /// there, so the stock is never less than the bar, only as much more as the
+    /// grid cannot tell. Boxes alone make what [`Stock::from_boxes`] makes.
+    pub fn from_blocks(blocks: &[Block], floor: f64, pitch: f64) -> Result<Self, StockError> {
+        let boxes: Vec<(DVec2, DVec2, f64)> = blocks
+            .iter()
+            .map(|b| {
+                let a = b.bounds();
+                (a.min.truncate(), a.max.truncate(), a.max.z)
+            })
+            .collect();
+        let mut field = Self::laid_over(&boxes, floor, pitch)?;
+        for (block, &(lo, hi, top)) in blocks.iter().zip(&boxes) {
+            match block {
+                Block::Box(_) => raise_box(&mut field, lo, hi, top),
+                Block::Bar(_) => {
+                    let grow = 0.5 * field.pitch();
+                    for iy in 0..field.ny() {
+                        for ix in 0..field.nx() {
+                            let Some(top) =
+                                field.position(ix, iy).and_then(|p| block.top_near(p, grow))
+                            else {
+                                continue;
+                            };
+                            if field.get(ix, iy).is_none_or(|h| h < top) {
+                                field.set(ix, iy, top);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(Self { field, floor })
+    }
+
+    /// A field over every one of `boxes`, `(min, max, top)`, all at `floor`:
+    /// no material yet.
+    fn laid_over(
+        boxes: &[(DVec2, DVec2, f64)],
+        floor: f64,
+        pitch: f64,
+    ) -> Result<HeightMap, StockError> {
         let Some(&(min0, max0, _)) = boxes.first() else {
             return Err(StockError::NoBlocks);
         };
@@ -339,28 +417,7 @@ impl Stock {
             min = min.min(lo);
             max = max.max(hi);
         }
-        let mut field = HeightMap::covering(min, max, pitch, floor)?;
-        let (nx, ny, origin) = (field.nx(), field.ny(), field.origin());
-        // Cells from the one at or below a block's low edge to the one at or
-        // beyond its high edge: a lone block covers the whole grid, as `block`.
-        let span = |lo: f64, hi: f64, o: f64, n: u32| {
-            (
-                cell_index(((lo - o) / pitch + 1.0e-9).floor(), n),
-                cell_index(((hi - o) / pitch - 1.0e-9).ceil(), n),
-            )
-        };
-        for &(lo, hi, top) in boxes {
-            let (x0, x1) = span(lo.x, hi.x, origin.x, nx);
-            let (y0, y1) = span(lo.y, hi.y, origin.y, ny);
-            for iy in y0..=y1 {
-                for ix in x0..=x1 {
-                    if field.get(ix, iy).is_none_or(|h| h < top) {
-                        field.set(ix, iy, top);
-                    }
-                }
-            }
-        }
-        Ok(Self { field, floor })
+        Ok(HeightMap::covering(min, max, pitch, floor)?)
     }
 
     /// The material height field.

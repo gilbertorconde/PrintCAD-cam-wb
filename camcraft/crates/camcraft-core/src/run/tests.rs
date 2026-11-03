@@ -1243,3 +1243,139 @@ fn an_operation_left_out_keeps_the_keyframe_before_it() {
     assert_eq!(result.operations[0].made, Made::Disabled);
     assert_eq!(result.operations[1].made, Made::Skipped);
 }
+
+/// The plate faced 3 mm and then cleared round, adaptively, out of `stock`: the
+/// run, and each operation's cut length.
+fn faced_and_cleared(stock: crate::job::StockSpec) -> (SetupResult, [f64; 2]) {
+    use crate::job::{CutDirection, FaceDirection};
+    use crate::path::toolpath::MoveRole;
+    let plate = Body::derived(synthetic::plate_with_hole(20.0, 5.0, 4.0, 48));
+    let mut job: Job = toml::from_str(JOB).unwrap();
+    job.stocks[0].spec = stock;
+    let diameter = job.tools["rough"].diameter;
+    let mut face = job.setups[0].operations[0].clone();
+    face.name = "face".into();
+    face.strategy = StrategySpec::Face {
+        angle: 0.0,
+        direction: FaceDirection::BothWays,
+        pass_extension: 1.0,
+        stock_offset: 0.0,
+    };
+    face.passes.stepdown = Some(2.0);
+    face.passes.stepover = 0.9 * diameter;
+    face.passes.stock_to_leave = Default::default();
+    let mut clear = job.setups[0].operations[0].clone();
+    clear.strategy = StrategySpec::Adaptive {
+        direction: CutDirection::Climb,
+        flat_areas: false,
+    };
+    clear.passes.stepover = 0.6;
+    clear.passes.stock_to_leave = Default::default();
+    job.setups[0].operations = vec![face, clear];
+    job.validate().unwrap();
+    let bodies: Bodies<'_> = [("dome", &plate)].into_iter().collect();
+    let result = run_setup(&job, 0, &bodies).unwrap();
+    let cut = |o: &OperationResult| {
+        let mut from = None;
+        let mut length = 0.0;
+        for m in o.path.moves() {
+            if let Some(f) = from
+                && m.role == MoveRole::Cut
+            {
+                length += m.to.distance(f);
+            }
+            from = Some(m.to);
+        }
+        length
+    };
+    let lengths = [cut(&result.operations[0]), cut(&result.operations[1])];
+    (result, lengths)
+}
+
+/// Round stock up the tool, round the plate: facing takes off its disc and
+/// no more, adaptive clearing clears the ring round the plate, and neither
+/// cuts the air its box's corners would be, gouges, or warns of anything the
+/// box does not.
+#[test]
+fn round_stock_is_cut_where_it_is() {
+    use crate::job::{BarAxis, StockSpec};
+    use std::f64::consts::PI;
+    let (round, [round_face, round_clear]) = faced_and_cleared(StockSpec::CylinderAroundModels {
+        models: vec![],
+        axis: BarAxis::Z,
+        margin: 3.0,
+        ends: 3.0,
+    });
+    let Some(camcraft_sim::stock::Block::Bar(bar)) = round.stocks.first().copied() else {
+        panic!("{:?}", round.stocks);
+    };
+    // The plate's corners are 20√2 from its middle.
+    assert!(
+        (bar.radius - (800.0_f64.sqrt() + 3.0)).abs() < 1e-6,
+        "{bar:?}"
+    );
+    let r = bar.radius;
+    // The box round the same disc.
+    let (boxed, [box_face, box_clear]) = faced_and_cleared(StockSpec::AroundModels {
+        models: vec![],
+        margin: [r - 20.0, r - 20.0, 3.0],
+        below: 3.0,
+    });
+    for result in [&round, &boxed] {
+        assert!(result.is_clean(), "{:?}", result.warnings());
+        assert_eq!(result.verify.gouged, 0);
+        for op in &result.operations {
+            assert!(op.sim.is_clean(), "{}: {:?}", op.name, op.sim);
+            assert!(!op.path.has_unplanned_links(), "{}", op.name);
+        }
+    }
+    for w in round.warnings() {
+        assert!(boxed.warnings().contains(&w), "only round: {w}");
+    }
+    // Faced 3 mm: the disc, not the box, less the grid's edge.
+    let taken = round.operations[0].sim.removed_mm3;
+    let disc = PI * r * r * 3.0;
+    assert!((taken - disc).abs() < 0.03 * disc, "took {taken} of {disc}");
+    // Adaptive takes the ring round the plate and its hole, 5 deep, and no
+    // corners.
+    let taken = round.operations[1].sim.removed_mm3;
+    let ring = (PI * r * r - 40.0 * 40.0 + PI * 16.0) * 5.0;
+    assert!(
+        taken < 1.03 * ring && taken > 0.9 * ring,
+        "took {taken} of {ring}"
+    );
+    // The box's corners are air in the round stock: its passes are shorter.
+    assert!(
+        round_clear < 0.9 * box_clear,
+        "{round_clear} against {box_clear}"
+    );
+    // Facing goes over the box's footprint either way: the same passes.
+    assert!((round_face - box_face).abs() < 1e-6 * box_face);
+}
+
+/// A bar lying along X, the plate inside it: facing down to the plate's top
+/// takes off the bar's cap above it, the circle's segment along its length,
+/// and the run verifies.
+#[test]
+fn a_lying_bar_is_faced_down_its_curve() {
+    use crate::job::{BarAxis, FixedCylinder, Place, StockSpec};
+    let (result, _) = faced_and_cleared(StockSpec::FixedCylinder(FixedCylinder {
+        models: vec![],
+        axis: BarAxis::X,
+        diameter: 60.0,
+        length: 50.0,
+        place: Place::Center {},
+    }));
+    assert!(result.is_clean(), "{:?}", result.warnings());
+    assert_eq!(result.verify.gouged, 0);
+    for op in &result.operations {
+        assert!(op.sim.is_clean(), "{}: {:?}", op.name, op.sim);
+    }
+    // The plate is 5 high, so the bar's axis is at 2.5 and the plate's top
+    // 2.5 above it: the segment of the circle over that, 50 long.
+    let (r, d): (f64, f64) = (30.0, 2.5);
+    let segment = r * r * (d / r).acos() - d * (r * r - d * d).sqrt();
+    let taken = result.operations[0].sim.removed_mm3;
+    let cap = segment * 50.0;
+    assert!((taken - cap).abs() < 0.03 * cap, "took {taken} of {cap}");
+}
