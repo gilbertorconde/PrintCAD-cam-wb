@@ -79,6 +79,18 @@ panels, the drawing and the helper that runs camcraft.
   (`io.github.gilbertorconde.cam.operation`) belongs to a setup and runs in the
   document's order, each against what the one before left. Drag one in the
   tree to run it sooner or later, or under another setup.
+- **Patterns.** Any operation's toolpath can be repeated before it is
+  linked: in rows along X and Y (so many, so far apart), round a centre
+  (so many, over an angle, a whole turn by default), and mirrored about a
+  line along the setup's X or Y through a point, the original kept; given
+  together, the rows are copied round the centre and all of them
+  mirrored. Each number takes a formula. Every copy is linked, cut into
+  the material, simulated and checked, and drawn. A mirrored copy would
+  cut conventional where the original climbs, so each of its rings, and
+  each pass all at one level, is run the other way round; what cannot be
+  (a ramp, an adaptive pass, steered by the material ahead of it) is said.
+  A copy that goes further outside the stock than the original is a
+  warning.
 - **Picking in the view,** as camcraft's: a pick row in the panel arms it,
   and while it is armed, hovering shows what a click takes. An operation
   takes faces, and edges by the loop they go round at their height (an edge
@@ -196,6 +208,9 @@ local name = cam.operation{setup = setup.feature, strategy = "engrave", tool = "
 local keyway = cam.operation{setup = setup.feature, strategy = "slot", tool = "1/4 upcut",
                              sketches = {"<sketch id>"}, pattern = "directional",
                              passes = {depth = 4}, stepdown = 1}
+local three = cam.operation{setup = setup.feature, strategy = "pocket", tool = "1/4 upcut",
+                            transform = {linear = true, x_count = 3, x_spacing = 25,
+                                       mirror = true, mirror_axis = "x", through_y = 0}}
 local deburr = cam.operation{setup = setup.feature, strategy = "chamfer", tool = "90° V-bit",
                              passes = {chamfer_width = 0.8, tip_offset = 0.3}}
 local letters = cam.operation{setup = setup.feature, strategy = "v-carve", tool = "60° V-bit",

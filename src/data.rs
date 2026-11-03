@@ -682,6 +682,10 @@ pub struct OperationData {
     /// before they could be set.
     #[serde(default)]
     pub passes: PassesData,
+    /// Its toolpath repeated in rows, round a centre, or mirrored; none for
+    /// a document from before it could be.
+    #[serde(default)]
+    pub transform: crate::pattern::PatternData,
     #[serde(default)]
     pub faces: Vec<Pick>,
     #[serde(default)]
@@ -717,6 +721,7 @@ impl OperationData {
             heights: HeightsData::default(),
             linking: LinkingData::default(),
             passes: PassesData::default(),
+            transform: Default::default(),
             faces: Vec::new(),
             edges: Vec::new(),
             sketches: Vec::new(),
@@ -757,6 +762,7 @@ impl OperationData {
         self.heights = HeightsData::of(&op.heights);
         self.linking = LinkingData::of(&op.linking);
         self.passes = PassesData::of(op);
+        self.transform = crate::pattern::PatternData::of(&op.transform);
     }
 
     /// The operation as it cuts: its numbers written in.
@@ -794,6 +800,7 @@ impl OperationData {
         self.passes.apply(&mut op);
         op.boundary.margin = self.margin;
         op.heights = self.heights.heights();
+        op.transform = self.transform.pattern();
         op
     }
 
@@ -860,6 +867,8 @@ impl OperationData {
         op.passes.feed = self.feed;
         op.passes.rpm = self.operation.passes.rpm;
         op.linking.plunge_feed = self.plunge;
+        // Repeated as it was, whatever it cuts.
+        op.transform = self.transform.pattern();
         start_on_silhouette(&mut op);
         fit_stepover(&mut op, tool, None, tolerance);
         fit_channel(&mut op, tool);
