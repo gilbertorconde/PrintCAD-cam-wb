@@ -29,6 +29,11 @@ pub struct Computed {
     pub key: u64,
     /// The request, while it waits.
     request: Option<String>,
+    /// The request the run under way, or ready, was started from: what a
+    /// playback session runs again, so it plays what is shown even when
+    /// the document has moved on unseen (an edit in the Data panel, an
+    /// undo).
+    ran: Option<String>,
     pub state: State,
     /// What it had last time it ran, shown while it runs again.
     pub last: Option<Box<Run>>,
@@ -47,6 +52,14 @@ impl Computed {
         }
     }
 
+    /// The request a ready run came from.
+    pub fn ran_from(&self) -> Option<&str> {
+        match self.state {
+            State::Ready(_) => self.ran.as_deref(),
+            _ => None,
+        }
+    }
+
     /// Whether what is shown is not for the setup as it now is.
     pub fn stale(&self) -> bool {
         !matches!(self.state, State::Ready(_))
@@ -58,6 +71,7 @@ impl Computed {
         Self {
             key: 0,
             request: None,
+            ran: None,
             state: State::Ready(Box::new(run)),
             last: None,
             operations,
@@ -97,6 +111,7 @@ impl Runs {
             Computed {
                 key,
                 request: Some(request),
+                ran: None,
                 state: State::Queued,
                 last,
                 operations,
@@ -114,6 +129,7 @@ impl Runs {
             Computed {
                 key: 0,
                 request: None,
+                ran: None,
                 state: State::Failed(why),
                 last,
                 operations: Vec::new(),
@@ -164,6 +180,7 @@ impl Runs {
             Ok(job) => State::Running(job),
             Err(e) => State::Failed(e),
         };
+        c.ran = Some(request);
         if matches!(c.state, State::Failed(_)) {
             self.pump();
         }
@@ -196,4 +213,35 @@ fn digest(text: &str) -> u64 {
     text.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
         (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use cam_protocol::Response;
+
+    use super::*;
+
+    /// A run that comes back keeps the request it was started from, for a
+    /// playback session to run again as it was.
+    #[test]
+    fn a_ready_run_knows_what_it_ran_from() {
+        let mut runs = Runs::default();
+        runs.setups.insert(
+            "s".into(),
+            Computed {
+                key: digest("asked"),
+                request: None,
+                ran: Some("asked".into()),
+                state: State::Running(7),
+                last: None,
+                operations: Vec::new(),
+            },
+        );
+        assert_eq!(runs.get("s").unwrap().ran_from(), None, "not back yet");
+        let answer = serde_json::to_string(&Response::Ran(Box::default())).unwrap();
+        assert_eq!(runs.finished(7, &Ok(answer)).as_deref(), Some("s"));
+        let c = runs.get("s").unwrap();
+        assert_eq!(c.ran_from(), Some("asked"));
+        assert_eq!(digest(c.ran_from().unwrap()), c.key);
+    }
 }

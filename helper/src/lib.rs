@@ -349,6 +349,7 @@ pub(crate) fn execute(
         material: material(&ran),
         playback: playback::playback(&job, &ran, &draws),
         seconds: started.elapsed().as_secs_f64(),
+        timing: cam_protocol::timing(draws.iter().map(|d| d.times.as_slice())),
     };
     Ok(Executed {
         run,

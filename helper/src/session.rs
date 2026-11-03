@@ -165,6 +165,7 @@ fn open(request: &cam_protocol::Request) -> Result<(Kept, SessionReady), String>
         low: low as f32,
         step: quantum as f32,
         times,
+        timing: done.run.timing,
         bare,
     };
     let band = r.verify_budget.max(1e-3);

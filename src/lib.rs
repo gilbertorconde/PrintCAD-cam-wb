@@ -596,16 +596,26 @@ impl Cam {
             .is_some_and(|s| s.setup == setup && s.key == key);
         if !current {
             self.session = None;
-            let request = setup_node(&setup)
-                .ok_or_else(|| "the setup is gone".to_string())
-                .and_then(|(node, data)| request_for(&node, &data));
-            match request.and_then(|r| session::Session::open(&setup, key, &r)) {
+            // The run's own request, not the document's as it is now: the
+            // document can change without the package hearing of it (the
+            // Data panel, an undo), and a session run from it would time
+            // its moves differently from the run the timeline shows.
+            let opened = self
+                .runs
+                .get(&setup)
+                .and_then(|c| Some((c.ran_from()?, c.shown()?.timing)))
+                .ok_or_else(|| "the run's request is not kept".to_string())
+                .and_then(|(r, timing)| session::Session::open(&setup, key, r, timing));
+            match opened {
                 Ok(s) => self.session = Some(s),
                 Err(e) => host::warn(&format!("Playback stays coarse: {e}")),
             }
         }
         if let (Some(s), Some(p)) = (&mut self.session, &self.playing) {
             s.pump(p.at);
+        }
+        if let Some(why) = self.session.as_mut().and_then(session::Session::failure) {
+            host::warn(&format!("Playback stays coarse: {why}"));
         }
     }
 

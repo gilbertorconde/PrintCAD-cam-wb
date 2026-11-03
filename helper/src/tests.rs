@@ -559,6 +559,53 @@ fn a_session_plays_back_at_full_resolution() {
     assert!(heights(&back).iter().all(|h| *h == top));
 }
 
+/// A session opened with a run's own request times its moves as the run
+/// did, and says so with the run's timing; a job changed since (here a
+/// finer stepover) is told apart by it, so the package does not step and
+/// seek by a session that ran something else.
+#[test]
+fn a_session_times_its_moves_as_the_run_did() {
+    use cam_protocol::{SessionIn, SessionOut};
+    let request = |job: String| Request {
+        version: VERSION,
+        job,
+        shapes: BTreeMap::from([(
+            "part".to_string(),
+            Shape {
+                text: native("hinge_jig.step"),
+                placement: IDENTITY,
+            },
+        )]),
+        max_points: 2000,
+        ..Request::default()
+    };
+    let asked = request(JOB.into());
+    let run = answer(&asked).unwrap();
+    assert_ne!(run.timing, 0);
+    let mut out = Vec::new();
+    crate::session::serve(
+        SessionIn::Open(Box::new(asked.clone())),
+        std::io::Cursor::new(""),
+        &mut out,
+    )
+    .unwrap();
+    let said: SessionOut = serde_json::from_slice(&out).unwrap();
+    let SessionOut::Ready(ready) = said else {
+        panic!("{said:?}");
+    };
+    assert_eq!(ready.timing, run.timing);
+    let mut start = 0.0;
+    for (op, times) in run.operations.iter().zip(&ready.times) {
+        start += op.seconds;
+        let end = f64::from(times.last().copied().unwrap_or(0.0));
+        assert!((end - start).abs() < 1e-3 * start.max(1.0), "{end} {start}");
+    }
+    // The run again, asked as it was: the same timing.
+    assert_eq!(answer(&asked).unwrap().timing, run.timing);
+    let finer = request(JOB.replace("stepover = 3.0", "stepover = 2.5"));
+    assert_ne!(answer(&finer).unwrap().timing, run.timing);
+}
+
 #[test]
 fn each_line_counts_the_moves_of_the_instruction_that_wrote_it() {
     // Two header lines; an instruction of two lines making none, one of a
