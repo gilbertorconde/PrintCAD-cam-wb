@@ -682,6 +682,10 @@ pub struct OperationData {
     /// before they could be set.
     #[serde(default)]
     pub passes: PassesData,
+    /// Its toolpath repeated in rows, round a centre, or mirrored; none for
+    /// a document from before it could be.
+    #[serde(default)]
+    pub transform: crate::pattern::PatternData,
     #[serde(default)]
     pub faces: Vec<Pick>,
     #[serde(default)]
@@ -717,6 +721,7 @@ impl OperationData {
             heights: HeightsData::default(),
             linking: LinkingData::default(),
             passes: PassesData::default(),
+            transform: Default::default(),
             faces: Vec::new(),
             edges: Vec::new(),
             sketches: Vec::new(),
@@ -757,6 +762,7 @@ impl OperationData {
         self.heights = HeightsData::of(&op.heights);
         self.linking = LinkingData::of(&op.linking);
         self.passes = PassesData::of(op);
+        self.transform = crate::pattern::PatternData::of(&op.transform);
     }
 
     /// The operation as it cuts: its numbers written in.
@@ -794,6 +800,7 @@ impl OperationData {
         self.passes.apply(&mut op);
         op.boundary.margin = self.margin;
         op.heights = self.heights.heights();
+        op.transform = self.transform.pattern();
         op
     }
 
@@ -860,6 +867,8 @@ impl OperationData {
         op.passes.feed = self.feed;
         op.passes.rpm = self.operation.passes.rpm;
         op.linking.plunge_feed = self.plunge;
+        // Repeated as it was, whatever it cuts.
+        op.transform = self.transform.pattern();
         start_on_silhouette(&mut op);
         fit_stepover(&mut op, tool, None, tolerance);
         fit_channel(&mut op, tool);
@@ -951,7 +960,7 @@ fn positive(v: f64) -> bool {
 
 /// The strategies a new operation may have, in the order the panel lists them,
 /// with what the panel calls them.
-pub const STRATEGIES: [(&str, &str); 15] = [
+pub const STRATEGIES: [(&str, &str); 17] = [
     ("adaptive", "Adaptive clearing (3D roughing)"),
     ("pocket-clearing", "Pocket clearing (3D roughing)"),
     ("parallel", "Parallel (3D finishing)"),
@@ -966,6 +975,8 @@ pub const STRATEGIES: [(&str, &str); 15] = [
     ("face", "Facing"),
     ("drill", "Drilling"),
     ("engrave", "Engrave (along curves)"),
+    ("slot", "Slot (along curves)"),
+    ("chamfer", "Deburr / chamfer (along edges)"),
     ("v-carve", "V-carve"),
 ];
 
@@ -995,6 +1006,8 @@ pub fn strategy_word(strategy: &StrategySpec) -> &'static str {
         StrategySpec::Drill { .. } => "Drill",
         StrategySpec::Engrave { .. } => "Engrave",
         StrategySpec::VCarve { .. } => "V-carve",
+        StrategySpec::Slot { .. } => "Slot",
+        StrategySpec::Chamfer { .. } => "Chamfer",
     }
 }
 
@@ -1016,7 +1029,9 @@ fn start_on_silhouette(op: &mut Operation) {
         | StrategySpec::Face { .. }
         | StrategySpec::Drill { .. }
         | StrategySpec::Engrave { .. }
-        | StrategySpec::VCarve { .. } => return,
+        | StrategySpec::VCarve { .. }
+        | StrategySpec::Slot { .. }
+        | StrategySpec::Chamfer { .. } => return,
     };
     op.boundary.kind = Boundary::Silhouette;
     op.boundary.containment = containment;
@@ -1371,6 +1386,167 @@ mod tests {
         let flat_name = setup.adopt("Flat 6", &flat);
         carve.use_tool(&flat_name, &flat, None, 0.05);
         assert!(carve.problem(&setup.tools).unwrap().contains("V-bit"));
+    }
+
+    /// A slot along a sketch: its depth, pattern and stepdown survive the
+    /// document, reach the job, and the job reads back.
+    #[test]
+    fn a_slot_reads_back_as_camcraft_writes_it() {
+        use camcraft_core::job::{Segment, SlotPattern};
+        let mut setup = SetupData::new(vec!["b1".into()], "grbl", 0.05);
+        let flat = ToolSpec {
+            diameter: 6.0,
+            ..ToolSpec::default()
+        };
+        let name = setup.adopt("Flat 6", &flat);
+        let mut slot = OperationData::new(Some("s1".into()), StrategySpec::named("slot").unwrap());
+        assert_eq!(slot.passes.depth, 3.0, "a slot's own depth");
+        assert!(slot.multiple_depths);
+        assert_eq!(slot.stepdown, 1.0);
+        slot.use_tool(&name, &flat, None, 0.05);
+        slot.sketches = vec!["sketch1".into()];
+        slot.passes.depth = 4.0;
+        let directional = printcad_bench_sdk::api::PanelEvent::Choice {
+            id: "passes/slot_pattern".into(),
+            index: 1,
+        };
+        assert!(crate::passes::passes_event(
+            &mut slot,
+            "slot_pattern",
+            &directional,
+            None
+        ));
+        let back = OperationData::from(&slot.to_value()).unwrap();
+        assert_eq!(back, slot);
+        assert!(
+            slot.problem(&setup.tools).is_none(),
+            "{:?}",
+            slot.problem(&setup.tools)
+        );
+        slot.curves = vec![Curve {
+            start: [0.0, 0.0, 5.0],
+            segments: vec![
+                Segment::Line {
+                    to: [10.0, 0.0, 5.0],
+                },
+                Segment::Arc {
+                    via: [15.0, 5.0, 5.0],
+                    to: [10.0, 10.0, 5.0],
+                },
+            ],
+        }];
+        let models = models_of(&setup, |_| Some("Part".into()));
+        let job = job("S", &setup, &models, &[("Slot".to_string(), &slot)]);
+        let text = camcraft_session::job_text(&job).unwrap();
+        let back = camcraft_session::parse_job(&text, "t").unwrap();
+        assert_eq!(back, job);
+        let op = &back.setups[0].operations[0];
+        assert_eq!(
+            op.strategy,
+            StrategySpec::Slot {
+                depth: 4.0,
+                pattern: SlotPattern::Directional,
+                reverse: false,
+            }
+        );
+        assert_eq!(op.passes.stepdown, Some(1.0));
+        assert!(back.check_setup(0).is_ok(), "{:?}", back.check_setup(0));
+
+        // A V-bit is no slot cutter.
+        let vbit = ToolSpec {
+            kind: camcraft_core::job::ToolKind::Cone,
+            diameter: 6.0,
+            angle: Some(90.0),
+            ..ToolSpec::default()
+        };
+        let v = setup.adopt("V 90", &vbit);
+        slot.use_tool(&v, &vbit, None, 0.05);
+        assert!(
+            slot.problem(&setup.tools)
+                .unwrap()
+                .contains("end mill its width")
+        );
+    }
+
+    /// A chamfer of picked edges: its width, tip offset and side survive
+    /// the document, reach the job and read back; a cone too small for it,
+    /// or no cone, is a problem the panel says.
+    #[test]
+    fn a_chamfer_reads_back_as_camcraft_writes_it() {
+        use camcraft_core::job::{ChamferSide, ToolKind};
+        let mut setup = SetupData::new(vec!["b1".into()], "grbl", 0.05);
+        let vbit = ToolSpec {
+            kind: ToolKind::Cone,
+            diameter: 6.0,
+            angle: Some(90.0),
+            ..ToolSpec::default()
+        };
+        let name = setup.adopt("V 90", &vbit);
+        let mut chamfer =
+            OperationData::new(Some("s1".into()), StrategySpec::named("chamfer").unwrap());
+        assert_eq!(
+            (chamfer.passes.chamfer_width, chamfer.passes.tip_offset),
+            (0.5, 0.2)
+        );
+        chamfer.use_tool(&name, &vbit, None, 0.05);
+        chamfer.edges = vec![Pick {
+            body: "b1".into(),
+            at: [4.0, 0.0, 5.0],
+            name: None,
+            faces: None,
+        }];
+        chamfer.passes.chamfer_width = 1.0;
+        chamfer.passes.tip_offset = 0.3;
+        let flip = printcad_bench_sdk::api::PanelEvent::Choice {
+            id: "passes/chamfer_side".into(),
+            index: 1,
+        };
+        assert!(crate::passes::passes_event(
+            &mut chamfer,
+            "chamfer_side",
+            &flip,
+            None
+        ));
+        let back = OperationData::from(&chamfer.to_value()).unwrap();
+        assert_eq!(back, chamfer);
+        assert!(
+            chamfer.problem(&setup.tools).is_none(),
+            "{:?}",
+            chamfer.problem(&setup.tools)
+        );
+        let names: Vec<_> = chamfer
+            .passes
+            .parameters(&chamfer.operation(""))
+            .into_iter()
+            .map(|(_, n, ..)| n)
+            .collect();
+        assert!(names.contains(&"chamfer_width") && names.contains(&"tip_offset"));
+        let models = models_of(&setup, |_| Some("Part".into()));
+        let job = job("S", &setup, &models, &[("Deburr".to_string(), &chamfer)]);
+        let text = camcraft_session::job_text(&job).unwrap();
+        let back = camcraft_session::parse_job(&text, "t").unwrap();
+        assert_eq!(back, job);
+        assert_eq!(
+            back.setups[0].operations[0].strategy,
+            StrategySpec::Chamfer {
+                width: 1.0,
+                tip_offset: 0.3,
+                side: ChamferSide::Flipped,
+            }
+        );
+        assert!(back.check_setup(0).is_ok(), "{:?}", back.check_setup(0));
+
+        // Three millimetres of chamfer is more cone than a 6 mm V-bit has.
+        chamfer.passes.chamfer_width = 3.0;
+        let why = chamfer.problem(&setup.tools).unwrap();
+        assert!(why.contains("more of the cone"), "{why}");
+        let flat = ToolSpec {
+            diameter: 6.0,
+            ..ToolSpec::default()
+        };
+        let f = setup.adopt("Flat 6", &flat);
+        chamfer.use_tool(&f, &flat, None, 0.05);
+        assert!(chamfer.problem(&setup.tools).unwrap().contains("V-bit"));
     }
 
     #[test]

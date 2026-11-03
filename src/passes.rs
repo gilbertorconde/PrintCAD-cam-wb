@@ -4,8 +4,8 @@
 //! what the rows' widgets do.
 
 use camcraft_core::job::{
-    ContourOrder, FaceDirection, Finishing, Operation, PassOrder, RadialDirection, StrategySpec,
-    TabShape, Tabs, ThreadHand, ToolKind, ToolSpec, TraceDirection,
+    ChamferSide, ContourOrder, FaceDirection, Finishing, Operation, PassOrder, RadialDirection,
+    SlotPattern, StrategySpec, TabShape, Tabs, ThreadHand, ToolKind, ToolSpec, TraceDirection,
 };
 use printcad_bench_sdk::api::*;
 use printcad_bench_sdk::serde_json::{self, Value};
@@ -53,9 +53,15 @@ pub struct PassesData {
     pub pitch: Opt,
     #[serde(default)]
     pub hand: ThreadHand,
-    /// How deep an engraving cuts below its top.
+    /// How deep an engraving or a slot cuts below its top.
     #[serde(default = "half")]
     pub depth: f64,
+    /// How wide a chamfer is, seen from above, and how far past its foot the
+    /// tip goes.
+    #[serde(default = "half")]
+    pub chamfer_width: f64,
+    #[serde(default = "fifth")]
+    pub tip_offset: f64,
     /// The deepest a V-carving goes; the V's own full depth unless given.
     #[serde(default)]
     pub max_depth: Opt,
@@ -95,6 +101,8 @@ impl Default for PassesData {
             pitch: Opt::default(),
             hand: ThreadHand::default(),
             depth: half(),
+            chamfer_width: half(),
+            tip_offset: fifth(),
             max_depth: Opt::default(),
             tabs: false,
             tab_shape: tabs.shape,
@@ -107,7 +115,14 @@ impl Default for PassesData {
             finishing_feed: Opt::of(finishing.feed),
             finishing_repeat: finishing.repeat,
         };
-        for name in ["radial", "pocket-clearing", "face", "drill", "engrave"] {
+        for name in [
+            "radial",
+            "pocket-clearing",
+            "face",
+            "drill",
+            "engrave",
+            "chamfer",
+        ] {
             out.read_strategy(&named(name));
         }
         out
@@ -117,6 +132,11 @@ impl Default for PassesData {
 /// An engraving's depth in a document from before it had one: camcraft's.
 fn half() -> f64 {
     0.5
+}
+
+/// A chamfer's tip offset in a document from before it had one: camcraft's.
+fn fifth() -> f64 {
+    0.2
 }
 
 fn named(name: &str) -> StrategySpec {
@@ -217,7 +237,12 @@ impl PassesData {
                 self.pitch = Opt::of(pitch);
                 self.hand = hand;
             }
-            StrategySpec::Engrave { depth, .. } => self.depth = depth,
+            StrategySpec::Engrave { depth, .. } | StrategySpec::Slot { depth, .. } => {
+                self.depth = depth
+            }
+            StrategySpec::Chamfer {
+                width, tip_offset, ..
+            } => (self.chamfer_width, self.tip_offset) = (width, tip_offset),
             StrategySpec::VCarve { max_depth } => self.max_depth = Opt::of(max_depth),
             _ => {}
         }
@@ -317,7 +342,12 @@ impl PassesData {
                 *pitch = self.pitch.get();
                 *hand = self.hand;
             }
-            StrategySpec::Engrave { depth, .. } => *depth = self.depth,
+            StrategySpec::Engrave { depth, .. } | StrategySpec::Slot { depth, .. } => {
+                *depth = self.depth
+            }
+            StrategySpec::Chamfer {
+                width, tip_offset, ..
+            } => (*width, *tip_offset) = (self.chamfer_width, self.tip_offset),
             StrategySpec::VCarve { max_depth } => *max_depth = self.max_depth.get(),
             _ => {}
         }
@@ -385,11 +415,14 @@ impl PassesData {
             Dim::Length,
         );
         add(
-            matches!(s, StrategySpec::Engrave { .. }),
+            matches!(s, StrategySpec::Engrave { .. } | StrategySpec::Slot { .. }),
             "depth",
             "Depth",
             Dim::Length,
         );
+        let chamfer = matches!(s, StrategySpec::Chamfer { .. });
+        add(chamfer, "chamfer_width", "Chamfer width", Dim::Length);
+        add(chamfer, "tip_offset", "Tip offset", Dim::Length);
         let tabs = uses.tabs && self.tabs;
         add(tabs, "tab_width", "Tab width", Dim::Length);
         add(tabs, "tab_height", "Tab height", Dim::Length);
@@ -475,6 +508,20 @@ const TRACE_DIRECTIONS: [(TraceDirection, &str); 3] = [
     (TraceDirection::Climb, "Climb"),
     (TraceDirection::Conventional, "Conventional"),
     (TraceDirection::AsDrawn, "As drawn"),
+];
+const SLOT_PATTERNS: [(SlotPattern, &str); 2] = [
+    (
+        SlotPattern::Bidirectional,
+        "Both ways: back and forth, ramping down",
+    ),
+    (
+        SlotPattern::Directional,
+        "One way: a level each time, lifting back",
+    ),
+];
+const CHAMFER_SIDES: [(ChamferSide, &str); 2] = [
+    (ChamferSide::Auto, "Away from the material"),
+    (ChamferSide::Flipped, "Flipped: the other side"),
 ];
 const TAB_SHAPES: [(TabShape, &str); 2] = [
     (TabShape::Rectangular, "Rectangular"),
@@ -644,6 +691,49 @@ pub fn strategy_rows(data: &OperationData, tool: Option<&ToolSpec>, feature: &st
             mono: false,
         });
     }
+    if let StrategySpec::Slot {
+        pattern, reverse, ..
+    } = s
+    {
+        rows.push(length("passes/depth", "Depth", p.depth));
+        rows.push(pick(
+            "passes/slot_pattern",
+            "Pattern",
+            &SLOT_PATTERNS,
+            pattern,
+        ));
+        rows.push(Widget::Toggle {
+            id: "passes/reverse".into(),
+            label: "Reverse".into(),
+            on: reverse,
+        });
+        let width = match tool {
+            Some(t) => format!("{:.2} mm, the tool's", t.diameter),
+            None => "the tool's".into(),
+        };
+        rows.push(Widget::Text {
+            text: format!(
+                "The slot is {width} wide, along each curve as drawn. Both ways, it goes \
+                 a stepdown deeper each time along it, ramping as it goes, then once at \
+                 the depth; one way, it cuts each level from the start, lifting at the \
+                 end, and goes into each as the linking's entry says."
+            ),
+            mono: false,
+        });
+    }
+    if let StrategySpec::Chamfer { side, .. } = s {
+        rows.push(length(
+            "passes/chamfer_width",
+            "Chamfer width",
+            p.chamfer_width,
+        ));
+        rows.push(length("passes/tip_offset", "Tip offset", p.tip_offset));
+        rows.push(pick("passes/chamfer_side", "Side", &CHAMFER_SIDES, side));
+        rows.push(Widget::Text {
+            text: chamfer_note(p, tool),
+            mono: false,
+        });
+    }
     if let StrategySpec::VCarve { .. } = s {
         let full = match tool.and_then(v_depth) {
             Some(d) => format!("the V's full depth, {d:.2} mm"),
@@ -674,6 +764,30 @@ pub fn strategy_rows(data: &OperationData, tool: Option<&ToolSpec>, feature: &st
         p.max_cut_step,
     ));
     rows
+}
+
+/// Where a chamfer puts `tool`, or why it cannot.
+fn chamfer_note(p: &PassesData, tool: Option<&ToolSpec>) -> String {
+    let what = "Each edge is chamfered from its own height, the tool's centre beside it \
+                away from the material, as the part either side says, and its tip below \
+                the chamfer by the tip offset, so the flank cuts it.";
+    let Some(t) = tool.filter(|t| t.kind == ToolKind::Cone) else {
+        return format!("{what} It cuts with a chamfer mill or a V-bit.");
+    };
+    let half = (t.angle.unwrap_or(f64::NAN) / 2.0).to_radians();
+    match camcraft_core::strategy::chamfer::Place::new(
+        p.chamfer_width,
+        p.tip_offset,
+        half,
+        t.tip_diameter / 2.0,
+        t.diameter / 2.0,
+    ) {
+        Ok(at) => format!(
+            "{what} With this tool: its tip {:.2} mm down, its centre {:.2} mm off the edge.",
+            at.depth, at.offset
+        ),
+        Err(e) => format!("{what} This tool is too small: {e}."),
+    }
 }
 
 /// How deep `tool`'s V goes before it is as wide as the tool, if it is a V.
@@ -910,6 +1024,7 @@ fn put_right(p: &mut PassesData) {
         p.outer_radius.value = p.inner_radius + 1.0;
     }
     p.finishing_passes = p.finishing_passes.round().clamp(1.0, 20.0);
+    p.tip_offset = p.tip_offset.max(0.0);
 }
 
 /// A widget of the passes' rows changed: `id` without its `passes/`. Whether it
@@ -960,10 +1075,23 @@ pub fn passes_event(
             );
         }
         ("reverse", PanelEvent::Toggle { on, .. }) => {
-            let StrategySpec::Engrave { reverse, .. } = s else {
+            let (StrategySpec::Engrave { reverse, .. } | StrategySpec::Slot { reverse, .. }) = s
+            else {
                 return false;
             };
             return set(Some(reverse), Some(*on));
+        }
+        ("chamfer_side", PanelEvent::Choice { index, .. }) => {
+            let StrategySpec::Chamfer { side, .. } = s else {
+                return false;
+            };
+            return set(Some(side), CHAMFER_SIDES.get(*index).map(|(x, _)| *x));
+        }
+        ("slot_pattern", PanelEvent::Choice { index, .. }) => {
+            let StrategySpec::Slot { pattern, .. } = s else {
+                return false;
+            };
+            return set(Some(pattern), SLOT_PATTERNS.get(*index).map(|(x, _)| *x));
         }
         ("hand", PanelEvent::Choice { index, .. }) => {
             return set(

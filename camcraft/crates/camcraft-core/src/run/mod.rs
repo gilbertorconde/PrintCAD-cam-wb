@@ -44,7 +44,9 @@ pub use error::RunError;
 pub use result::{Made, OperationResult, Plan, SetupResult, Stage, StrategyDetail};
 
 use error::in_op;
-use operation::{Target, Work, drill_holes, heights_of, not_made, planar_areas, run_operation};
+use operation::{
+    Target, Work, chamfer_curves, drill_holes, heights_of, not_made, planar_areas, run_operation,
+};
 use pitch::sim_pitch;
 
 /// Material further above the part than this, in millimetres, counts as left over.
@@ -245,6 +247,32 @@ fn cut_past(
         };
     }
     Ok(part)
+}
+
+/// Where a chamfer's tool's centre goes, at each edge's height, and where it
+/// puts the cone, as a run of it finds them: for drawing what it cuts.
+/// `None` for an operation that is no chamfer, or whose curves or tool do
+/// not work out.
+pub fn chamfer_centres(
+    job: &Job,
+    op: &Operation,
+    prepared: &Prepared,
+    bodies: &Bodies<'_>,
+) -> Option<(
+    Vec<crate::strategy::engrave::Trace>,
+    crate::strategy::chamfer::Place,
+)> {
+    if !matches!(op.strategy, crate::job::StrategySpec::Chamfer { .. }) {
+        return None;
+    }
+    let spec = job.tool_for(op)?;
+    let picking = Picking::new(&op.selection, prepared, bodies, job.tolerance);
+    let traces = picking.traces().ok()?;
+    let cutter = DropCutter::new(&prepared.part);
+    let clockwise = spec.spindle == crate::job::SpindleDirection::Clockwise;
+    let (curves, place, _) =
+        chamfer_curves(op, spec, &cutter, &traces, (clockwise, job.tolerance)).ok()?;
+    Some((curves, place))
 }
 
 /// The tool an operation cuts with: the job's cutter, grown by the stock to

@@ -21,7 +21,8 @@ pub mod pocket_clearing;
 // Holes.
 pub mod drilling;
 
-// Along curves, and down the middle of areas.
+// Along curves, beside edges, and down the middle of areas.
+pub mod chamfer;
 pub mod engrave;
 pub mod vcarve;
 

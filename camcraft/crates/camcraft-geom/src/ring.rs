@@ -184,6 +184,12 @@ impl Ring {
         (spans.len() >= 2).then_some(Self { start, spans })
     }
 
+    /// A ring of `spans` from `start`, the last ending there. `None` for no
+    /// spans.
+    pub fn new(start: DVec2, spans: Vec<Span>) -> Option<Self> {
+        (!spans.is_empty()).then_some(Self { start, spans })
+    }
+
     /// Where it starts, and ends.
     pub fn start(&self) -> DVec2 {
         self.start
@@ -457,51 +463,7 @@ impl Ring {
         if d.abs() < 1e-12 {
             return Some(self.clone());
         }
-        let pieces = self.piece_list();
-        let n = pieces.len();
-        // Each span moved, from its moved start.
-        let moved: Vec<(DVec2, Span)> = pieces
-            .iter()
-            .map(|&(from, s)| moved(from, s, d))
-            .collect::<Option<_>>()?;
-        // At each corner, the end of span `i` and the start of span `i + 1`.
-        let mut starts: Vec<DVec2> = moved.iter().map(|m| m.0).collect();
-        let mut ends: Vec<DVec2> = moved.iter().map(|m| m.1.to()).collect();
-        let mut joins: Vec<Option<Span>> = vec![None; n];
-        for i in 0..n {
-            let k = (i + 1) % n;
-            let (&(from_i, span_i), &(from_k, span_k)) = (pieces.get(i)?, pieces.get(k)?);
-            let t1 = span_i.tangent_at(from_i, 1.0);
-            let t2 = span_k.tangent_at(from_k, 0.0);
-            let turn = t1.perp_dot(t2).atan2(t1.dot(t2));
-            let (e, f) = (*ends.get(i)?, *starts.get(k)?);
-            let corner: (DVec2, Option<Span>) = if e.distance(f) < 1e-9 {
-                (e, None)
-            } else if turn * d > 0.0 {
-                // Opened up: round the corner.
-                let arc = Span::Arc {
-                    to: f,
-                    centre: span_i.to(),
-                    sweep: turn,
-                };
-                (f, Some(arc))
-            } else {
-                // Closed up: where the two cross, nearest the corner.
-                let x = crossing(*moved.get(i)?, *moved.get(k)?, (e + f) * 0.5)?;
-                *ends.get_mut(i)? = x;
-                (x, None)
-            };
-            *starts.get_mut(k)? = corner.0;
-            *joins.get_mut(i)? = corner.1;
-        }
-        let mut spans = Vec::with_capacity(2 * n);
-        for (((&(orig_from, orig), &a), &b), join) in
-            moved.iter().zip(&starts).zip(&ends).zip(&joins)
-        {
-            spans.push(trimmed(orig_from, orig, a, b)?);
-            spans.extend(*join);
-        }
-        let start = *starts.first()?;
+        let (start, spans) = offset_pieces(&self.piece_list(), d, true)?;
         Some(Self { start, spans })
     }
 
@@ -534,6 +496,72 @@ impl Ring {
                 .iter()
                 .all(|&p| to_polygon(p) <= t2)
     }
+}
+
+/// Open spans from `start`, end to end, moved `d` to their right as
+/// [`Ring::offset`] moves a ring's, each end moved square to the span it
+/// ends: where they start, and the spans. A chamfer's or a groove's path
+/// beside an open edge.
+pub fn offset_open(start: DVec2, spans: &[Span], d: f64) -> Option<(DVec2, Vec<Span>)> {
+    if d.abs() < 1e-12 {
+        return Some((start, spans.to_vec()));
+    }
+    let mut at = start;
+    let pieces: Vec<(DVec2, Span)> = spans
+        .iter()
+        .map(|s| (std::mem::replace(&mut at, s.to()), *s))
+        .collect();
+    offset_pieces(&pieces, d, false)
+}
+
+/// `pieces`, each a span with where it starts, moved `d` to their right: a
+/// ring's when `closed`, round from the last back to the first, else open
+/// at both ends. Where they start, and the spans.
+fn offset_pieces(pieces: &[(DVec2, Span)], d: f64, closed: bool) -> Option<(DVec2, Vec<Span>)> {
+    let n = pieces.len();
+    // Each span moved, from its moved start.
+    let moved: Vec<(DVec2, Span)> = pieces
+        .iter()
+        .map(|&(from, s)| moved(from, s, d))
+        .collect::<Option<_>>()?;
+    // At each corner, the end of span `i` and the start of span `i + 1`.
+    let mut starts: Vec<DVec2> = moved.iter().map(|m| m.0).collect();
+    let mut ends: Vec<DVec2> = moved.iter().map(|m| m.1.to()).collect();
+    let mut joins: Vec<Option<Span>> = vec![None; n];
+    let corners = if closed { n } else { n.saturating_sub(1) };
+    for i in 0..corners {
+        let k = (i + 1) % n;
+        let (&(from_i, span_i), &(from_k, span_k)) = (pieces.get(i)?, pieces.get(k)?);
+        let t1 = span_i.tangent_at(from_i, 1.0);
+        let t2 = span_k.tangent_at(from_k, 0.0);
+        let turn = t1.perp_dot(t2).atan2(t1.dot(t2));
+        let (e, f) = (*ends.get(i)?, *starts.get(k)?);
+        let corner: (DVec2, Option<Span>) = if e.distance(f) < 1e-9 {
+            (e, None)
+        } else if turn * d > 0.0 {
+            // Opened up: round the corner.
+            let arc = Span::Arc {
+                to: f,
+                centre: span_i.to(),
+                sweep: turn,
+            };
+            (f, Some(arc))
+        } else {
+            // Closed up: where the two cross, nearest the corner.
+            let x = crossing(*moved.get(i)?, *moved.get(k)?, (e + f) * 0.5)?;
+            *ends.get_mut(i)? = x;
+            (x, None)
+        };
+        *starts.get_mut(k)? = corner.0;
+        *joins.get_mut(i)? = corner.1;
+    }
+    let mut spans = Vec::with_capacity(2 * n);
+    for (((&(orig_from, orig), &a), &b), join) in moved.iter().zip(&starts).zip(&ends).zip(&joins) {
+        spans.push(trimmed(orig_from, orig, a, b)?);
+        spans.extend(*join);
+    }
+    let start = *starts.first()?;
+    Some((start, spans))
 }
 
 /// Span `s`, from `from`, moved `d` to its right: its new start, and the span.

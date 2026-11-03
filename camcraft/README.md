@@ -121,6 +121,51 @@ a `safe_retract`. `camcraft_session::program_spec` and `program` take the
 setup's `Frame`. Golden programs: `masso-rotary-a.nc` and
 `linuxcnc-rotary-ab.nc`.
 
+And a slot, Fusion's Slot. In `camcraft-core`, `StrategySpec::Slot`
+(`depth`, 3 mm unless set; `pattern`, `SlotPattern`: bidirectional or
+directional; `reverse`) is an engraving deeper, with an end mill its width
+(a cone is refused, `Operation::cannot_use`), along the same curves and
+edges, as drawn, a millimetre a level unless set. Both ways it is
+`engrave`'s own ramping back and forth; one way, `EngraveParams::levels`
+is `Levels::OneWay`: each level, evenly a stepdown at most apart, a pass
+of its own from the curve's start, which the linker lifts out of (it never
+stays down, `run/operation/link.rs`) and enters as the linking's entry
+says, a ramp along the slot or a plunge, never a helix beside it. So
+`Operation::entry` with none asked is the first entry a strategy offers,
+not always a helix. Its arcs are arcs at every level. A golden slot
+(`grbl-slot.nc`).
+
+And deburring, Fusion's 2D Chamfer. In `camcraft-core`,
+`StrategySpec::Chamfer` (`width`, 0.5 mm; `tip_offset`, 0.2 mm; `side`,
+`ChamferSide`: auto or flipped) runs a cone along the curves and picked
+edges an engraving takes (`strategy::chamfer`). `Place` puts the cone:
+its tip `width / tan(half angle)` and the tip offset below each edge,
+its centre the cone's radius at the chamfer's foot off the edge; a cone
+with too little flank for the width is refused (`Operation::cannot_use`).
+The side away from the material is where the part, dropped onto either
+side of each curve, is lower. Each curve is moved that far to that side,
+its lines and arcs square to themselves, and run to climb, then engraved
+from its own height, the edge's: it has no top or bottom.
+`run::chamfer_centres` gives the curves, for drawing. In `camcraft-geom`,
+`ring::offset_open` moves open spans as `Ring::offset` moves a ring's,
+which it now shares, and `Ring::new` makes a ring of spans. What a
+chamfer cuts into the part is meant, as an engraving's is.
+
+And patterns, Fusion's Pattern and Mirror. In `camcraft-core`, an
+`Operation` has a `transform` (`job::Pattern`; not `pattern`, which a
+slot's own setting is called beside it: `linear`, rows along X and Y;
+`polar`, a count over an angle about a centre; `mirror`, about a line
+along X or Y through a point, the original kept; at most 1000 copies),
+which `path::pattern::repeat` applies to the strategy's path before it is
+ordered, tabbed and linked (`run/operation.rs`), so the linker links every
+copy into the material and the simulation, the checks and the program see
+them all. A mirrored copy's passes are turned round where that is safe:
+one all at one level after its link backwards whole, else each stretch
+of cutting that closes on itself backwards in place; adaptive clearing
+and drilling never are, and passes left cutting the other way are a
+warning, as is a copy further outside the stock than the original. In
+`camcraft-session`, the finishing job's operation has no pattern.
+
 And one test: ogeom is 0.11.1 here, which printCAD's shapes need, and it
 meshes `round_edge_loose_fit.step`'s seam that 0.11.0 drew off the torus, so
 `a_loose_fit_is_refused_for_ogeoms_seam` became

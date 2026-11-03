@@ -26,6 +26,7 @@ mod linking;
 mod listing;
 mod panel;
 mod passes;
+mod pattern;
 mod picking;
 mod playback;
 mod runs;
@@ -1099,16 +1100,27 @@ impl Bench for Cam {
                              pass_extension, tab_width, tab_height, tab_spacing, \
                              finishing_passes: numbers; centre, tabs, finishing, \
                              finishing_repeat: booleans; tab_shape: rectangular|triangular; \
-                             hand: right|left; depth: engrave's, mm; outer_radius, peck, \
+                             hand: right|left; depth: engrave's and slot's, mm; chamfer_width, \
+                             tip_offset: a chamfer's, mm; outer_radius, peck, \
                              chip_break, dwell, pitch, max_depth, finishing_stepover, \
                              finishing_feed: {value, given}}",
+                        ),
+                        param(
+                            "transform",
+                            ParamKind::Any,
+                            false,
+                            "{linear, polar, mirror: booleans, each part on; x_count, \
+                             x_spacing, y_count, y_spacing: rows; polar_count, polar_angle \
+                             (degrees, 360 a whole turn), centre_x, centre_y: round a centre; \
+                             mirror_axis: x|y, through_x, through_y: the mirror's line, along \
+                             the setup's X or Y through that point; all from the work zero}",
                         ),
                         param(
                             "sketches",
                             ParamKind::List,
                             false,
                             "a list of sketch ids: their closed loops, text among them, are \
-                             what it follows or cuts within",
+                             what it follows or cuts within (a 2D cut's outline then)",
                         ),
                         param(
                             "direction",
@@ -1120,7 +1132,19 @@ impl Bench for Cam {
                             "reverse",
                             ParamKind::Bool,
                             false,
-                            "engrave: each curve the other way",
+                            "engrave, slot: each curve the other way",
+                        ),
+                        param(
+                            "pattern",
+                            ParamKind::String,
+                            false,
+                            "slot: bidirectional|directional (bidirectional)",
+                        ),
+                        param(
+                            "side",
+                            ParamKind::String,
+                            false,
+                            "chamfer: auto|flipped (auto: away from the material)",
                         ),
                         param("name", ParamKind::String, false, "the operation's name"),
                     ],
@@ -1132,6 +1156,23 @@ impl Bench for Cam {
                          a stepdown at most each time with multiple depths. V-carve cuts the \
                          areas its sketches close down their middle with a V-bit, as deep as \
                          they are wide, no deeper than passes.max_depth = {value, given}."
+                            .into(),
+                        "Slot cuts along the same curves and edges as Engrave, as wide as its \
+                         tool, passes.depth below the top (3 mm), a stepdown a level (1 mm): \
+                         bidirectional ramps back and forth along each, directional cuts each \
+                         level from its start, lifting back between them."
+                            .into(),
+                        "Chamfer (deburr) runs a chamfer mill or V-bit along picked edges, or \
+                         a sketch's loops, each from its own height: passes.chamfer_width wide \
+                         (0.5 mm), its tip passes.tip_offset (0.2 mm) below the chamfer, its \
+                         centre beside the edge away from the material. A cone too small for \
+                         it is a failed check."
+                            .into(),
+                        "A transform (its Pattern group) repeats the operation's toolpath before it is linked: in \
+                         rows, then each round a centre, then all mirrored with the originals \
+                         kept; a mirrored copy's rings are turned round so it still climbs. \
+                         Every copy is simulated and checked, and one outside the stock is a \
+                         warning."
                             .into(),
                         "A library tool's first preset sets its feeds and speeds.".into(),
                         "Drilling: peck backs out between pecks, and with chip_break only that \
@@ -1308,7 +1349,8 @@ impl Bench for Cam {
                 .linking
                 .parameters()
                 .into_iter()
-                .chain(d.passes.parameters(&d.operation));
+                .chain(d.passes.parameters(&d.operation))
+                .chain(d.transform.parameters());
             for (pointer, name, label, dim) in numbers {
                 out.push(Parameter {
                     key: pointer.clone(),
@@ -1504,6 +1546,10 @@ impl Bench for Cam {
                 if let Some(given) = args.get("passes") {
                     data.passes = over(&data.passes, given).map_err(|e| format!("passes: {e}"))?;
                 }
+                if let Some(given) = args.get("transform") {
+                    data.transform =
+                        over(&data.transform, given).map_err(|e| format!("transform: {e}"))?;
+                }
                 if let Some(given) = args.get("linking") {
                     data.linking =
                         over(&data.linking, given).map_err(|e| format!("linking: {e}"))?;
@@ -1515,6 +1561,12 @@ impl Bench for Cam {
                         return Err(format!("sketches: '{bad}' is no sketch that closes a loop"));
                     }
                     data.sketches = ids;
+                    // A 2D cut given sketches cuts what they enclose, as
+                    // ticking them in its panel with the picks as its
+                    // outline does.
+                    if data.strategy().uses().outline && !data.sketches.is_empty() {
+                        data.operation.outline = camcraft_core::job::Outline::Selection;
+                    }
                 }
                 if let StrategySpec::Engrave {
                     direction, reverse, ..
@@ -1523,6 +1575,24 @@ impl Bench for Cam {
                     if let Some(d) = text("direction") {
                         *direction = serde_json::from_value(json!(d))
                             .map_err(|_| format!("no direction '{d}'"))?;
+                    }
+                    if let Some(r) = args.get("reverse").and_then(Value::as_bool) {
+                        *reverse = r;
+                    }
+                }
+                if let StrategySpec::Chamfer { side, .. } = &mut data.operation.strategy
+                    && let Some(d) = text("side")
+                {
+                    *side = serde_json::from_value(json!(d))
+                        .map_err(|_| format!("no chamfer side '{d}'"))?;
+                }
+                if let StrategySpec::Slot {
+                    pattern, reverse, ..
+                } = &mut data.operation.strategy
+                {
+                    if let Some(p) = text("pattern") {
+                        *pattern = serde_json::from_value(json!(p))
+                            .map_err(|_| format!("no slot pattern '{p}'"))?;
                     }
                     if let Some(r) = args.get("reverse").and_then(Value::as_bool) {
                         *reverse = r;

@@ -200,6 +200,37 @@ impl StrategySpec {
                 bottom: None,
                 ..cuts_loops
             },
+            // An engraving deeper: its picks are what it follows. Always the
+            // same way, each level is a pass of its own, entered as the
+            // linking says: along itself, or straight down, never a helix
+            // beside it, which would cut outside the slot.
+            StrategySpec::Slot { .. } => Uses {
+                boundary: false,
+                traces: true,
+                stepover: false,
+                stock_to_leave: Leave::None,
+                tabs: false,
+                helix: HelixSize::Tool,
+                ramp: true,
+                entries: &[Entry::Ramp, Entry::Plunge],
+                top: Some(HeightRef::ModelTop),
+                bottom: None,
+                ..cuts_loops
+            },
+            // Its picks are the edges it chamfers, each from its own height,
+            // the edge's: no top or bottom. It cuts to size.
+            StrategySpec::Chamfer { .. } => Uses {
+                boundary: false,
+                traces: true,
+                stepover: false,
+                stock_to_leave: Leave::None,
+                tabs: false,
+                helix: HelixSize::Tool,
+                ramp: false,
+                top: None,
+                bottom: None,
+                ..cuts_loops
+            },
             // Its picks are the areas it carves, along their middles, each
             // round from where it is shallowest.
             StrategySpec::VCarve { .. } => Uses {

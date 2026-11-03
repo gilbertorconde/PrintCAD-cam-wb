@@ -60,6 +60,7 @@ mod linking;
 mod model;
 mod operation;
 mod passes;
+mod pattern;
 mod pick;
 mod setup;
 mod strategy_spec;
@@ -89,11 +90,12 @@ pub use model::{
 };
 pub use operation::Operation;
 pub use passes::{Finishing, FinishingSizes, Passes, StockToLeave, TabShape, Tabs};
+pub use pattern::{Linear, MOST_COPIES, Mirror, MirrorAxis, Pattern, Polar};
 pub use pick::{FeatureRef, PointRef, Snap};
 pub use setup::{Along, BoxOf, Origin, Setup};
 pub use strategy_spec::{
-    ContourOrder, CutDirection, FaceDirection, PassOrder, ProfileSide, RadialDirection,
-    StrategySpec, ThreadHand, TraceDirection,
+    ChamferSide, ContourOrder, CutDirection, FaceDirection, PassOrder, ProfileSide,
+    RadialDirection, SlotPattern, StrategySpec, ThreadHand, TraceDirection,
 };
 pub use tool::{
     Coolant, DRILL_POINT, Holder, HolderSegment, Preset, SpindleDirection, ToolFieldError,

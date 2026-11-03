@@ -3,20 +3,23 @@
 //! centre may go against it, and what the tool cuts outside the part; a 2D
 //! operation's outline at the height of what is picked in it, and what the
 //! tool cuts beside it (a band for a profile, all inside for a pocket); the
-//! curves an engraving follows at its top, and the band the tool cuts along
+//! curves an engraving or a slot follows at its top, and the band the tool
+//! cuts along them; a chamfer's edges, and the band its cone covers beside
 //! them; and the areas a V-carving carves, all of them cut.
 
 use cam_protocol::{CutPiece, Outlines};
 use camcraft_core::cutter::allowance::EffectiveTool;
 use camcraft_core::job::{Boundary, Job, Operation, StrategySpec};
-use camcraft_core::run::cutting_tool;
+use camcraft_core::path::pattern::copies;
+use camcraft_core::run::{chamfer_centres, cutting_tool};
 use camcraft_core::setup::features::Picking;
 use camcraft_core::setup::frame::Frame;
 use camcraft_core::setup::{Bodies, Prepared, features};
+use camcraft_core::strategy::engrave::Trace;
 use camcraft_core::strategy::planar::{centre_offset, picked_pieces};
 use camcraft_geom::contour::Region;
 use camcraft_sim::stock::SweptTool;
-use glam::DVec2;
+use glam::{DVec2, DVec3};
 
 use crate::to_f32;
 
@@ -68,11 +71,12 @@ impl Ground<'_> {
 
     /// What operation `op` machines, drawn: none for one with no boundary,
     /// or where it cannot be worked out.
+    /// A pattern's copies are drawn too, each where its toolpath goes.
     pub fn outlines(&self, op: &Operation) -> Option<Outlines> {
         let uses = op.strategy.uses();
         let tool = cutting_tool(self.job, op).ok();
         let tolerance = self.job.tolerance;
-        if uses.outline {
+        let one = if uses.outline {
             self.outline(op, tool.as_ref(), tolerance)
         } else if uses.boundary {
             self.boundary(op, tool.as_ref(), tolerance)
@@ -82,7 +86,28 @@ impl Ground<'_> {
             self.carved(op, tolerance)
         } else {
             None
+        }?;
+        if !op.transform.repeats() {
+            return Some(one);
         }
+        let mut out = Outlines::default();
+        for c in copies(&op.transform) {
+            let ring = |r: &Vec<[f32; 3]>| -> Vec<[f32; 3]> {
+                r.iter()
+                    .map(|p| {
+                        let q = DVec3::new(f64::from(p[0]), f64::from(p[1]), f64::from(p[2]));
+                        to_f32(self.frame.to_model(c.point(self.frame.to_setup(q))))
+                    })
+                    .collect()
+            };
+            out.boundary.extend(one.boundary.iter().map(ring));
+            out.limit.extend(one.limit.iter().map(ring));
+            out.cut.extend(one.cut.iter().map(|p| CutPiece {
+                outline: ring(&p.outline),
+                holes: p.holes.iter().map(ring).collect(),
+            }));
+        }
+        Some(out)
     }
 
     /// Where `op` cuts down from, its picks aside: its own top, or its
@@ -92,7 +117,9 @@ impl Ground<'_> {
     }
 
     /// An engraving's curves at its top, open ones left open, and the band
-    /// the tool cuts along them.
+    /// the tool cuts along them. A chamfer's at their own heights, the
+    /// edges', and the band its cone covers there, beside each edge away
+    /// from the material.
     fn traces(
         &self,
         op: &Operation,
@@ -101,7 +128,9 @@ impl Ground<'_> {
     ) -> Option<Outlines> {
         let picking = Picking::new(&op.selection, self.prepared, self.bodies, tolerance);
         let traces = picking.traces().ok()?;
-        let z = self.op_top(op);
+        let chamfer = chamfer_centres(self.job, op, self.prepared, self.bodies);
+        let top = self.op_top(op);
+        let z = |t: &Trace| if chamfer.is_some() { t.start.z } else { top };
         let mut out = Outlines::default();
         let mut lines = Vec::new();
         for t in &traces {
@@ -109,14 +138,22 @@ impl Ground<'_> {
             out.boundary.push(
                 points
                     .iter()
-                    .map(|p| to_f32(self.frame.to_model(p.extend(z))))
+                    .map(|p| to_f32(self.frame.to_model(p.extend(z(t)))))
                     .collect(),
             );
             lines.push(points);
         }
-        if let Some(tool) = tool {
+        if let Some((centres, place)) = &chamfer {
+            let lines: Vec<Vec<DVec2>> = centres
+                .iter()
+                .map(|t| t.points(tolerance).iter().map(|p| p.truncate()).collect())
+                .collect();
+            let at = centres.iter().map(|t| t.start.z).fold(f64::MIN, f64::max);
+            let band = Region::around_polylines(&lines, place.reach, tolerance / 2.0);
+            out.cut = self.pieces(&band, at);
+        } else if let Some(tool) = tool {
             let band = Region::around_polylines(&lines, tool.cutter_radius(), tolerance / 2.0);
-            out.cut = self.pieces(&band, z);
+            out.cut = self.pieces(&band, top);
         }
         Some(out)
     }

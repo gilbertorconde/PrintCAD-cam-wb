@@ -5,8 +5,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::{
-    Depths, Heights, Linking, MachiningBoundary, Outline, Passes, Preset, ProfileSide, Selection,
-    StrategySpec, ToolKind, ToolSpec, is_default, is_yes, yes,
+    Depths, Heights, Linking, MachiningBoundary, Outline, Passes, Pattern, Preset, ProfileSide,
+    Selection, StrategySpec, ToolKind, ToolSpec, is_default, is_yes, yes,
 };
 
 /// One operation.
@@ -47,6 +47,11 @@ pub struct Operation {
     /// How the tool moves between cuts.
     #[serde(default, skip_serializing_if = "is_default")]
     pub linking: Linking,
+    /// Its toolpath repeated in rows, round a centre, or mirrored, before it
+    /// is linked: none unless asked. A job file calls it `transform`, as a
+    /// slot's own `pattern` is written beside it.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub transform: Pattern,
     /// Whether it runs. One turned off stays in the job, but is not worked out,
     /// cut, checked or posted.
     #[serde(default = "yes", skip_serializing_if = "is_yes")]
@@ -75,6 +80,7 @@ impl Operation {
                 ..Passes::default()
             },
             linking: Linking::default(),
+            transform: Pattern::default(),
             enabled: true,
         }
     }
@@ -106,6 +112,36 @@ impl Operation {
         // cuts its width to its depth.
         if matches!(self.strategy, StrategySpec::VCarve { .. }) && tool.kind != ToolKind::Cone {
             return Some("V-carving cuts with a V-bit: its width follows how deep its V goes");
+        }
+        // A slot is as wide as the tool, all the way down.
+        if matches!(self.strategy, StrategySpec::Slot { .. }) && tool.kind == ToolKind::Cone {
+            return Some(
+                "a slot is cut with an end mill its width: a V-bit's width changes with \
+                 depth; engrave with it instead",
+            );
+        }
+        // The chamfer is the cone's flank: a cone with flank enough for it.
+        if let StrategySpec::Chamfer {
+            width, tip_offset, ..
+        } = self.strategy
+        {
+            if tool.kind != ToolKind::Cone {
+                return Some("deburr with a chamfer mill or a V-bit: the chamfer is its flank");
+            }
+            let half = (tool.angle.unwrap_or(f64::NAN) / 2.0).to_radians();
+            let place = crate::strategy::chamfer::Place::new(
+                width,
+                tip_offset,
+                half,
+                tool.tip_diameter / 2.0,
+                tool.diameter / 2.0,
+            );
+            if place.is_err() {
+                return Some(
+                    "the chamfer needs more of the cone than the tool has: make it narrower, \
+                     the tip offset less, or take a wider tool",
+                );
+            }
         }
         if matches!(self.strategy, StrategySpec::Face { .. }) && tool.kind == ToolKind::Ball {
             return Some("a ball end mill cannot face flat; use a flat or bull-nose end mill");

@@ -17,6 +17,15 @@ pub(super) fn link_params(work: &Work<'_>, clearance_z: f64) -> LinkParams {
     } else {
         leads.map_or(0.0, |l| l.vertical)
     };
+    // A slot one way lifts at the end of each level and goes back to its
+    // start: staying down, it would drag back along what it just cut.
+    let one_way = matches!(
+        op.strategy,
+        StrategySpec::Slot {
+            pattern: SlotPattern::Directional,
+            ..
+        }
+    );
     let (stay_down, lead_radius, ramp) = match uses.links {
         // Adaptive clearing stays down itself, at the level, only where it has
         // cleared the way, and goes down its own helixes: a link it leaves is
@@ -61,7 +70,7 @@ pub(super) fn link_params(work: &Work<'_>, clearance_z: f64) -> LinkParams {
         plunge_feed: linking.plunge_feed,
         tool_radius: work.tool.cutter_radius(),
         safe_distance: linking.safe_distance,
-        stay_down,
+        stay_down: if one_way { StayDown::Never } else { stay_down },
         lead_radius,
         ramp,
         entry,

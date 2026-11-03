@@ -1422,6 +1422,16 @@ fn drawn_on_a_plate(
     tool: crate::job::ToolSpec,
     curves: Vec<crate::job::Curve>,
 ) -> (Job, SetupResult) {
+    drawn_on_a_plate_with(strategy, tool, curves, |_| {})
+}
+
+/// As [`drawn_on_a_plate`], the operation changed by `edit` first.
+fn drawn_on_a_plate_with(
+    strategy: StrategySpec,
+    tool: crate::job::ToolSpec,
+    curves: Vec<crate::job::Curve>,
+    edit: impl FnOnce(&mut Operation),
+) -> (Job, SetupResult) {
     use crate::job::StockSpec;
     let body = Body::derived(synthetic::cuboid(
         DVec3::new(-20.0, -20.0, 0.0),
@@ -1441,6 +1451,7 @@ fn drawn_on_a_plate(
     op.passes.stepdown = strategy.default_stepdown();
     op.passes.stock_to_leave = Default::default();
     op.selection.curves = curves;
+    edit(op);
     let bodies: Bodies<'_> = [("dome", &body)].into_iter().collect();
     let result = run_setup(&job, 0, &bodies).unwrap();
     (job, result)
@@ -1622,4 +1633,315 @@ fn a_picked_round_edge_is_engraved_as_arcs() {
         }
     }
     assert_eq!(report.arcs, 4, "{report:?}");
+}
+
+/// A line and an arc on the plate's top, end to end: a slot's curve.
+fn drawn_hook() -> crate::job::Curve {
+    use crate::job::{Curve, Segment};
+    Curve {
+        start: [-15.0, 0.0, 5.0],
+        segments: vec![
+            Segment::Line {
+                to: [0.0, 0.0, 5.0],
+            },
+            Segment::Arc {
+                via: [5.0, 5.0, 5.0],
+                to: [0.0, 10.0, 5.0],
+            },
+        ],
+    }
+}
+
+/// A slot 3 mm deep along a line and an arc, a millimetre a level, both
+/// ways and one way: as deep as asked, its arc an arc at every level, and
+/// what it cuts into the part meant, so it verifies. Both ways it never
+/// lifts; one way it lifts at the end of each level, back to the start.
+#[test]
+fn a_slot_goes_down_both_ways_or_one_way_and_verifies() {
+    use crate::job::{SlotPattern, ToolKind};
+    use crate::path::toolpath::{MoveKind, MoveRole};
+    for pattern in [SlotPattern::Bidirectional, SlotPattern::Directional] {
+        let slot = StrategySpec::Slot {
+            depth: 3.0,
+            pattern,
+            reverse: false,
+        };
+        assert_eq!(slot.default_stepdown(), Some(1.0));
+        let (mut job, result) = drawn_on_a_plate(slot, flat(4.0), vec![drawn_hook()]);
+        let op = &result.operations[0];
+        let StrategyDetail::Engrave(report) = op.detail else {
+            panic!("reported {:?}", op.detail);
+        };
+        assert_eq!((report.curves, report.closed), (1, 0));
+        let cuts: Vec<_> = op
+            .path
+            .moves()
+            .iter()
+            .filter(|m| matches!(m.role, MoveRole::Cut | MoveRole::Ramp))
+            .collect();
+        let deepest = cuts.iter().map(|m| m.to.z).fold(f64::MAX, f64::min);
+        assert!((deepest - 2.0).abs() < 1e-9, "{pattern:?}: {deepest}");
+        let arcs = cuts
+            .iter()
+            .filter(|m| matches!(m.kind, MoveKind::Arc(_)))
+            .count();
+        assert!(arcs >= 3, "{pattern:?}: {arcs} arcs");
+        let lifts = op
+            .path
+            .moves()
+            .iter()
+            .filter(|m| m.role == MoveRole::Retract)
+            .count();
+        match pattern {
+            // Out once, at the end.
+            SlotPattern::Bidirectional => {
+                assert_eq!(report.passes, 4, "three ramps and the last");
+                assert!(lifts <= 1, "{lifts} lifts");
+            }
+            // Three levels, each its own pass, lifted out of and ramped into
+            // along the slot, at its start.
+            SlotPattern::Directional => {
+                assert_eq!(report.passes, 3);
+                assert!(lifts >= 2, "{lifts} lifts");
+                assert_eq!(op.links.ramps, 3, "{:?}", op.links);
+            }
+        }
+        assert!(op.sim.removed_mm3 > 0.0);
+        assert!(result.is_clean(), "{pattern:?}: {:?}", result.warnings());
+        assert_eq!(result.verify.gouged, 0, "{pattern:?}");
+
+        // A V-bit's width changes with depth: no slot.
+        job.tools.get_mut("drawn").unwrap().kind = ToolKind::Cone;
+        job.tools.get_mut("drawn").unwrap().angle = Some(90.0);
+        let refused = job.check_setup(0).unwrap_err().to_string();
+        assert!(refused.contains("end mill its width"), "{refused}");
+    }
+}
+
+/// The plate's hole's top rim deburred with a 90° V-bit, a millimetre wide
+/// and the tip half a millimetre past: the tool's centre goes round inside
+/// the hole, away from the plate, half a millimetre in from the rim, its tip
+/// a millimetre and a half down, round it as arcs; what it cuts is meant,
+/// so the run verifies. Wider than the cone reaches is refused.
+#[test]
+fn a_chamfer_goes_beside_its_edge_as_deep_as_it_is_wide() {
+    use crate::job::{ChamferSide, FeatureRef, ToolKind};
+    use crate::path::toolpath::{MoveKind, MoveRole};
+    let body = Body::derived(synthetic::plate_with_hole(20.0, 5.0, 4.0, 48));
+    let chamfer = StrategySpec::Chamfer {
+        width: 1.0,
+        tip_offset: 0.5,
+        side: ChamferSide::Auto,
+    };
+    let mut job = sheet_job(chamfer);
+    job.tools.insert(
+        "vbit".into(),
+        crate::job::ToolSpec {
+            kind: ToolKind::Cone,
+            diameter: 6.0,
+            angle: Some(90.0),
+            number: 5,
+            ..crate::job::ToolSpec::default()
+        },
+    );
+    let op = &mut job.setups[0].operations[0];
+    op.tool = Some("vbit".into());
+    op.selection.edges = vec![FeatureRef {
+        model: "dome".into(),
+        index: u32::MAX,
+        at: [4.0, 0.0, 5.0],
+    }];
+    let bodies: Bodies<'_> = [("dome", &body)].into_iter().collect();
+    job.check_setup(0).unwrap();
+    let result = run_setup(&job, 0, &bodies).unwrap();
+    let op = &result.operations[0];
+    assert!(op.warnings.is_empty(), "{:?}", op.warnings);
+    let mut at = op.path.moves()[0].to;
+    let mut arcs = 0;
+    for m in op.path.moves() {
+        if matches!(m.role, MoveRole::Cut | MoveRole::Ramp)
+            && let MoveKind::Arc(a) = m.kind
+        {
+            arcs += 1;
+            assert!(a.centre.truncate().length() < 1e-6, "{a:?}");
+            assert!((a.radius(at) - 3.5).abs() < 1e-6, "{}", a.radius(at));
+        }
+        at = m.to;
+    }
+    assert!(arcs >= 4, "{arcs}");
+    let deepest = op
+        .path
+        .moves()
+        .iter()
+        .filter(|m| m.role == MoveRole::Cut)
+        .map(|m| m.to.z)
+        .fold(f64::MAX, f64::min);
+    assert!((deepest - 3.5).abs() < 1e-9, "{deepest}");
+    assert!(op.sim.removed_mm3 > 0.0);
+    assert!(result.is_clean(), "{:?}", result.warnings());
+    assert_eq!(result.verify.gouged, 0);
+
+    // As drawn: the run's own centres, round inside the rim.
+    let prepared = crate::setup::prepare(&job, 0, &bodies).unwrap();
+    let (centres, place) =
+        chamfer_centres(&job, &job.setups[0].operations[0], &prepared, &bodies).unwrap();
+    assert_eq!(centres.len(), 1);
+    assert!((place.reach - 1.5).abs() < 1e-12);
+    for p in centres[0].points(0.001) {
+        assert!((p.truncate().length() - 3.5).abs() < 1e-6, "{p}");
+    }
+
+    // A 3 mm cone has 1.5 mm of flank: a 1.2 mm chamfer half a millimetre
+    // down needs 1.7.
+    let small = job.tools.get_mut("vbit").unwrap();
+    small.diameter = 3.0;
+    if let StrategySpec::Chamfer { width, .. } = &mut job.setups[0].operations[0].strategy {
+        *width = 1.2;
+    }
+    let refused = job.check_setup(0).unwrap_err().to_string();
+    assert!(refused.contains("more of the cone"), "{refused}");
+    // A flat end mill has no flank.
+    job.tools.get_mut("vbit").unwrap().kind = ToolKind::Flat;
+    let refused = job.check_setup(0).unwrap_err().to_string();
+    assert!(refused.contains("chamfer mill or a V-bit"), "{refused}");
+}
+
+/// Where the material went down between two keyframes, seen from above.
+fn lowered_cells(result: &SetupResult, op: usize) -> Vec<DVec2> {
+    let before = result.keyframes[op].unpack().unwrap();
+    let after = result.keyframes[op + 1].unpack().unwrap();
+    let (before, after) = (before.field(), after.field());
+    let mut out = Vec::new();
+    for iy in 0..before.ny() {
+        for ix in 0..before.nx() {
+            if let (Some(b), Some(a)) = (before.get(ix, iy), after.get(ix, iy))
+                && a < b - 1e-3
+            {
+                out.push(before.position(ix, iy).unwrap());
+            }
+        }
+    }
+    out
+}
+
+/// A circle engraved, arrayed three times along X and round a centre, and
+/// mirrored: every copy is cut into the material, so the simulation sees
+/// them all and they verify; the mirrored one goes round the same way as
+/// the original, turned round. Copies off the stock are said.
+#[test]
+fn a_pattern_cuts_every_copy_and_a_mirror_keeps_the_direction() {
+    use crate::job::{Linear, Mirror, MirrorAxis, Pattern, Polar, TraceDirection};
+    use crate::path::toolpath::{MoveKind, MoveRole};
+    let engrave = StrategySpec::Engrave {
+        depth: 0.5,
+        direction: TraceDirection::Climb,
+        reverse: false,
+    };
+    let circle = || vec![drawn_circle(-12.0, -8.0, 3.0)];
+    let (_, one) = drawn_on_a_plate(engrave, flat(1.0), circle());
+    let alone = one.operations[0].sim.removed_mm3;
+
+    // Three along X, 12 apart.
+    let rows = Pattern {
+        linear: Some(Linear {
+            x_count: 3,
+            x_spacing: 12.0,
+            y_count: 1,
+            y_spacing: 0.0,
+        }),
+        ..Pattern::default()
+    };
+    let (_, result) = drawn_on_a_plate_with(engrave, flat(1.0), circle(), |op| op.transform = rows);
+    let op = &result.operations[0];
+    assert!(
+        (op.sim.removed_mm3 / alone - 3.0).abs() < 0.05,
+        "{} {alone}",
+        op.sim.removed_mm3
+    );
+    assert_eq!(op.passes, 3 * one.operations[0].passes);
+    let cells = lowered_cells(&result, 0);
+    for x in [-12.0, 0.0, 12.0] {
+        let near = cells
+            .iter()
+            .filter(|p| (p.distance(dvec2(x, -8.0)) - 3.0).abs() < 1.0)
+            .count();
+        assert!(near > 20, "nothing cut round x = {x}");
+    }
+    assert!(result.is_clean(), "{:?}", result.warnings());
+    assert_eq!(result.verify.gouged, 0);
+
+    // Four round the plate's middle.
+    let round = Pattern {
+        polar: Some(Polar {
+            count: 4,
+            angle: 360.0,
+            centre: [0.0, 0.0],
+        }),
+        ..Pattern::default()
+    };
+    let (_, result) =
+        drawn_on_a_plate_with(engrave, flat(1.0), circle(), |op| op.transform = round);
+    let op = &result.operations[0];
+    assert!((op.sim.removed_mm3 / alone - 4.0).abs() < 0.05);
+    assert!(result.is_clean(), "{:?}", result.warnings());
+
+    // Mirrored about Y through the middle: beside it at x = 12, and round
+    // the same way as the original, clockwise to climb.
+    let mirror = Pattern {
+        mirror: Some(Mirror {
+            axis: MirrorAxis::Y,
+            through: [0.0, 0.0],
+        }),
+        ..Pattern::default()
+    };
+    let (_, result) =
+        drawn_on_a_plate_with(engrave, flat(1.0), circle(), |op| op.transform = mirror);
+    let op = &result.operations[0];
+    assert!((op.sim.removed_mm3 / alone - 2.0).abs() < 0.05);
+    let level_arcs = |right: bool| -> Vec<f64> {
+        op.path
+            .moves()
+            .iter()
+            .filter(|m| m.role == MoveRole::Cut && (m.to.x > 0.0) == right)
+            .filter_map(|m| match m.kind {
+                MoveKind::Arc(a) => Some(a.sweep),
+                MoveKind::Linear => None,
+            })
+            .collect()
+    };
+    let (left, right) = (level_arcs(false), level_arcs(true));
+    assert!(!left.is_empty() && !right.is_empty());
+    assert!(
+        left.iter().chain(&right).all(|s| *s < 0.0),
+        "{left:?} {right:?}"
+    );
+    assert!(op.warnings.is_empty(), "{:?}", op.warnings);
+    assert!(result.is_clean(), "{:?}", result.warnings());
+
+    // Three along X 20 apart: the last off the plate, and said.
+    let far = Pattern {
+        linear: Some(Linear {
+            x_count: 3,
+            x_spacing: 20.0,
+            y_count: 1,
+            y_spacing: 0.0,
+        }),
+        ..Pattern::default()
+    };
+    let (mut job, result) =
+        drawn_on_a_plate_with(engrave, flat(1.0), circle(), |op| op.transform = far);
+    let warned = &result.operations[0].warnings;
+    assert!(
+        warned
+            .iter()
+            .any(|w| w.contains("1 of the pattern's 3 copies go outside the stock")),
+        "{warned:?}"
+    );
+
+    // No copies at all is no pattern.
+    if let Some(l) = &mut job.setups[0].operations[0].transform.linear {
+        l.x_count = 0;
+    }
+    let refused = job.check_setup(0).unwrap_err().to_string();
+    assert!(refused.contains("x_count"), "{refused}");
 }

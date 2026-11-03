@@ -242,6 +242,42 @@ pub enum StrategySpec {
         #[serde(default, skip_serializing_if = "is_default")]
         reverse: bool,
     },
+    /// A slot along curves and edges, open or closed: the tool's centre run
+    /// along them `depth` below the top, as wide as the tool. Engraving's
+    /// curves and cut ([`StrategySpec::Engrave`]), deeper and in levels a
+    /// stepdown apart, both ways or always the same way. Arcs are cut as
+    /// arcs. Fusion's Slot.
+    Slot {
+        /// How deep it cuts below the top, in millimetres.
+        #[serde(default = "default_slot_depth", skip_serializing_if = "is_slot_depth")]
+        depth: f64,
+        /// Back and forth along it, or always the same way.
+        #[serde(default, skip_serializing_if = "is_default")]
+        pattern: SlotPattern,
+        /// Each curve run the other way from how it was drawn.
+        #[serde(default, skip_serializing_if = "is_default")]
+        reverse: bool,
+    },
+    /// Edges chamfered, or deburred, with a chamfer mill or a V-bit: its
+    /// flank run along each, its centre beside the edge away from the
+    /// material, its tip deep enough that the chamfer is `width` wide, and
+    /// the tip offset below that. Each edge from its own height. Fusion's 2D
+    /// Chamfer ([`crate::strategy::chamfer`]).
+    Chamfer {
+        /// How wide the chamfer is, seen from above, in millimetres.
+        #[serde(
+            default = "default_chamfer_width",
+            skip_serializing_if = "is_chamfer_width"
+        )]
+        width: f64,
+        /// How far below the chamfer's foot the tip goes, so the flank cuts
+        /// it and not the tip's corner, in millimetres.
+        #[serde(default = "default_tip_offset", skip_serializing_if = "is_tip_offset")]
+        tip_offset: f64,
+        /// Which side of each edge the tool goes.
+        #[serde(default, skip_serializing_if = "is_default")]
+        side: ChamferSide,
+    },
     /// Closed areas carved with a V-bit along their middle: at each point as
     /// deep as the V reaches the walls either side, so the width it cuts is the
     /// area's, a letter's stroke. Where the area is wider than the V reaches
@@ -282,6 +318,8 @@ impl StrategySpec {
             StrategySpec::Drill { .. } => "drill",
             StrategySpec::Engrave { .. } => "engrave",
             StrategySpec::VCarve { .. } => "v-carve",
+            StrategySpec::Slot { .. } => "slot",
+            StrategySpec::Chamfer { .. } => "chamfer",
         }
     }
 
@@ -317,7 +355,9 @@ impl StrategySpec {
             | StrategySpec::Radial { .. }
             | StrategySpec::Face { .. }
             | StrategySpec::Drill { .. }
-            | StrategySpec::VCarve { .. } => false,
+            | StrategySpec::VCarve { .. }
+            | StrategySpec::Slot { .. }
+            | StrategySpec::Chamfer { .. } => false,
         }
     }
 
@@ -374,11 +414,15 @@ impl StrategySpec {
             // Down to their depth in one, unless asked: engraving is shallow.
             _ if matches!(
                 self,
-                StrategySpec::Engrave { .. } | StrategySpec::VCarve { .. }
+                StrategySpec::Engrave { .. }
+                    | StrategySpec::VCarve { .. }
+                    | StrategySpec::Chamfer { .. }
             ) =>
             {
                 None
             }
+            // A slot is cut the tool's full width: half a 2D cut's.
+            _ if matches!(self, StrategySpec::Slot { .. }) => Some(1.0),
             // A finishing waterline's, as Fusion's Contour.
             _ if matches!(self, StrategySpec::Contour { .. }) => Some(1.0),
             _ => Some(2.0),
@@ -398,6 +442,34 @@ pub enum TraceDirection {
     Conventional,
     /// Every curve the way it was drawn.
     AsDrawn,
+}
+
+/// How a slot goes down to its depth.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SlotPattern {
+    /// Back and forth along it, as an engraving goes down: each time along
+    /// it a stepdown deeper, ramping down as it goes, then once at the
+    /// depth. It never lifts, and never plunges. Round and round a closed
+    /// one.
+    #[default]
+    Bidirectional,
+    /// Always the same way: a level a stepdown deeper each time along it,
+    /// lifting at its end and going back to its start, entered as the
+    /// linking says (ramping along it unless asked to plunge).
+    Directional,
+}
+
+/// Which side of each edge a chamfer's tool goes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ChamferSide {
+    /// Away from the material, as the part either side of the edge says:
+    /// inside a pocket's rim, outside an outline.
+    #[default]
+    Auto,
+    /// The other side.
+    Flipped,
 }
 
 /// Which way a tapped thread turns.
@@ -588,6 +660,39 @@ fn default_engrave_depth() -> f64 {
 #[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_engrave_depth(v: &f64) -> bool {
     (*v - 0.5).abs() < f64::EPSILON
+}
+
+/// Three millimetres: a keyway's or a T-track's, in a few levels.
+fn default_slot_depth() -> f64 {
+    3.0
+}
+
+// A signature serde's `skip_serializing_if` requires.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_slot_depth(v: &f64) -> bool {
+    (*v - 3.0).abs() < f64::EPSILON
+}
+
+/// Half a millimetre: an edge broken, as a deburr.
+fn default_chamfer_width() -> f64 {
+    0.5
+}
+
+// A signature serde's `skip_serializing_if` requires.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_chamfer_width(v: &f64) -> bool {
+    (*v - 0.5).abs() < f64::EPSILON
+}
+
+/// A fifth of a millimetre: the tip's corner kept off the chamfer's foot.
+fn default_tip_offset() -> f64 {
+    0.2
+}
+
+// A signature serde's `skip_serializing_if` requires.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_tip_offset(v: &f64) -> bool {
+    (*v - 0.2).abs() < f64::EPSILON
 }
 
 fn default_min_ring() -> f64 {

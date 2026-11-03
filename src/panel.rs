@@ -17,6 +17,7 @@ use crate::data::{
 };
 use crate::linking::{linking_event, linking_group};
 use crate::passes::{finishing_group, passes_event, strategy_rows, tabs_group};
+use crate::pattern::{pattern_event, pattern_group};
 use crate::picking::Slot;
 use crate::runs::State;
 use crate::tools::{files_groups, open_post, open_tools, tool_editor, tool_event};
@@ -1175,6 +1176,10 @@ fn heights_group(data: &OperationData, feature: &str) -> Widget {
     }
     let uses = data.strategy().uses();
     let about = match data.strategy() {
+        StrategySpec::Chamfer { .. } => Some(
+            "It has no top or bottom: each edge is chamfered from its own height, as \
+             deep as the chamfer's width and the tip offset take the cone.",
+        ),
         _ if uses.top.is_none() && uses.bottom.is_none() => {
             Some("It follows the part all the way down, so it has no top or bottom.")
         }
@@ -1197,7 +1202,7 @@ fn heights_group(data: &OperationData, feature: &str) -> Widget {
         StrategySpec::Face { .. } => {
             Some("Without a bottom, the stock is faced down to the part's top.")
         }
-        StrategySpec::Engrave { .. } => Some(
+        StrategySpec::Engrave { .. } | StrategySpec::Slot { .. } => Some(
             "It cuts its depth below the top: the part's, where a sketch drawn on it lies, \
              or the picks' to cut from where the curves are.",
         ),
@@ -1552,6 +1557,7 @@ pub fn operation_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
     }
     panel.push(heights_group(&data, id));
     panel.push(linking_group(&data, spec, id));
+    panel.push(pattern_group(&data, id));
 
     if let Some(problem) = setup_data.and_then(|s| data.problem(&s.tools)) {
         panel.push(note(NoteKind::Warning, problem));
@@ -1596,6 +1602,18 @@ pub fn operation_event(cam: &mut Cam, id: &str, event: PanelEvent) {
             .as_ref()
             .and_then(|t| setup.as_ref()?.1.tools.get(t).cloned());
         if passes_event(&mut data, field, &event, tool.as_ref()) {
+            cam.write_operation(id, &data);
+        }
+        return;
+    }
+    let pattern = match &event {
+        PanelEvent::Number { id, .. }
+        | PanelEvent::Toggle { id, .. }
+        | PanelEvent::Choice { id, .. } => id.strip_prefix("transform/"),
+        _ => None,
+    };
+    if let Some(field) = pattern {
+        if pattern_event(&mut data, field, &event) {
             cam.write_operation(id, &data);
         }
         return;

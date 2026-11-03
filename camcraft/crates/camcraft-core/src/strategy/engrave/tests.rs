@@ -14,6 +14,7 @@ fn params() -> EngraveParams {
         plunge_feed: 300.0,
         direction: TraceDirection::AsDrawn,
         reverse: false,
+        levels: Levels::Ramped,
         climb_right: true,
         tolerance: 0.01,
     }
@@ -195,4 +196,53 @@ fn curves_are_cut_nearest_first() {
         links,
         [dvec2(0.0, 0.0), dvec2(25.0, 0.0), dvec2(100.0, 0.0)]
     );
+}
+
+/// A slot one way: level by level, evenly, each from the curve's start,
+/// with a link to it, and its arcs arcs.
+#[test]
+fn one_way_goes_level_by_level_from_the_start() {
+    let line = Trace {
+        start: dvec3(0.0, 0.0, 0.0),
+        pieces: vec![Piece::Line {
+            to: dvec3(10.0, 0.0, 0.0),
+        }],
+    };
+    let p = EngraveParams {
+        depth: 3.0,
+        stepdown: Some(1.2),
+        levels: Levels::OneWay,
+        ..params()
+    };
+    let (path, report) = engrave(&[line], &p).unwrap();
+    // 3 mm, no more than 1.2 a level: three of 1 mm.
+    assert_eq!(report.passes, 3);
+    let moves = path.moves();
+    let links: Vec<DVec3> = moves
+        .iter()
+        .filter(|m| m.role == MoveRole::Link)
+        .map(|m| m.to)
+        .collect();
+    assert_eq!(links.len(), 3);
+    for (l, z) in links.iter().zip([9.0, 8.0, 7.0]) {
+        assert_eq!(l.truncate(), dvec2(0.0, 0.0), "each level from the start");
+        assert!((l.z - z).abs() < 1e-9, "{links:?}");
+    }
+    // Each cut is level, and the same way, along +X.
+    for w in moves.windows(2) {
+        if w[1].role == MoveRole::Cut {
+            assert!((w[1].to.z - w[0].to.z).abs() < 1e-9);
+            assert!(w[1].to.x > w[0].to.x);
+        }
+    }
+
+    // Round a circle, each level two arcs at its height.
+    let (path, report) = engrave(&[circle()], &p).unwrap();
+    assert_eq!((report.passes, report.arcs), (3, 6));
+    for (from, m) in cuts(&path) {
+        if m.role == MoveRole::Cut {
+            assert!(matches!(m.kind, MoveKind::Arc(_)), "{m:?}");
+            assert!((m.to.z - from.z).abs() < 1e-9);
+        }
+    }
 }

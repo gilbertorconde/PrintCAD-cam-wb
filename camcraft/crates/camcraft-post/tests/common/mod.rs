@@ -181,10 +181,17 @@ pub fn engraving() -> Toolpath {
         plunge_feed: 250.0,
         direction: TraceDirection::Climb,
         reverse: false,
+        levels: Default::default(),
         climb_right: true,
         tolerance: 0.01,
     };
     let (path, _) = engrave(&[circle, line], &params).unwrap();
+    linked(&path)
+}
+
+/// `path`'s links made as the linker would, straight down from above, from
+/// and back to 10 mm up.
+fn linked(path: &Toolpath) -> Toolpath {
     let mut t = Toolpath::new();
     t.rapid_to(dvec3(0.0, 0.0, 10.0)).unwrap();
     for m in path.moves() {
@@ -204,4 +211,40 @@ pub fn engraving() -> Toolpath {
     t.feed_to(end.truncate().extend(10.0), MoveRole::Retract, 900.0)
         .unwrap();
     t
+}
+
+/// A slot 2 mm deep, one way, a millimetre a level: along a line, then a
+/// half turn to the left about (0, 5), each level from the start.
+pub fn slot() -> Toolpath {
+    use camcraft_core::job::TraceDirection;
+    use camcraft_core::strategy::engrave::{EngraveParams, Levels, Piece, Trace, engrave};
+    let hook = Trace {
+        start: dvec3(-10.0, 0.0, 0.0),
+        pieces: vec![
+            Piece::Line {
+                to: dvec3(0.0, 0.0, 0.0),
+            },
+            Piece::Arc {
+                centre: dvec2(0.0, 5.0),
+                ccw: true,
+                to: dvec3(0.0, 10.0, 0.0),
+            },
+        ],
+    };
+    let params = EngraveParams {
+        top: 0.0,
+        depth: 2.0,
+        stepdown: Some(1.0),
+        ramp_angle: 5f64.to_radians(),
+        feed: 800.0,
+        ramp_feed: 400.0,
+        plunge_feed: 250.0,
+        direction: TraceDirection::AsDrawn,
+        reverse: false,
+        levels: Levels::OneWay,
+        climb_right: true,
+        tolerance: 0.01,
+    };
+    let (path, _) = engrave(&[hook], &params).unwrap();
+    linked(&path)
 }

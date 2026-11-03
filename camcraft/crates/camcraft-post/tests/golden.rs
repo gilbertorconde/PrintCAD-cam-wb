@@ -31,7 +31,7 @@ use camcraft_post::op::{ProgramSpec, lower};
 use camcraft_post::profile::Profile;
 use camcraft_post::readback;
 use camcraft_post::render::render;
-use common::{chip_breaking, drilling, engraving, fixture, spec, tapping};
+use common::{chip_breaking, drilling, engraving, fixture, slot, spec, tapping};
 
 fn check(profile_name: &str) {
     let profile = Profile::builtin(profile_name)
@@ -188,6 +188,30 @@ fn an_engraving_writes_its_arcs_as_arcs() {
         "{arcs:?}"
     );
     assert!(arcs.iter().any(|l| l.contains('Z')), "no helix: {arcs:?}");
+}
+
+/// A slot along a line and a half turn, one way in two levels: the half
+/// turn is one `G3` by its centre at each level, and each level starts
+/// again from the line's start.
+#[test]
+fn a_slot_writes_its_arcs_as_arcs_at_every_level() {
+    let p = Profile::builtin("grbl").unwrap().unwrap();
+    let spec = ProgramSpec {
+        strategy: "slot".into(),
+        ..spec()
+    };
+    check_against(&p, &slot(), &spec, "grbl-slot");
+    let ops = lower(&slot(), &spec).unwrap();
+    let (text, _) = render(&ops, &p, "golden");
+    let arcs: Vec<&str> = text
+        .lines()
+        .filter(|l| l.split_whitespace().any(|w| w == "G2" || w == "G3"))
+        .collect();
+    assert_eq!(arcs.len(), 2, "{text}");
+    assert!(
+        arcs.iter().all(|l| l.contains("G3") && l.contains('J')),
+        "{arcs:?}"
+    );
 }
 
 /// A setup tilted 30° about X, for a machine with an A axis: the header says

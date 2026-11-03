@@ -12,16 +12,18 @@ use super::error::in_op;
 use super::{Made, OperationResult, PLUNGE_RATIO, RunError, StrategyDetail};
 use crate::cutter::allowance::{Allowance, EffectiveTool};
 use crate::cutter::dropcutter::DropCutter;
-use crate::cutter::tool::ToolProfile;
+use crate::cutter::tool::{Flat, ToolProfile};
 use crate::job::{
-    ContourOrder, CutDirection, Depths, Entry, FaceDirection, HeightContext, Job, Links, Operation,
-    PassOrder, Picks, RadialDirection, Retraction, SpindleDirection, StrategySpec, ToolSpec,
+    ChamferSide, ContourOrder, CutDirection, Depths, Entry, FaceDirection, HeightContext, Job,
+    Links, Operation, PassOrder, Picks, RadialDirection, Retraction, SlotPattern, SpindleDirection,
+    StrategySpec, ToolSpec,
 };
 use crate::path::linker::{
     ClearanceField, EntryKind, LinkParams, LinkReport, Material, Ramp, StayDown, Surface,
     highest_under, link,
 };
 use crate::path::ordering::order_passes;
+use crate::path::pattern::{each, overhang, repeat};
 use crate::path::simadapt::sim_moves_of;
 use crate::path::tabs::{TabParams, add_tabs};
 use crate::path::toolpath::{Move, Toolpath};
@@ -29,8 +31,9 @@ use crate::setup::features::{Chain, FeatureError, Picking, picked_chains};
 use crate::setup::{Bodies, Prepared};
 use crate::strategy::StrategyError;
 use crate::strategy::adaptive::{AdaptiveParams, adaptive_rough, flat_heights};
+use crate::strategy::chamfer::{Centres, Place, centres, material_side};
 use crate::strategy::drilling::{DrillParams, DrillReport, Hole, Tap, drill, holes, nearest_first};
-use crate::strategy::engrave::{EngraveParams, Trace, engrave};
+use crate::strategy::engrave::{EngraveParams, EngraveReport, Levels, Trace, engrave, in_order};
 use crate::strategy::face::{FaceParams, LevelsAsked, face};
 use crate::strategy::flat::{FlatParams, flat_finish};
 use crate::strategy::morph::{MorphParams, MorphedSpiralReport, morphed_spiral};
@@ -52,7 +55,8 @@ mod clearing;
 mod finishing;
 mod link;
 
-use carving::{engrave_paths, vcarve_paths};
+pub(super) use carving::chamfer_curves;
+use carving::{chamfer_paths, engrave_paths, slot_paths, vcarve_paths};
 use clearing::{adaptive_paths, drill_paths, face_paths, planar_paths, pocket_clearing_paths};
 pub(super) use clearing::{drill_holes, heights_of, planar_areas};
 use finishing::{
@@ -264,11 +268,33 @@ pub(super) fn run_operation(
             depth,
             direction,
             reverse,
-        } => engrave_paths(work, (depth, direction, reverse), traces, &mut warnings)?,
+        } => engrave_paths(
+            work,
+            (depth, direction, reverse),
+            Levels::Ramped,
+            traces,
+            &mut warnings,
+        )?,
+        StrategySpec::Slot {
+            depth,
+            pattern,
+            reverse,
+        } => slot_paths(work, (depth, pattern, reverse), traces, &mut warnings)?,
+        StrategySpec::Chamfer { .. } => chamfer_paths(work, traces, &mut warnings)?,
         StrategySpec::VCarve { max_depth } => match carved {
             Some(area) => vcarve_paths(work, max_depth, area, &mut warnings)?,
             None => return Err(in_op(op)(FeatureError::NothingToCarve)),
         },
+    };
+
+    // A pattern repeats the strategy's path before anything else is done to
+    // it, so each copy is ordered, tabbed, linked into the material and
+    // simulated as the original is.
+    let (raw, passes) = if op.transform.repeats() {
+        let (path, copies) = patterned(work, &raw, &mut warnings)?;
+        (path, passes.saturating_mul(u64::from(copies)))
+    } else {
+        (raw, passes)
     };
 
     // Ordering is a Toolpath -> Toolpath transform, applied before linking so the
@@ -395,6 +421,59 @@ pub(super) fn run_operation(
     })
 }
 
+/// `raw` repeated as `work`'s operation's pattern says, and how many copies
+/// that is, the original among them; a copy that goes further outside the stock than the
+/// original, or passes of mirrored copies cut the other way where that
+/// matters, said.
+fn patterned(
+    work: &Work<'_>,
+    raw: &Toolpath,
+    warnings: &mut Vec<String>,
+) -> Result<(Toolpath, u32), RunError> {
+    let op = work.op;
+    let pattern = &op.transform;
+    let (lo, hi) = work.bounds;
+    let tolerance = work.job.tolerance;
+    let own = overhang(raw.moves(), lo, hi);
+    let copies = each(raw, pattern);
+    let outside: Vec<f64> = copies
+        .iter()
+        .map(|c| overhang(c, lo, hi))
+        .filter(|o| *o > own + tolerance)
+        .collect();
+    if !outside.is_empty() {
+        let worst = outside.iter().copied().fold(0.0, f64::max);
+        warnings.push(format!(
+            "{} of the pattern's {} copies go outside the stock, up to {worst:.1} mm \
+             further than the original does",
+            outside.len(),
+            copies.len()
+        ));
+    }
+    // Adaptive clearing steers each pass by the material ahead of it, and a
+    // drill's holes have no way round.
+    let steered = op.strategy.uses().links == Links::Own;
+    let r = repeat(raw, pattern, steered).map_err(|e| in_op(op)(StrategyError::from(e)))?;
+    // Where direction means nothing, or both ways is the strategy's own.
+    let either_way = matches!(
+        op.strategy,
+        StrategySpec::Parallel { .. }
+            | StrategySpec::Radial { .. }
+            | StrategySpec::Face { .. }
+            | StrategySpec::Drill { .. }
+            | StrategySpec::Slot { .. }
+            | StrategySpec::VCarve { .. }
+    );
+    if r.unturned > 0 && !either_way {
+        warnings.push(format!(
+            "{} pass(es) of the mirrored copies could not be turned round, so they cut the \
+             other way: conventional where the original climbs",
+            r.unturned
+        ));
+    }
+    Ok((r.path, r.copies))
+}
+
 /// What stands for an operation left out of a run: no paths, nothing cut. `spec`
 /// is its tool, if it names one the job has.
 ///
@@ -414,7 +493,9 @@ pub(super) fn not_made(op: &Operation, spec: Option<&ToolSpec>, made: Made) -> O
         StrategySpec::Profile { .. } => StrategyDetail::Profile(Default::default()),
         StrategySpec::Pocket { .. } => StrategyDetail::Pocket(Default::default()),
         StrategySpec::Face { .. } => StrategyDetail::Face(Default::default()),
-        StrategySpec::Engrave { .. } => StrategyDetail::Engrave(Default::default()),
+        StrategySpec::Engrave { .. } | StrategySpec::Slot { .. } | StrategySpec::Chamfer { .. } => {
+            StrategyDetail::Engrave(Default::default())
+        }
         StrategySpec::VCarve { .. } => StrategyDetail::VCarve(Default::default()),
         StrategySpec::Drill {
             peck,

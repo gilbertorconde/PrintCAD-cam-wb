@@ -62,13 +62,35 @@ panels, the drawing and the helper that runs camcraft.
   and edges, open or closed, at a depth (0.5 mm unless set), each ramped
   down along itself, round a closed one and back and forth along an open
   one, so it never lifts between its levels, its arcs written as `G2` and
-  `G3`; and V-carving closed areas, letters among them, with a V-bit down
+  `G3`; slots along the same curves and edges, as wide as the tool, 3 mm
+  deep unless set and a millimetre a level, both ways (back and forth,
+  ramping down as an engraving does) or one way (each level from the
+  start, lifting back, entered by a ramp along the slot or a plunge),
+  their arcs arcs at every level; deburring and chamfering with a chamfer
+  mill or V-bit along picked edges, a pocket's rim or a part's outline,
+  each from its own height: as wide as asked (0.5 mm unless set), the
+  tip a tip offset below the chamfer so its flank cuts it, the tool's
+  centre beside the edge away from the material, as the part either side
+  says, or flipped, and a cone too small for it a failed check; and
+  V-carving closed areas, letters among them, with a V-bit down
   their middle, as deep as each is wide: past its deepest it cuts the walls
   that deep and leaves the flat floor between, and says so, for a flat end
   mill to clear. An operation
   (`io.github.gilbertorconde.cam.operation`) belongs to a setup and runs in the
   document's order, each against what the one before left. Drag one in the
   tree to run it sooner or later, or under another setup.
+- **Patterns.** Any operation's toolpath can be repeated before it is
+  linked: in rows along X and Y (so many, so far apart), round a centre
+  (so many, over an angle, a whole turn by default), and mirrored about a
+  line along the setup's X or Y through a point, the original kept; given
+  together, the rows are copied round the centre and all of them
+  mirrored. Each number takes a formula. Every copy is linked, cut into
+  the material, simulated and checked, and drawn. A mirrored copy would
+  cut conventional where the original climbs, so each of its rings, and
+  each pass all at one level, is run the other way round; what cannot be
+  (a ramp, an adaptive pass, steered by the material ahead of it) is said.
+  A copy that goes further outside the stock than the original is a
+  warning.
 - **Picking in the view,** as camcraft's: a pick row in the panel arms it,
   and while it is armed, hovering shows what a click takes. An operation
   takes faces, and edges by the loop they go round at their height (an edge
@@ -183,6 +205,14 @@ local rough = cam.operation{setup = setup.feature, strategy = "adaptive", tool =
                            heights = {bottom_from = "model-top", bottom = -6}}
 local name = cam.operation{setup = setup.feature, strategy = "engrave", tool = "60° V-bit",
                            sketches = {"<sketch id>"}, passes = {depth = 0.4}}
+local keyway = cam.operation{setup = setup.feature, strategy = "slot", tool = "1/4 upcut",
+                             sketches = {"<sketch id>"}, pattern = "directional",
+                             passes = {depth = 4}, stepdown = 1}
+local three = cam.operation{setup = setup.feature, strategy = "pocket", tool = "1/4 upcut",
+                            transform = {linear = true, x_count = 3, x_spacing = 25,
+                                       mirror = true, mirror_axis = "x", through_y = 0}}
+local deburr = cam.operation{setup = setup.feature, strategy = "chamfer", tool = "90° V-bit",
+                             passes = {chamfer_width = 0.8, tip_offset = 0.3}}
 local letters = cam.operation{setup = setup.feature, strategy = "v-carve", tool = "60° V-bit",
                               sketches = {"<sketch id>"}, passes = {max_depth = {value = 2, given = true}}}
 cam.status{id = setup.feature}          -- queued, running, ready (with its checks), failed
