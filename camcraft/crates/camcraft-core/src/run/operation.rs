@@ -15,7 +15,8 @@ use crate::cutter::dropcutter::DropCutter;
 use crate::cutter::tool::ToolProfile;
 use crate::job::{
     ContourOrder, CutDirection, Depths, Entry, FaceDirection, HeightContext, Job, Links, Operation,
-    PassOrder, Picks, RadialDirection, Retraction, SpindleDirection, StrategySpec, ToolSpec,
+    PassOrder, Picks, RadialDirection, Retraction, SlotPattern, SpindleDirection, StrategySpec,
+    ToolSpec,
 };
 use crate::path::linker::{
     ClearanceField, EntryKind, LinkParams, LinkReport, Material, Ramp, StayDown, Surface,
@@ -30,7 +31,7 @@ use crate::setup::{Bodies, Prepared};
 use crate::strategy::StrategyError;
 use crate::strategy::adaptive::{AdaptiveParams, adaptive_rough, flat_heights};
 use crate::strategy::drilling::{DrillParams, DrillReport, Hole, Tap, drill, holes, nearest_first};
-use crate::strategy::engrave::{EngraveParams, Trace, engrave};
+use crate::strategy::engrave::{EngraveParams, Levels, Trace, engrave};
 use crate::strategy::face::{FaceParams, LevelsAsked, face};
 use crate::strategy::flat::{FlatParams, flat_finish};
 use crate::strategy::morph::{MorphParams, MorphedSpiralReport, morphed_spiral};
@@ -52,7 +53,7 @@ mod clearing;
 mod finishing;
 mod link;
 
-use carving::{engrave_paths, vcarve_paths};
+use carving::{engrave_paths, slot_paths, vcarve_paths};
 use clearing::{adaptive_paths, drill_paths, face_paths, planar_paths, pocket_clearing_paths};
 pub(super) use clearing::{drill_holes, heights_of, planar_areas};
 use finishing::{
@@ -264,7 +265,18 @@ pub(super) fn run_operation(
             depth,
             direction,
             reverse,
-        } => engrave_paths(work, (depth, direction, reverse), traces, &mut warnings)?,
+        } => engrave_paths(
+            work,
+            (depth, direction, reverse),
+            Levels::Ramped,
+            traces,
+            &mut warnings,
+        )?,
+        StrategySpec::Slot {
+            depth,
+            pattern,
+            reverse,
+        } => slot_paths(work, (depth, pattern, reverse), traces, &mut warnings)?,
         StrategySpec::VCarve { max_depth } => match carved {
             Some(area) => vcarve_paths(work, max_depth, area, &mut warnings)?,
             None => return Err(in_op(op)(FeatureError::NothingToCarve)),
@@ -414,7 +426,9 @@ pub(super) fn not_made(op: &Operation, spec: Option<&ToolSpec>, made: Made) -> O
         StrategySpec::Profile { .. } => StrategyDetail::Profile(Default::default()),
         StrategySpec::Pocket { .. } => StrategyDetail::Pocket(Default::default()),
         StrategySpec::Face { .. } => StrategyDetail::Face(Default::default()),
-        StrategySpec::Engrave { .. } => StrategyDetail::Engrave(Default::default()),
+        StrategySpec::Engrave { .. } | StrategySpec::Slot { .. } => {
+            StrategyDetail::Engrave(Default::default())
+        }
         StrategySpec::VCarve { .. } => StrategyDetail::VCarve(Default::default()),
         StrategySpec::Drill {
             peck,

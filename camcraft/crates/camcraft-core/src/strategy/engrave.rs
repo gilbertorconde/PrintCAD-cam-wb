@@ -9,6 +9,11 @@
 //! once more along it at the depth, to cut the ramp's slope away. It never
 //! lifts between its levels, and never plunges into what it cuts.
 //!
+//! Or level by level, always the same way ([`Levels::OneWay`]), as a slot
+//! may be: each level a pass of its own along the curve, a stepdown below
+//! the last, which the linker lifts out of at its end and enters again at
+//! its start.
+//!
 //! The curves are cut in the order nearest the end of the last, each the way
 //! its direction says. Where the tool goes from one to the next is the
 //! linker's.
@@ -174,6 +179,19 @@ impl Trace {
     }
 }
 
+/// How each curve goes down to its depth.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Levels {
+    /// Ramped down along itself, round a closed curve and back and forth
+    /// along an open one, then once at the depth: an engraving's, and a
+    /// slot's both ways.
+    #[default]
+    Ramped,
+    /// Level by level, evenly a stepdown at most apart, each along the curve
+    /// from its start as a pass of its own: a slot's always the same way.
+    OneWay,
+}
+
 /// How an engraving is cut.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EngraveParams {
@@ -196,6 +214,8 @@ pub struct EngraveParams {
     pub direction: TraceDirection,
     /// Each curve the other way from what `direction` says.
     pub reverse: bool,
+    /// How each curve goes down to its depth.
+    pub levels: Levels,
     /// Whether climbing has what it cuts on the tool's right: a clockwise
     /// spindle.
     pub climb_right: bool,
@@ -300,8 +320,10 @@ fn along(
 }
 
 /// The engraving of `traces`: each oriented as asked, in order, ramped down
-/// along itself and then cut once at the depth. The path holds a
-/// [`MoveRole::Link`] to each curve's start at the top, then its cuts.
+/// along itself and then cut once at the depth, or cut level by level as
+/// [`EngraveParams::levels`] says. The path holds a [`MoveRole::Link`] to each
+/// curve's start at the top, then its cuts; one way, a link to its start at
+/// each level.
 pub fn engrave(
     traces: &[Trace],
     p: &EngraveParams,
@@ -331,6 +353,12 @@ pub fn engrave(
     for trace in in_order(oriented) {
         let closed = trace.closed(p.tolerance);
         let length = trace.length(p.tolerance);
+        if p.levels == Levels::OneWay {
+            report.curves += 1;
+            report.closed += u64::from(closed);
+            one_way(&mut path, &mut report, &trace, p, length)?;
+            continue;
+        }
         let back = trace.reversed();
         let step = p
             .stepdown
@@ -384,6 +412,40 @@ pub fn engrave(
         report.passes += 1;
     }
     Ok((path, report))
+}
+
+/// `trace` cut level by level from the top down to the depth, evenly no more
+/// than a stepdown apart, each a pass of its own from its start: a link
+/// there at the level, then along it.
+fn one_way(
+    path: &mut Toolpath,
+    report: &mut EngraveReport,
+    trace: &Trace,
+    p: &EngraveParams,
+    length: f64,
+) -> Result<(), StrategyError> {
+    let step = p.stepdown.unwrap_or(p.depth).min(p.depth);
+    // Evenly, so none is thinner than the rest; bounded, as a ramp is.
+    let count = (p.depth / step - 1e-9)
+        .ceil()
+        .clamp(1.0, f64::from(MOST_RAMPS));
+    let start = trace.start.truncate();
+    let mut k = 1.0;
+    while k <= count {
+        let z = p.top - p.depth * k / count;
+        path.feed_to(start.extend(z), MoveRole::Link, p.feed)?;
+        report.arcs += along(
+            path,
+            trace,
+            (z, z),
+            length,
+            (MoveRole::Cut, p.feed),
+            p.tolerance,
+        )?;
+        report.passes += 1;
+        k += 1.0;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

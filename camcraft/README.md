@@ -121,6 +121,20 @@ a `safe_retract`. `camcraft_session::program_spec` and `program` take the
 setup's `Frame`. Golden programs: `masso-rotary-a.nc` and
 `linuxcnc-rotary-ab.nc`.
 
+And a slot, Fusion's Slot. In `camcraft-core`, `StrategySpec::Slot`
+(`depth`, 3 mm unless set; `pattern`, `SlotPattern`: bidirectional or
+directional; `reverse`) is an engraving deeper, with an end mill its width
+(a cone is refused, `Operation::cannot_use`), along the same curves and
+edges, as drawn, a millimetre a level unless set. Both ways it is
+`engrave`'s own ramping back and forth; one way, `EngraveParams::levels`
+is `Levels::OneWay`: each level, evenly a stepdown at most apart, a pass
+of its own from the curve's start, which the linker lifts out of (it never
+stays down, `run/operation/link.rs`) and enters as the linking's entry
+says, a ramp along the slot or a plunge, never a helix beside it. So
+`Operation::entry` with none asked is the first entry a strategy offers,
+not always a helix. Its arcs are arcs at every level. A golden slot
+(`grbl-slot.nc`).
+
 And one test: ogeom is 0.11.1 here, which printCAD's shapes need, and it
 meshes `round_edge_loose_fit.step`'s seam that 0.11.0 drew off the torus, so
 `a_loose_fit_is_refused_for_ogeoms_seam` became

@@ -107,6 +107,13 @@ impl Operation {
         if matches!(self.strategy, StrategySpec::VCarve { .. }) && tool.kind != ToolKind::Cone {
             return Some("V-carving cuts with a V-bit: its width follows how deep its V goes");
         }
+        // A slot is as wide as the tool, all the way down.
+        if matches!(self.strategy, StrategySpec::Slot { .. }) && tool.kind == ToolKind::Cone {
+            return Some(
+                "a slot is cut with an end mill its width: a V-bit's width changes with \
+                 depth; engrave with it instead",
+            );
+        }
         if matches!(self.strategy, StrategySpec::Face { .. }) && tool.kind == ToolKind::Ball {
             return Some("a ball end mill cannot face flat; use a flat or bull-nose end mill");
         }

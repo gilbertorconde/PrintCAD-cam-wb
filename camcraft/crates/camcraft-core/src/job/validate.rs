@@ -526,7 +526,9 @@ impl Operation {
                 ));
             }
         }
-        if let StrategySpec::Engrave { depth, .. } = self.strategy {
+        if let StrategySpec::Engrave { depth, .. } | StrategySpec::Slot { depth, .. } =
+            self.strategy
+        {
             positive(&field("depth"), depth)?;
         }
         if let StrategySpec::VCarve { max_depth: Some(d) } = self.strategy {

@@ -1623,3 +1623,86 @@ fn a_picked_round_edge_is_engraved_as_arcs() {
     }
     assert_eq!(report.arcs, 4, "{report:?}");
 }
+
+/// A line and an arc on the plate's top, end to end: a slot's curve.
+fn drawn_hook() -> crate::job::Curve {
+    use crate::job::{Curve, Segment};
+    Curve {
+        start: [-15.0, 0.0, 5.0],
+        segments: vec![
+            Segment::Line {
+                to: [0.0, 0.0, 5.0],
+            },
+            Segment::Arc {
+                via: [5.0, 5.0, 5.0],
+                to: [0.0, 10.0, 5.0],
+            },
+        ],
+    }
+}
+
+/// A slot 3 mm deep along a line and an arc, a millimetre a level, both
+/// ways and one way: as deep as asked, its arc an arc at every level, and
+/// what it cuts into the part meant, so it verifies. Both ways it never
+/// lifts; one way it lifts at the end of each level, back to the start.
+#[test]
+fn a_slot_goes_down_both_ways_or_one_way_and_verifies() {
+    use crate::job::{SlotPattern, ToolKind};
+    use crate::path::toolpath::{MoveKind, MoveRole};
+    for pattern in [SlotPattern::Bidirectional, SlotPattern::Directional] {
+        let slot = StrategySpec::Slot {
+            depth: 3.0,
+            pattern,
+            reverse: false,
+        };
+        assert_eq!(slot.default_stepdown(), Some(1.0));
+        let (mut job, result) = drawn_on_a_plate(slot, flat(4.0), vec![drawn_hook()]);
+        let op = &result.operations[0];
+        let StrategyDetail::Engrave(report) = op.detail else {
+            panic!("reported {:?}", op.detail);
+        };
+        assert_eq!((report.curves, report.closed), (1, 0));
+        let cuts: Vec<_> = op
+            .path
+            .moves()
+            .iter()
+            .filter(|m| matches!(m.role, MoveRole::Cut | MoveRole::Ramp))
+            .collect();
+        let deepest = cuts.iter().map(|m| m.to.z).fold(f64::MAX, f64::min);
+        assert!((deepest - 2.0).abs() < 1e-9, "{pattern:?}: {deepest}");
+        let arcs = cuts
+            .iter()
+            .filter(|m| matches!(m.kind, MoveKind::Arc(_)))
+            .count();
+        assert!(arcs >= 3, "{pattern:?}: {arcs} arcs");
+        let lifts = op
+            .path
+            .moves()
+            .iter()
+            .filter(|m| m.role == MoveRole::Retract)
+            .count();
+        match pattern {
+            // Out once, at the end.
+            SlotPattern::Bidirectional => {
+                assert_eq!(report.passes, 4, "three ramps and the last");
+                assert!(lifts <= 1, "{lifts} lifts");
+            }
+            // Three levels, each its own pass, lifted out of and ramped into
+            // along the slot, at its start.
+            SlotPattern::Directional => {
+                assert_eq!(report.passes, 3);
+                assert!(lifts >= 2, "{lifts} lifts");
+                assert_eq!(op.links.ramps, 3, "{:?}", op.links);
+            }
+        }
+        assert!(op.sim.removed_mm3 > 0.0);
+        assert!(result.is_clean(), "{pattern:?}: {:?}", result.warnings());
+        assert_eq!(result.verify.gouged, 0, "{pattern:?}");
+
+        // A V-bit's width changes with depth: no slot.
+        job.tools.get_mut("drawn").unwrap().kind = ToolKind::Cone;
+        job.tools.get_mut("drawn").unwrap().angle = Some(90.0);
+        let refused = job.check_setup(0).unwrap_err().to_string();
+        assert!(refused.contains("end mill its width"), "{refused}");
+    }
+}

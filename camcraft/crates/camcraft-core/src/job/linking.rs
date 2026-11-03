@@ -347,10 +347,12 @@ impl Operation {
     }
 
     /// How a pass that starts in material is entered, for a strategy that offers
-    /// a choice ([`Uses::entries`](super::Uses::entries)): as given, or down a helix.
+    /// a choice ([`Uses::entries`](super::Uses::entries)): as given, or the
+    /// first it offers, down a helix where it offers one.
     pub fn entry(&self) -> Option<Entry> {
         let offered = self.strategy.uses().entries;
-        (!offered.is_empty()).then_some(self.linking.entry.unwrap_or_default())
+        let asked = self.linking.entry.filter(|e| offered.contains(e));
+        asked.or_else(|| offered.first().copied())
     }
 
     /// The diameter of a helical entry's circle, as the tool's centre goes, in

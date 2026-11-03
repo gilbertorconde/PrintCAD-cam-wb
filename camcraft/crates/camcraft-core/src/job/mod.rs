@@ -93,7 +93,7 @@ pub use pick::{FeatureRef, PointRef, Snap};
 pub use setup::{Along, BoxOf, Origin, Setup};
 pub use strategy_spec::{
     ContourOrder, CutDirection, FaceDirection, PassOrder, ProfileSide, RadialDirection,
-    StrategySpec, ThreadHand, TraceDirection,
+    SlotPattern, StrategySpec, ThreadHand, TraceDirection,
 };
 pub use tool::{
     Coolant, DRILL_POINT, Holder, HolderSegment, Preset, SpindleDirection, ToolFieldError,

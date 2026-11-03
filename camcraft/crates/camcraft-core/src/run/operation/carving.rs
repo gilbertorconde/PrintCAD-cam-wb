@@ -4,10 +4,12 @@
 use super::*;
 
 /// The engraving of `traces`, `depth` below the top, each run the way
-/// `direction` and `reverse` say.
+/// `direction` and `reverse` say, and down to the depth as `levels` says: a
+/// slot is an engraving deeper, with a tool its width.
 pub(super) fn engrave_paths(
     work: &Work<'_>,
     (depth, direction, reverse): (f64, crate::job::TraceDirection, bool),
+    levels: Levels,
     traces: &[Trace],
     warnings: &mut Vec<String>,
 ) -> Result<Paths, RunError> {
@@ -23,6 +25,7 @@ pub(super) fn engrave_paths(
         plunge_feed: op.linking.plunge_feed,
         direction,
         reverse,
+        levels,
         climb_right: work.clockwise(),
         tolerance: work.job.tolerance,
     };
@@ -35,6 +38,28 @@ pub(super) fn engrave_paths(
         ));
     }
     Ok((path, report.passes, StrategyDetail::Engrave(report)))
+}
+
+/// A slot along `traces`, as [`engrave_paths`]: as drawn, unless reversed,
+/// since a slot cuts both its walls, and back and forth or one way as
+/// `pattern` says.
+pub(super) fn slot_paths(
+    work: &Work<'_>,
+    (depth, pattern, reverse): (f64, SlotPattern, bool),
+    traces: &[Trace],
+    warnings: &mut Vec<String>,
+) -> Result<Paths, RunError> {
+    let levels = match pattern {
+        SlotPattern::Bidirectional => Levels::Ramped,
+        SlotPattern::Directional => Levels::OneWay,
+    };
+    engrave_paths(
+        work,
+        (depth, crate::job::TraceDirection::AsDrawn, reverse),
+        levels,
+        traces,
+        warnings,
+    )
 }
 
 /// The V-carving of `area`, no deeper than `max_depth` below the top when
