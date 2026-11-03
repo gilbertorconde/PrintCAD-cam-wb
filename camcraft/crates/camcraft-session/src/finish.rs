@@ -85,6 +85,7 @@ pub fn single_operation(spec: &FinishSpec, model: ModelDef) -> Job {
         selection: Default::default(),
         boundary: Default::default(),
         outline: Default::default(),
+        transform: Default::default(),
         heights: Heights {
             clearance: Height {
                 reference: HeightRef::ModelTop,

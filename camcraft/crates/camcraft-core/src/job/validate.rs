@@ -331,6 +331,7 @@ impl Operation {
         self.check_heights(&field)?;
         self.check_passes(&field)?;
         self.check_linking(&field)?;
+        self.check_pattern(&field)?;
         if uses.boundary {
             finite(&field("boundary.margin"), self.boundary.margin)?;
         }
@@ -459,6 +460,54 @@ impl Operation {
             && let Some(d) = l.helix_diameter
         {
             positive(&field("linking.helix_diameter"), d)?;
+        }
+        Ok(())
+    }
+
+    /// Check its pattern, `field` naming each value: counts of one or more,
+    /// no more copies in all than [`super::MOST_COPIES`], finite spacings and
+    /// points, and a polar spread of more than nothing, no more than a turn.
+    fn check_pattern(&self, field: &dyn Fn(&str) -> String) -> Result<(), JobError> {
+        let p = &self.transform;
+        if let Some(l) = p.linear {
+            for (name, n) in [("x_count", l.x_count), ("y_count", l.y_count)] {
+                if n == 0 {
+                    return Err(bad(
+                        field(&format!("transform.linear.{name}")),
+                        0.0,
+                        "1 or more",
+                    ));
+                }
+            }
+            finite(&field("transform.linear.x_spacing"), l.x_spacing)?;
+            finite(&field("transform.linear.y_spacing"), l.y_spacing)?;
+        }
+        if let Some(r) = p.polar {
+            if r.count == 0 {
+                return Err(bad(field("transform.polar.count"), 0.0, "1 or more"));
+            }
+            if !(r.angle.is_finite() && r.angle > 0.0 && r.angle <= 360.0) {
+                return Err(bad(
+                    field("transform.polar.angle"),
+                    r.angle,
+                    "more than 0 and at most 360 degrees",
+                ));
+            }
+            for v in r.centre {
+                finite(&field("transform.polar.centre"), v)?;
+            }
+        }
+        if let Some(m) = p.mirror {
+            for v in m.through {
+                finite(&field("transform.mirror.through"), v)?;
+            }
+        }
+        if p.copies() > super::MOST_COPIES {
+            return Err(bad(
+                field("transform"),
+                f64::from(p.copies()),
+                "at most 1000 copies in all",
+            ));
         }
         Ok(())
     }

@@ -5,8 +5,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::{
-    Depths, Heights, Linking, MachiningBoundary, Outline, Passes, Preset, ProfileSide, Selection,
-    StrategySpec, ToolKind, ToolSpec, is_default, is_yes, yes,
+    Depths, Heights, Linking, MachiningBoundary, Outline, Passes, Pattern, Preset, ProfileSide,
+    Selection, StrategySpec, ToolKind, ToolSpec, is_default, is_yes, yes,
 };
 
 /// One operation.
@@ -47,6 +47,11 @@ pub struct Operation {
     /// How the tool moves between cuts.
     #[serde(default, skip_serializing_if = "is_default")]
     pub linking: Linking,
+    /// Its toolpath repeated in rows, round a centre, or mirrored, before it
+    /// is linked: none unless asked. A job file calls it `transform`, as a
+    /// slot's own `pattern` is written beside it.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub transform: Pattern,
     /// Whether it runs. One turned off stays in the job, but is not worked out,
     /// cut, checked or posted.
     #[serde(default = "yes", skip_serializing_if = "is_yes")]
@@ -75,6 +80,7 @@ impl Operation {
                 ..Passes::default()
             },
             linking: Linking::default(),
+            transform: Pattern::default(),
             enabled: true,
         }
     }

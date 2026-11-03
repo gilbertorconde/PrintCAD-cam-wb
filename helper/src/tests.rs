@@ -828,4 +828,29 @@ fn an_engraving_posts_its_arcs_and_draws_its_curves() {
         .count();
     assert_eq!(open, 1, "the line is left open");
     assert!(!drawn.cut.is_empty());
+
+    // Twice, 10 mm apart: both cut and posted, and both drawn.
+    let request = Request {
+        job: request.job.replace(
+            "depth = 0.3\n",
+            "depth = 0.3\ntransform = { linear = { x_count = 2, x_spacing = 10.0 } }\n",
+        ),
+        ..request
+    };
+    let run = answer(&request).unwrap();
+    let twice = &run.operations[0];
+    assert_eq!(twice.made, "generated", "{:?}", twice.warnings);
+    for f in run.findings.iter().filter(|f| f.level == Level::Fail) {
+        panic!("{f:?}");
+    }
+    let program = &twice.program.as_ref().unwrap().text;
+    let arcs2 = program
+        .lines()
+        .filter(|l| l.split_whitespace().any(|w| w == "G2" || w == "G3"))
+        .count();
+    assert_eq!(arcs2, 2 * arcs, "{program}");
+    let drawn = twice.outlines.as_ref().unwrap();
+    assert_eq!(drawn.boundary.len(), 4);
+    let shift = drawn.boundary[2][0][0] - drawn.boundary[0][0][0];
+    assert!((shift - 10.0).abs() < 1e-3, "{shift}");
 }

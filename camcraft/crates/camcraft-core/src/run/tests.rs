@@ -1422,6 +1422,16 @@ fn drawn_on_a_plate(
     tool: crate::job::ToolSpec,
     curves: Vec<crate::job::Curve>,
 ) -> (Job, SetupResult) {
+    drawn_on_a_plate_with(strategy, tool, curves, |_| {})
+}
+
+/// As [`drawn_on_a_plate`], the operation changed by `edit` first.
+fn drawn_on_a_plate_with(
+    strategy: StrategySpec,
+    tool: crate::job::ToolSpec,
+    curves: Vec<crate::job::Curve>,
+    edit: impl FnOnce(&mut Operation),
+) -> (Job, SetupResult) {
     use crate::job::StockSpec;
     let body = Body::derived(synthetic::cuboid(
         DVec3::new(-20.0, -20.0, 0.0),
@@ -1441,6 +1451,7 @@ fn drawn_on_a_plate(
     op.passes.stepdown = strategy.default_stepdown();
     op.passes.stock_to_leave = Default::default();
     op.selection.curves = curves;
+    edit(op);
     let bodies: Bodies<'_> = [("dome", &body)].into_iter().collect();
     let result = run_setup(&job, 0, &bodies).unwrap();
     (job, result)
@@ -1793,4 +1804,144 @@ fn a_chamfer_goes_beside_its_edge_as_deep_as_it_is_wide() {
     job.tools.get_mut("vbit").unwrap().kind = ToolKind::Flat;
     let refused = job.check_setup(0).unwrap_err().to_string();
     assert!(refused.contains("chamfer mill or a V-bit"), "{refused}");
+}
+
+/// Where the material went down between two keyframes, seen from above.
+fn lowered_cells(result: &SetupResult, op: usize) -> Vec<DVec2> {
+    let before = result.keyframes[op].unpack().unwrap();
+    let after = result.keyframes[op + 1].unpack().unwrap();
+    let (before, after) = (before.field(), after.field());
+    let mut out = Vec::new();
+    for iy in 0..before.ny() {
+        for ix in 0..before.nx() {
+            if let (Some(b), Some(a)) = (before.get(ix, iy), after.get(ix, iy))
+                && a < b - 1e-3
+            {
+                out.push(before.position(ix, iy).unwrap());
+            }
+        }
+    }
+    out
+}
+
+/// A circle engraved, arrayed three times along X and round a centre, and
+/// mirrored: every copy is cut into the material, so the simulation sees
+/// them all and they verify; the mirrored one goes round the same way as
+/// the original, turned round. Copies off the stock are said.
+#[test]
+fn a_pattern_cuts_every_copy_and_a_mirror_keeps_the_direction() {
+    use crate::job::{Linear, Mirror, MirrorAxis, Pattern, Polar, TraceDirection};
+    use crate::path::toolpath::{MoveKind, MoveRole};
+    let engrave = StrategySpec::Engrave {
+        depth: 0.5,
+        direction: TraceDirection::Climb,
+        reverse: false,
+    };
+    let circle = || vec![drawn_circle(-12.0, -8.0, 3.0)];
+    let (_, one) = drawn_on_a_plate(engrave, flat(1.0), circle());
+    let alone = one.operations[0].sim.removed_mm3;
+
+    // Three along X, 12 apart.
+    let rows = Pattern {
+        linear: Some(Linear {
+            x_count: 3,
+            x_spacing: 12.0,
+            y_count: 1,
+            y_spacing: 0.0,
+        }),
+        ..Pattern::default()
+    };
+    let (_, result) = drawn_on_a_plate_with(engrave, flat(1.0), circle(), |op| op.transform = rows);
+    let op = &result.operations[0];
+    assert!(
+        (op.sim.removed_mm3 / alone - 3.0).abs() < 0.05,
+        "{} {alone}",
+        op.sim.removed_mm3
+    );
+    assert_eq!(op.passes, 3 * one.operations[0].passes);
+    let cells = lowered_cells(&result, 0);
+    for x in [-12.0, 0.0, 12.0] {
+        let near = cells
+            .iter()
+            .filter(|p| (p.distance(dvec2(x, -8.0)) - 3.0).abs() < 1.0)
+            .count();
+        assert!(near > 20, "nothing cut round x = {x}");
+    }
+    assert!(result.is_clean(), "{:?}", result.warnings());
+    assert_eq!(result.verify.gouged, 0);
+
+    // Four round the plate's middle.
+    let round = Pattern {
+        polar: Some(Polar {
+            count: 4,
+            angle: 360.0,
+            centre: [0.0, 0.0],
+        }),
+        ..Pattern::default()
+    };
+    let (_, result) =
+        drawn_on_a_plate_with(engrave, flat(1.0), circle(), |op| op.transform = round);
+    let op = &result.operations[0];
+    assert!((op.sim.removed_mm3 / alone - 4.0).abs() < 0.05);
+    assert!(result.is_clean(), "{:?}", result.warnings());
+
+    // Mirrored about Y through the middle: beside it at x = 12, and round
+    // the same way as the original, clockwise to climb.
+    let mirror = Pattern {
+        mirror: Some(Mirror {
+            axis: MirrorAxis::Y,
+            through: [0.0, 0.0],
+        }),
+        ..Pattern::default()
+    };
+    let (_, result) =
+        drawn_on_a_plate_with(engrave, flat(1.0), circle(), |op| op.transform = mirror);
+    let op = &result.operations[0];
+    assert!((op.sim.removed_mm3 / alone - 2.0).abs() < 0.05);
+    let level_arcs = |right: bool| -> Vec<f64> {
+        op.path
+            .moves()
+            .iter()
+            .filter(|m| m.role == MoveRole::Cut && (m.to.x > 0.0) == right)
+            .filter_map(|m| match m.kind {
+                MoveKind::Arc(a) => Some(a.sweep),
+                MoveKind::Linear => None,
+            })
+            .collect()
+    };
+    let (left, right) = (level_arcs(false), level_arcs(true));
+    assert!(!left.is_empty() && !right.is_empty());
+    assert!(
+        left.iter().chain(&right).all(|s| *s < 0.0),
+        "{left:?} {right:?}"
+    );
+    assert!(op.warnings.is_empty(), "{:?}", op.warnings);
+    assert!(result.is_clean(), "{:?}", result.warnings());
+
+    // Three along X 20 apart: the last off the plate, and said.
+    let far = Pattern {
+        linear: Some(Linear {
+            x_count: 3,
+            x_spacing: 20.0,
+            y_count: 1,
+            y_spacing: 0.0,
+        }),
+        ..Pattern::default()
+    };
+    let (mut job, result) =
+        drawn_on_a_plate_with(engrave, flat(1.0), circle(), |op| op.transform = far);
+    let warned = &result.operations[0].warnings;
+    assert!(
+        warned
+            .iter()
+            .any(|w| w.contains("1 of the pattern's 3 copies go outside the stock")),
+        "{warned:?}"
+    );
+
+    // No copies at all is no pattern.
+    if let Some(l) = &mut job.setups[0].operations[0].transform.linear {
+        l.x_count = 0;
+    }
+    let refused = job.check_setup(0).unwrap_err().to_string();
+    assert!(refused.contains("x_count"), "{refused}");
 }

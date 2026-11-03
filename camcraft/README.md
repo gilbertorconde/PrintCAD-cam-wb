@@ -151,6 +151,21 @@ from its own height, the edge's: it has no top or bottom.
 which it now shares, and `Ring::new` makes a ring of spans. What a
 chamfer cuts into the part is meant, as an engraving's is.
 
+And patterns, Fusion's Pattern and Mirror. In `camcraft-core`, an
+`Operation` has a `transform` (`job::Pattern`; not `pattern`, which a
+slot's own setting is called beside it: `linear`, rows along X and Y;
+`polar`, a count over an angle about a centre; `mirror`, about a line
+along X or Y through a point, the original kept; at most 1000 copies),
+which `path::pattern::repeat` applies to the strategy's path before it is
+ordered, tabbed and linked (`run/operation.rs`), so the linker links every
+copy into the material and the simulation, the checks and the program see
+them all. A mirrored copy's passes are turned round where that is safe:
+one all at one level after its link backwards whole, else each stretch
+of cutting that closes on itself backwards in place; adaptive clearing
+and drilling never are, and passes left cutting the other way are a
+warning, as is a copy further outside the stock than the original. In
+`camcraft-session`, the finishing job's operation has no pattern.
+
 And one test: ogeom is 0.11.1 here, which printCAD's shapes need, and it
 meshes `round_edge_loose_fit.step`'s seam that 0.11.0 drew off the torus, so
 `a_loose_fit_is_refused_for_ogeoms_seam` became

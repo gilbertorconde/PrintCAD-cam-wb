@@ -4,6 +4,7 @@
 
 pub mod linker;
 pub mod ordering;
+pub mod pattern;
 pub mod simadapt;
 pub mod tabs;
 pub mod toolpath;

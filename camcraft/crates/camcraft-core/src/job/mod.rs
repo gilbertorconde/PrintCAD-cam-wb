@@ -60,6 +60,7 @@ mod linking;
 mod model;
 mod operation;
 mod passes;
+mod pattern;
 mod pick;
 mod setup;
 mod strategy_spec;
@@ -89,6 +90,7 @@ pub use model::{
 };
 pub use operation::Operation;
 pub use passes::{Finishing, FinishingSizes, Passes, StockToLeave, TabShape, Tabs};
+pub use pattern::{Linear, MOST_COPIES, Mirror, MirrorAxis, Pattern, Polar};
 pub use pick::{FeatureRef, PointRef, Snap};
 pub use setup::{Along, BoxOf, Origin, Setup};
 pub use strategy_spec::{

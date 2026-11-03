@@ -23,6 +23,7 @@ use crate::path::linker::{
     highest_under, link,
 };
 use crate::path::ordering::order_passes;
+use crate::path::pattern::{each, overhang, repeat};
 use crate::path::simadapt::sim_moves_of;
 use crate::path::tabs::{TabParams, add_tabs};
 use crate::path::toolpath::{Move, Toolpath};
@@ -286,6 +287,16 @@ pub(super) fn run_operation(
         },
     };
 
+    // A pattern repeats the strategy's path before anything else is done to
+    // it, so each copy is ordered, tabbed, linked into the material and
+    // simulated as the original is.
+    let (raw, passes) = if op.transform.repeats() {
+        let (path, copies) = patterned(work, &raw, &mut warnings)?;
+        (path, passes.saturating_mul(u64::from(copies)))
+    } else {
+        (raw, passes)
+    };
+
     // Ordering is a Toolpath -> Toolpath transform, applied before linking so the
     // retracts it needs are planned around the order actually used. Holes are
     // already in order, and a hole reversed would be drilled from the bottom up.
@@ -408,6 +419,59 @@ pub(super) fn run_operation(
         // The rest is the operation's own: its name, strategy and tool.
         ..not_made(op, Some(work.spec), Made::Generated)
     })
+}
+
+/// `raw` repeated as `work`'s operation's pattern says, and how many copies
+/// that is, the original among them; a copy that goes further outside the stock than the
+/// original, or passes of mirrored copies cut the other way where that
+/// matters, said.
+fn patterned(
+    work: &Work<'_>,
+    raw: &Toolpath,
+    warnings: &mut Vec<String>,
+) -> Result<(Toolpath, u32), RunError> {
+    let op = work.op;
+    let pattern = &op.transform;
+    let (lo, hi) = work.bounds;
+    let tolerance = work.job.tolerance;
+    let own = overhang(raw.moves(), lo, hi);
+    let copies = each(raw, pattern);
+    let outside: Vec<f64> = copies
+        .iter()
+        .map(|c| overhang(c, lo, hi))
+        .filter(|o| *o > own + tolerance)
+        .collect();
+    if !outside.is_empty() {
+        let worst = outside.iter().copied().fold(0.0, f64::max);
+        warnings.push(format!(
+            "{} of the pattern's {} copies go outside the stock, up to {worst:.1} mm \
+             further than the original does",
+            outside.len(),
+            copies.len()
+        ));
+    }
+    // Adaptive clearing steers each pass by the material ahead of it, and a
+    // drill's holes have no way round.
+    let steered = op.strategy.uses().links == Links::Own;
+    let r = repeat(raw, pattern, steered).map_err(|e| in_op(op)(StrategyError::from(e)))?;
+    // Where direction means nothing, or both ways is the strategy's own.
+    let either_way = matches!(
+        op.strategy,
+        StrategySpec::Parallel { .. }
+            | StrategySpec::Radial { .. }
+            | StrategySpec::Face { .. }
+            | StrategySpec::Drill { .. }
+            | StrategySpec::Slot { .. }
+            | StrategySpec::VCarve { .. }
+    );
+    if r.unturned > 0 && !either_way {
+        warnings.push(format!(
+            "{} pass(es) of the mirrored copies could not be turned round, so they cut the \
+             other way: conventional where the original climbs",
+            r.unturned
+        ));
+    }
+    Ok((r.path, r.copies))
 }
 
 /// What stands for an operation left out of a run: no paths, nothing cut. `spec`

@@ -10,6 +10,7 @@
 use cam_protocol::{CutPiece, Outlines};
 use camcraft_core::cutter::allowance::EffectiveTool;
 use camcraft_core::job::{Boundary, Job, Operation, StrategySpec};
+use camcraft_core::path::pattern::copies;
 use camcraft_core::run::{chamfer_centres, cutting_tool};
 use camcraft_core::setup::features::Picking;
 use camcraft_core::setup::frame::Frame;
@@ -18,7 +19,7 @@ use camcraft_core::strategy::engrave::Trace;
 use camcraft_core::strategy::planar::{centre_offset, picked_pieces};
 use camcraft_geom::contour::Region;
 use camcraft_sim::stock::SweptTool;
-use glam::DVec2;
+use glam::{DVec2, DVec3};
 
 use crate::to_f32;
 
@@ -70,11 +71,12 @@ impl Ground<'_> {
 
     /// What operation `op` machines, drawn: none for one with no boundary,
     /// or where it cannot be worked out.
+    /// A pattern's copies are drawn too, each where its toolpath goes.
     pub fn outlines(&self, op: &Operation) -> Option<Outlines> {
         let uses = op.strategy.uses();
         let tool = cutting_tool(self.job, op).ok();
         let tolerance = self.job.tolerance;
-        if uses.outline {
+        let one = if uses.outline {
             self.outline(op, tool.as_ref(), tolerance)
         } else if uses.boundary {
             self.boundary(op, tool.as_ref(), tolerance)
@@ -84,7 +86,28 @@ impl Ground<'_> {
             self.carved(op, tolerance)
         } else {
             None
+        }?;
+        if !op.transform.repeats() {
+            return Some(one);
         }
+        let mut out = Outlines::default();
+        for c in copies(&op.transform) {
+            let ring = |r: &Vec<[f32; 3]>| -> Vec<[f32; 3]> {
+                r.iter()
+                    .map(|p| {
+                        let q = DVec3::new(f64::from(p[0]), f64::from(p[1]), f64::from(p[2]));
+                        to_f32(self.frame.to_model(c.point(self.frame.to_setup(q))))
+                    })
+                    .collect()
+            };
+            out.boundary.extend(one.boundary.iter().map(ring));
+            out.limit.extend(one.limit.iter().map(ring));
+            out.cut.extend(one.cut.iter().map(|p| CutPiece {
+                outline: ring(&p.outline),
+                holes: p.holes.iter().map(ring).collect(),
+            }));
+        }
+        Some(out)
     }
 
     /// Where `op` cuts down from, its picks aside: its own top, or its
