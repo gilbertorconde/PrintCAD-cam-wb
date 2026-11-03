@@ -44,10 +44,13 @@ use camcraft_geom::topology::{Body, EdgeKind, FaceSource};
 use glam::{DVec2, DVec3};
 
 use crate::job::{
-    Boundary, Containment, FeatureRef, MachiningBoundary, Operation, Outline, Picks, PointRef,
-    Selection, Snap,
+    Boundary, Containment, Curve, FeatureRef, MachiningBoundary, Operation, Outline, Picks,
+    PointRef, Segment, Selection, Snap,
 };
+use crate::path::toolpath::Arc;
+use crate::setup::frame::Frame;
 use crate::setup::{Bodies, Prepared};
+use crate::strategy::engrave::{Piece, Trace};
 
 /// How a pick was found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +122,12 @@ pub enum FeatureError {
     /// The boundary is the selection, and nothing is selected.
     #[error("the machining boundary is a selection, and no face or edge is picked")]
     NothingPicked,
+    /// An engraving with no edge or curve to follow.
+    #[error("no edge or curve is picked to follow")]
+    NothingToFollow,
+    /// A V-carving with no closed area to carve.
+    #[error("no closed area is picked to carve: pick faces, edges round one, or a sketch")]
+    NothingToCarve,
     /// The tool does not fit inside the boundary.
     #[error(
         "a {diameter:.3} mm tool does not fit inside the machining boundary; make it larger, \
@@ -486,13 +495,155 @@ fn loops(chains: &[Chain]) -> Result<Vec<Vec<DVec3>>, FeatureError> {
     Ok(out)
 }
 
-/// A selection's picked faces and edges, found, each once, in the setup's frame.
+/// Picked edges joined end to end through the vertices they share, as far
+/// as they go: each run of them, closed where it comes back to where it
+/// started, as the chains in it, in order, and whether each runs forward.
+fn runs(chains: &[Chain]) -> Vec<Vec<(usize, bool)>> {
+    let mut used = vec![false; chains.len()];
+    let mut out = Vec::new();
+    for (start, first) in chains.iter().enumerate() {
+        if used.get(start).copied().unwrap_or(true) {
+            continue;
+        }
+        if let Some(u) = used.get_mut(start) {
+            *u = true;
+        }
+        let mut run = std::collections::VecDeque::from([(start, true)]);
+        let Some([origin, end]) = first.ends else {
+            out.push(run.into_iter().collect());
+            continue;
+        };
+        // The next unused chain on this model that ends at `at`: which, and
+        // the vertex at its far end.
+        let next = |at: u32, used: &mut Vec<bool>| {
+            let (j, c) = chains.iter().enumerate().find(|(j, c)| {
+                !used.get(*j).copied().unwrap_or(true)
+                    && c.model == first.model
+                    && c.ends.is_some_and(|e| e.contains(&at))
+            })?;
+            if let Some(u) = used.get_mut(j) {
+                *u = true;
+            }
+            let [a, b] = c.ends?;
+            Some(if a == at { (j, true, b) } else { (j, false, a) })
+        };
+        let mut at = end;
+        while at != origin {
+            let Some((j, forward, far)) = next(at, &mut used) else {
+                break;
+            };
+            run.push_back((j, forward));
+            at = far;
+        }
+        if at != origin {
+            // Open: on back from where it started, the other way.
+            let mut at = origin;
+            while let Some((j, forward, far)) = next(at, &mut used) {
+                run.push_front((j, !forward));
+                at = far;
+            }
+        }
+        out.push(run.into_iter().collect());
+    }
+    out
+}
+
+/// The circumcentre of `a`, `b` and `c`, and the way round they go; `None`
+/// for points in a line.
+fn circle_through(a: DVec3, b: DVec3, c: DVec3) -> Option<(DVec3, DVec3)> {
+    let (u, v) = (b - a, c - a);
+    let n = u.cross(v);
+    let nn = n.length_squared();
+    if nn <= 1e-18 {
+        return None;
+    }
+    let centre = a + (v * u.length_squared() - u * v.length_squared()).cross(n) / (2.0 * nn);
+    Some((centre, n / nn.sqrt()))
+}
+
+/// A curve drawn in the document as the setup sees it: its level arcs kept,
+/// any other in chords within `tolerance`.
+fn trace_of(curve: &Curve, frame: &Frame, tolerance: f64) -> Trace {
+    let at = |p: [f64; 3]| frame.to_setup(DVec3::from_array(p));
+    let start = at(curve.start);
+    let mut from = start;
+    let mut pieces = Vec::with_capacity(curve.segments.len());
+    for segment in &curve.segments {
+        let to = at(segment.to());
+        match *segment {
+            Segment::Line { .. } => pieces.push(Piece::Line { to }),
+            Segment::Arc { via, .. } => match circle_through(from, at(via), to) {
+                Some((centre, n)) if n.z.abs() > 1.0 - 1e-9 => pieces.push(Piece::Arc {
+                    centre: centre.truncate(),
+                    ccw: n.z > 0.0,
+                    to,
+                }),
+                Some((centre, n)) => {
+                    let chords = Arc::about(centre, n, from, to, true, tolerance)
+                        .map(|a| a.chords(from, to, tolerance))
+                        .unwrap_or_else(|| vec![to]);
+                    pieces.extend(chords.into_iter().map(|to| Piece::Line { to }));
+                }
+                None => pieces.push(Piece::Line { to }),
+            },
+        }
+        from = to;
+    }
+    Trace { start, pieces }
+}
+
+/// A picked edge as pieces of a trace, forward or back: arcs where it is a
+/// round edge lying level as the part sits, centred on `centre`, and lines
+/// through its points otherwise.
+fn edge_pieces(chain: &Chain, forward: bool, centre: Option<DVec2>) -> Vec<Piece> {
+    let mut points = chain.points.clone();
+    if chain.closed
+        && let Some(&first) = points.first()
+    {
+        points.push(first);
+    }
+    if !forward {
+        points.reverse();
+    }
+    let Some(centre) = centre else {
+        return points
+            .iter()
+            .skip(1)
+            .map(|&to| Piece::Line { to })
+            .collect();
+    };
+    let turning: f64 = points
+        .windows(2)
+        .map(|w| match w {
+            [a, b] => (a.truncate() - centre).perp_dot(b.truncate() - centre),
+            _ => 0.0,
+        })
+        .sum();
+    let arc = |to: DVec3| Piece::Arc {
+        centre,
+        ccw: turning > 0.0,
+        to,
+    };
+    match (points.get(points.len() / 2), points.last()) {
+        // All the way round: in two halves, as no single arc says which way.
+        (Some(&mid), Some(&end)) if chain.closed => vec![arc(mid), arc(end)],
+        (_, Some(&end)) if points.len() > 1 => vec![arc(end)],
+        _ => Vec::new(),
+    }
+}
+
+/// A selection's picked faces and edges, found, each once, in the setup's
+/// frame, and its curves as the setup sees them.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Picked {
     /// The faces.
     pub faces: Vec<PickedFace>,
     /// The edges.
     pub chains: Vec<Chain>,
+    /// The curves.
+    pub curves: Vec<Trace>,
+    /// The tolerance curves are read to, in chords.
+    pub tolerance: f64,
 }
 
 impl Picked {
@@ -503,18 +654,69 @@ impl Picked {
         bodies: &Bodies<'_>,
         job_tolerance: f64,
     ) -> Result<Self, FeatureError> {
+        let tolerance = job_tolerance.abs() / 2.0;
         Ok(Self {
             faces: picked_faces(selection, prepared, bodies, job_tolerance)?,
             chains: picked_chains(selection, prepared, bodies, job_tolerance)?,
+            curves: selection
+                .curves
+                .iter()
+                .map(|c| trace_of(c, &prepared.frame, tolerance))
+                .collect(),
+            tolerance,
         })
     }
 
-    /// Every point of the faces and edges: the faces' first.
+    /// Every point of the faces, edges and curves: the faces' first.
     pub fn points(&self) -> impl Iterator<Item = DVec3> + '_ {
         self.faces
             .iter()
             .flat_map(|f| f.triangles.iter().flatten().copied())
             .chain(self.chains.iter().flat_map(|c| c.points.iter().copied()))
+            .chain(
+                self.curves
+                    .iter()
+                    .flat_map(|c| std::iter::once(c.start).chain(c.pieces.iter().map(Piece::to))),
+            )
+    }
+
+    /// The edges and curves as the tool's centre follows them: each curve,
+    /// and the edges joined end to end, open or closed, round edges lying
+    /// level as arcs. `bodies` are the models the edges are on.
+    pub fn traces(&self, prepared: &Prepared, bodies: &Bodies<'_>) -> Vec<Trace> {
+        let centre = |c: &Chain| {
+            let body = bodies.get(c.model.as_str())?;
+            match body.topology().edge(c.edge)?.kind {
+                EdgeKind::Circle(circle)
+                    if prepared.frame.orientation.apply(circle.normal).z.abs() > 1.0 - 1e-6 =>
+                {
+                    Some(prepared.frame.to_setup(circle.center).truncate())
+                }
+                _ => None,
+            }
+        };
+        let mut out = self.curves.clone();
+        for run in runs(&self.chains) {
+            let mut pieces = Vec::new();
+            let mut start = None;
+            for &(i, forward) in &run {
+                let Some(c) = self.chains.get(i) else {
+                    continue;
+                };
+                // A closed edge starts and ends at its first point either way.
+                let first = if forward || c.closed {
+                    c.points.first()
+                } else {
+                    c.points.last()
+                };
+                start = start.or(first.copied());
+                pieces.extend(edge_pieces(c, forward, centre(c)));
+            }
+            if let Some(start) = start {
+                out.push(Trace { start, pieces });
+            }
+        }
+        out
     }
 
     /// How high they go; `None` for no picks.
@@ -524,7 +726,8 @@ impl Picked {
 
     /// The area they enclose, seen from above: the faces' triangles projected
     /// straight down and joined, dropping any seen edge-on, with the loops the
-    /// edges close read even-odd, so a loop inside another is a hole.
+    /// edges and the closed curves close read even-odd, so a loop inside
+    /// another is a hole: a letter's counter.
     fn area(&self) -> Result<Region, FeatureError> {
         let flat = |p: &DVec3| DVec2::new(p.x, p.y);
         // A triangle seen edge-on has no area from above, and a sliver of one only
@@ -542,10 +745,22 @@ impl Picked {
             .collect();
         let from_faces = Region::union_of(&polygons)?;
 
-        let rings: Vec<Contour> = loops(&self.chains)?
+        let mut rings: Vec<Contour> = loops(&self.chains)?
             .into_iter()
             .filter_map(|l| Contour::new(l.iter().map(flat).collect()))
             .collect();
+        // A closed curve is a loop too; an open one bounds nothing.
+        rings.extend(
+            self.curves
+                .iter()
+                .filter(|c| c.closed(self.tolerance))
+                .filter_map(|c| {
+                    let mut points: Vec<DVec2> =
+                        c.points(self.tolerance).iter().map(flat).collect();
+                    points.pop();
+                    Contour::new(points)
+                }),
+        );
         let from_edges = Region::new(rings);
 
         Ok(from_faces.union(&from_edges)?)
@@ -605,6 +820,16 @@ impl<'a> Picking<'a> {
     /// How high the picks go; `None` for none.
     pub fn picks(&self) -> Result<Option<Picks>, FeatureError> {
         Ok(self.found()?.picks())
+    }
+
+    /// The picked edges and curves as the tool's centre follows them
+    /// ([`Picked::traces`]); [`FeatureError::NothingToFollow`] for none.
+    pub fn traces(&self) -> Result<Vec<Trace>, FeatureError> {
+        let traces = self.found()?.traces(self.prepared, self.bodies);
+        if traces.is_empty() {
+            return Err(FeatureError::NothingToFollow);
+        }
+        Ok(traces)
     }
 
     /// A boundary of `kind` as chosen, before the tool is kept to it, in the

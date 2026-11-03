@@ -30,7 +30,8 @@
 //!   (decision 0003).
 //! - **Contours** ([`contour`]): closed regions, consumed by clearing, by
 //!   boundaries picked on a model and by the 2D operations; with the exact lines
-//!   and arcs a cut follows round them ([`ring`], [`arc`]).
+//!   and arcs a cut follows round them ([`ring`], [`arc`]), and their middles
+//!   ([`medial`]).
 //! - **Fields** on a lifted grid ([`trigrid`]): distances along the part
 //!   ([`geodesic`]), whose lines of equal value ([`isoline`]) place passes seen from
 //!   above and never give a Z (decision 0009).
@@ -47,6 +48,8 @@ pub mod bvh;
 pub mod heightmap;
 
 pub mod contour;
+
+pub mod medial;
 
 pub mod engagement;
 

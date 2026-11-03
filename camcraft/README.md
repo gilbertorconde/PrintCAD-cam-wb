@@ -70,6 +70,31 @@ zero) takes the box round them, and adaptive clearing clears what each
 stands above a level, a disc's circle or a bar's width there. Facing still
 faces the box round round stock, over air at its corners.
 
+And two strategies, Fusion's Trace and Engrave, and V-carving. In
+`camcraft-core`, a `Selection` has `curves` beside its picks: lines and
+three-point arcs drawn in the document, a sketch's, on no model, so not
+found again. `setup::features` reads them, in the setup's frame, its level
+arcs kept as arcs, among the selection's points (for a height measured
+from them) and, closed, among the loops its area is read from, even-odd,
+so a letter's counter is a hole. `StrategySpec::Engrave` (`depth`,
+`direction`: climb, conventional or as drawn, `reverse`) follows the
+curves and the picked edges joined end to end, open or closed, a round
+edge lying level as arcs (`strategy::engrave`): each ramps down along
+itself at the ramp angle, round a closed one and back and forth along an
+open one, a stepdown at most each time, then once at the depth; its arcs
+are arc moves, helixes going down, so the post writes `G2` and `G3`.
+`StrategySpec::VCarve` (`max_depth`) cuts what the picks enclose with a
+cone only (`Operation::cannot_use`): round each ring of it, the tool goes
+along the centres of the largest circles inside it touching the ring
+(`camcraft_geom::medial`, new), as deep as each radius reaches on the V,
+from the shallowest; past the deepest it may go it cuts the walls that
+deep, and the floor left is a warning, since an operation has one tool.
+`Uses` has `traces` and `carves`, and the run's targets with them. What
+they cut into the part is meant: the part they are verified against is cut
+as deep as they cut it (`PartSurface::cut_into` in `camcraft-sim`), as
+negative stock to leave already was. In `camcraft-post`, a golden
+engraving (`grbl-engrave.nc`).
+
 And one test: ogeom is 0.11.1 here, which printCAD's shapes need, and it
 meshes `round_edge_loose_fit.step`'s seam that 0.11.0 drew off the torus, so
 `a_loose_fit_is_refused_for_ogeoms_seam` became

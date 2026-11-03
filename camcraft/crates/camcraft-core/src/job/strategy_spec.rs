@@ -222,6 +222,37 @@ pub enum StrategySpec {
         #[serde(default, skip_serializing_if = "is_default")]
         hand: ThreadHand,
     },
+    /// The tool's centre run along curves and edges, open or closed, `depth`
+    /// below the top: an engraving, a groove, a chamfer with a V-bit. Fusion's
+    /// Trace and Engrave. Arcs are cut as arcs. Each curve ramps down along
+    /// itself, round a closed one and back and forth along an open one, no
+    /// more than a stepdown each time along it, so it never lifts between its
+    /// levels; then once along it at the depth.
+    Engrave {
+        /// How deep it cuts below the top, in millimetres.
+        #[serde(
+            default = "default_engrave_depth",
+            skip_serializing_if = "is_engrave_depth"
+        )]
+        depth: f64,
+        /// Which way it runs along each curve.
+        #[serde(default, skip_serializing_if = "is_default")]
+        direction: TraceDirection,
+        /// Each curve run the other way.
+        #[serde(default, skip_serializing_if = "is_default")]
+        reverse: bool,
+    },
+    /// Closed areas carved with a V-bit along their middle: at each point as
+    /// deep as the V reaches the walls either side, so the width it cuts is the
+    /// area's, a letter's stroke. Where the area is wider than the V reaches
+    /// at `max_depth`, it cuts the walls to that depth and leaves the flat
+    /// floor between them, and says so.
+    VCarve {
+        /// The deepest it cuts below the top, in millimetres: the V's own full
+        /// depth, where it is as wide as the tool, when not given.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_depth: Option<f64>,
+    },
 }
 
 impl StrategySpec {
@@ -249,6 +280,8 @@ impl StrategySpec {
             StrategySpec::Pocket { .. } => "pocket",
             StrategySpec::Face { .. } => "face",
             StrategySpec::Drill { .. } => "drill",
+            StrategySpec::Engrave { .. } => "engrave",
+            StrategySpec::VCarve { .. } => "v-carve",
         }
     }
 
@@ -279,10 +312,12 @@ impl StrategySpec {
             | StrategySpec::MorphedSpiral { direction, .. } => {
                 direction == CutDirection::Conventional
             }
+            StrategySpec::Engrave { direction, .. } => direction == TraceDirection::Conventional,
             StrategySpec::Parallel { .. }
             | StrategySpec::Radial { .. }
             | StrategySpec::Face { .. }
-            | StrategySpec::Drill { .. } => false,
+            | StrategySpec::Drill { .. }
+            | StrategySpec::VCarve { .. } => false,
         }
     }
 
@@ -336,11 +371,33 @@ impl StrategySpec {
         match self.uses().depths {
             Depths::None => None,
             _ if matches!(self, StrategySpec::Face { .. }) => None,
+            // Down to their depth in one, unless asked: engraving is shallow.
+            _ if matches!(
+                self,
+                StrategySpec::Engrave { .. } | StrategySpec::VCarve { .. }
+            ) =>
+            {
+                None
+            }
             // A finishing waterline's, as Fusion's Contour.
             _ if matches!(self, StrategySpec::Contour { .. }) => Some(1.0),
             _ => Some(2.0),
         }
     }
+}
+
+/// Which way an engraving runs along each curve.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TraceDirection {
+    /// Round each closed curve as cutting what it encloses climbs: clockwise
+    /// seen from above, with a clockwise spindle. An open curve as drawn.
+    #[default]
+    Climb,
+    /// Round each closed curve the other way. An open curve as drawn.
+    Conventional,
+    /// Every curve the way it was drawn.
+    AsDrawn,
 }
 
 /// Which way a tapped thread turns.
@@ -519,6 +576,18 @@ fn is_climb(d: &CutDirection) -> bool {
 #[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_ninety(v: &f64) -> bool {
     (*v - 90.0).abs() < f64::EPSILON
+}
+
+/// Half a millimetre: deep enough to read, shallow enough for a fine V-bit
+/// and thin stock.
+fn default_engrave_depth() -> f64 {
+    0.5
+}
+
+// A signature serde's `skip_serializing_if` requires.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_engrave_depth(v: &f64) -> bool {
+    (*v - 0.5).abs() < f64::EPSILON
 }
 
 fn default_min_ring() -> f64 {

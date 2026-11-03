@@ -234,8 +234,9 @@ impl Operation {
     /// taller than the tolerance, `2·√(r² − (r − tol)²) / √2`; for 3D pocket
     /// clearing, a 2D pocket and flat finishing, 0.6 of the diameter; for
     /// adaptive clearing, its optimal load, a tenth of the diameter; for facing,
-    /// 95% of the flat of the tool's end. `None` for contour finishing, a profile
-    /// or drilling, which have none, and for facing with a tool that has no flat.
+    /// 95% of the flat of the tool's end. `None` for contour finishing, a
+    /// profile, drilling, engraving or V-carving, which have none, and for
+    /// facing with a tool that has no flat.
     pub fn default_stepover(&self, tool: &ToolSpec, tolerance: f64) -> Option<f64> {
         let d = tool.diameter;
         match self.strategy {
@@ -271,7 +272,9 @@ impl Operation {
             },
             StrategySpec::Profile { .. }
             | StrategySpec::Contour { .. }
-            | StrategySpec::Drill { .. } => None,
+            | StrategySpec::Drill { .. }
+            | StrategySpec::Engrave { .. }
+            | StrategySpec::VCarve { .. } => None,
         }
     }
 }

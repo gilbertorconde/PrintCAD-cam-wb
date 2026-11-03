@@ -81,7 +81,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 pub use error::JobError;
-pub use geometry::{Boundary, Containment, MachiningBoundary, Outline, Selection};
+pub use geometry::{Boundary, Containment, Curve, MachiningBoundary, Outline, Segment, Selection};
 pub use heights::{Height, HeightContext, HeightRef, Heights, Picks};
 pub use linking::{Entry, LeadSizes, Leads, Linking, Retraction};
 pub use model::{
@@ -93,7 +93,7 @@ pub use pick::{FeatureRef, PointRef, Snap};
 pub use setup::{Along, BoxOf, Origin, Setup};
 pub use strategy_spec::{
     ContourOrder, CutDirection, FaceDirection, PassOrder, ProfileSide, RadialDirection,
-    StrategySpec, ThreadHand,
+    StrategySpec, ThreadHand, TraceDirection,
 };
 pub use tool::{
     Coolant, DRILL_POINT, Holder, HolderSegment, Preset, SpindleDirection, ToolFieldError,

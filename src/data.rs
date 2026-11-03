@@ -593,6 +593,7 @@ impl OperationData {
         op.selection = Selection {
             faces: refs(&self.faces),
             edges: refs(&self.edges),
+            curves: Vec::new(),
         };
         op
     }
@@ -755,6 +756,8 @@ pub fn strategy_word(strategy: &StrategySpec) -> &'static str {
         StrategySpec::Pocket { .. } => "2D pocket",
         StrategySpec::Face { .. } => "Face",
         StrategySpec::Drill { .. } => "Drill",
+        StrategySpec::Engrave { .. } => "Engrave",
+        StrategySpec::VCarve { .. } => "V-carve",
     }
 }
 
@@ -774,7 +777,9 @@ fn start_on_silhouette(op: &mut Operation) {
         StrategySpec::Profile { .. }
         | StrategySpec::Pocket { .. }
         | StrategySpec::Face { .. }
-        | StrategySpec::Drill { .. } => return,
+        | StrategySpec::Drill { .. }
+        | StrategySpec::Engrave { .. }
+        | StrategySpec::VCarve { .. } => return,
     };
     op.boundary.kind = Boundary::Silhouette;
     op.boundary.containment = containment;

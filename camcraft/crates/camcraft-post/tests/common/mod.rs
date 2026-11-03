@@ -141,3 +141,65 @@ pub fn tapping(hand: ThreadHand) -> ProgramSpec {
     }
     spec
 }
+
+/// An engraving round a circle 5 mm across and along a line, half a
+/// millimetre deep, ramping down the circle as a helix: its links made as
+/// the linker would, straight down from above.
+pub fn engraving() -> Toolpath {
+    use camcraft_core::job::TraceDirection;
+    use camcraft_core::strategy::engrave::{EngraveParams, Piece, Trace, engrave};
+    let circle = Trace {
+        start: dvec3(2.5, 0.0, 0.0),
+        pieces: vec![
+            Piece::Arc {
+                centre: dvec2(0.0, 0.0),
+                ccw: true,
+                to: dvec3(-2.5, 0.0, 0.0),
+            },
+            Piece::Arc {
+                centre: dvec2(0.0, 0.0),
+                ccw: true,
+                to: dvec3(2.5, 0.0, 0.0),
+            },
+        ],
+    };
+    let line = Trace {
+        start: dvec3(5.0, -5.0, 0.0),
+        pieces: vec![Piece::Line {
+            to: dvec3(15.0, -5.0, 0.0),
+        }],
+    };
+    let params = EngraveParams {
+        top: 0.0,
+        depth: 0.5,
+        stepdown: None,
+        ramp_angle: 5f64.to_radians(),
+        feed: 800.0,
+        ramp_feed: 400.0,
+        plunge_feed: 250.0,
+        direction: TraceDirection::Climb,
+        reverse: false,
+        climb_right: true,
+        tolerance: 0.01,
+    };
+    let (path, _) = engrave(&[circle, line], &params).unwrap();
+    let mut t = Toolpath::new();
+    t.rapid_to(dvec3(0.0, 0.0, 10.0)).unwrap();
+    for m in path.moves() {
+        if m.role == MoveRole::Link {
+            let at = t.end().unwrap();
+            if at.z < 5.0 {
+                t.feed_to(at.truncate().extend(5.0), MoveRole::Retract, 900.0)
+                    .unwrap();
+            }
+            t.rapid_to(m.to.truncate().extend(5.0)).unwrap();
+            t.feed_to(m.to, MoveRole::Plunge, 250.0).unwrap();
+        } else {
+            t.push(*m).unwrap();
+        }
+    }
+    let end = t.end().unwrap();
+    t.feed_to(end.truncate().extend(10.0), MoveRole::Retract, 900.0)
+        .unwrap();
+    t
+}

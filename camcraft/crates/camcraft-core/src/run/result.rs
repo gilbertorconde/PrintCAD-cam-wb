@@ -12,6 +12,7 @@ use crate::path::toolpath::Toolpath;
 use crate::setup::frame::Frame;
 use crate::strategy::adaptive::AdaptiveReport;
 use crate::strategy::drilling::DrillReport;
+use crate::strategy::engrave::EngraveReport;
 use crate::strategy::flat::FlatReport;
 use crate::strategy::morph::MorphedSpiralReport;
 use crate::strategy::parallel::ParallelReport;
@@ -19,6 +20,7 @@ use crate::strategy::planar::PlanarReport;
 use crate::strategy::pocket_clearing::ClearingReport;
 use crate::strategy::projected::ProjectReport;
 use crate::strategy::scallop::ScallopReport;
+use crate::strategy::vcarve::VCarveReport;
 use crate::strategy::waterline::WaterlineReport;
 
 /// What a strategy reported, in its own terms.
@@ -54,6 +56,10 @@ pub enum StrategyDetail {
     Face(PlanarReport),
     /// Drilling.
     Drill(DrillReport),
+    /// Engraving along curves.
+    Engrave(EngraveReport),
+    /// V-carving down the middle of areas.
+    VCarve(VCarveReport),
 }
 
 /// How an operation's paths came to be in a run.

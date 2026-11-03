@@ -21,6 +21,10 @@ pub mod pocket_clearing;
 // Holes.
 pub mod drilling;
 
+// Along curves, and down the middle of areas.
+pub mod engrave;
+pub mod vcarve;
+
 // What they share.
 mod field;
 pub(crate) mod nesting;

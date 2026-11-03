@@ -102,6 +102,11 @@ impl Operation {
             }
             return Some("drill holes with a drill, or a flat end mill that plunges");
         }
+        // Its depth is the V's, from how wide the area is: no other shape
+        // cuts its width to its depth.
+        if matches!(self.strategy, StrategySpec::VCarve { .. }) && tool.kind != ToolKind::Cone {
+            return Some("V-carving cuts with a V-bit: its width follows how deep its V goes");
+        }
         if matches!(self.strategy, StrategySpec::Face { .. }) && tool.kind == ToolKind::Ball {
             return Some("a ball end mill cannot face flat; use a flat or bull-nose end mill");
         }

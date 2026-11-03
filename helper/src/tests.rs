@@ -689,3 +689,78 @@ fn round_stock_is_drawn_round() {
         "{share}"
     );
 }
+
+/// An engraving of a circle and a line drawn over the part: its arcs are
+/// posted as arcs, what it follows is drawn, the line left open, and what it
+/// cuts into the part is meant, so nothing gouges.
+#[test]
+fn an_engraving_posts_its_arcs_and_draws_its_curves() {
+    let part = BTreeMap::from([(
+        "part".to_string(),
+        Shape {
+            text: native("hinge_jig.step"),
+            placement: IDENTITY,
+        },
+    )]);
+    let first = Request {
+        version: VERSION,
+        job: JOB.to_string(),
+        shapes: part.clone(),
+        ..Request::default()
+    };
+    let [lo, hi] = answer(&first).unwrap().stock;
+    let (x, y) = (
+        f64::from(lo[0] + hi[0]) / 2.0,
+        f64::from(lo[1] + hi[1]) / 2.0,
+    );
+    let r = 3.0;
+    let curves = format!(
+        "selection = {{ curves = [\n\
+         {{ start = [{a}, {y}, 0.0], segments = [{{ via = [{x}, {b}, 0.0], to = [{c}, {y}, 0.0] }}, \
+         {{ via = [{x}, {d}, 0.0], to = [{a}, {y}, 0.0] }}] }},\n\
+         {{ start = [{c}, {e}, 0.0], segments = [{{ to = [{a}, {e}, 0.0] }}] }},\n] }}",
+        a = x + r,
+        b = y + r,
+        c = x - r,
+        d = y - r,
+        e = y + 2.0 * r,
+    );
+    let job = JOB.replace(
+        "strategy = \"pocket-clearing\"\ntool = \"flat-6\"\npasses = { stepdown = 3.0, stepover = 3.0 }",
+        &format!(
+            "strategy = \"engrave\"\ntool = \"engraver\"\ndepth = 0.3\npasses = {{ feed = 600.0 }}\n{curves}"
+        ),
+    )
+    .replace(
+        "[[model]]",
+        "[tools.engraver]\nkind = \"ball\"\ndiameter = 1.0\nnumber = 2\nrpm = 18000\n\n[[model]]",
+    );
+    let request = Request {
+        version: VERSION,
+        job,
+        shapes: part,
+        max_points: 5000,
+        ..Request::default()
+    };
+    let run = answer(&request).unwrap();
+    let op = &run.operations[0];
+    assert_eq!(op.made, "generated", "{:?}", op.warnings);
+    for f in run.findings.iter().filter(|f| f.level == Level::Fail) {
+        panic!("{f:?}");
+    }
+    let program = &op.program.as_ref().unwrap().text;
+    let arcs = program
+        .lines()
+        .filter(|l| l.split_whitespace().any(|w| w == "G2" || w == "G3"))
+        .count();
+    assert!(arcs >= 4, "{program}");
+    let drawn = op.outlines.as_ref().expect("what it follows, drawn");
+    assert_eq!(drawn.boundary.len(), 2);
+    let open = drawn
+        .boundary
+        .iter()
+        .filter(|l| l.first() != l.last())
+        .count();
+    assert_eq!(open, 1, "the line is left open");
+    assert!(!drawn.cut.is_empty());
+}

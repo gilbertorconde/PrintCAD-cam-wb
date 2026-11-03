@@ -496,8 +496,9 @@ fn operation_findings(
                 ));
             }
         }
-        // A hole the tool does not fit is among the run's own warnings.
-        StrategyDetail::Drill(_) => {}
+        // A hole the tool does not fit is among the run's own warnings, as
+        // are a curve too short to ramp along and a floor wider than the V.
+        StrategyDetail::Drill(_) | StrategyDetail::Engrave(_) | StrategyDetail::VCarve(_) => {}
     }
     if op.links.suspicious_plunges > 0 {
         out.push(finding(
