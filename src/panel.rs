@@ -1197,7 +1197,7 @@ fn heights_group(data: &OperationData, feature: &str) -> Widget {
         StrategySpec::Face { .. } => {
             Some("Without a bottom, the stock is faced down to the part's top.")
         }
-        StrategySpec::Engrave { .. } => Some(
+        StrategySpec::Engrave { .. } | StrategySpec::Slot { .. } => Some(
             "It cuts its depth below the top: the part's, where a sketch drawn on it lies, \
              or the picks' to cut from where the curves are.",
         ),

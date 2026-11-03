@@ -1099,7 +1099,7 @@ impl Bench for Cam {
                              pass_extension, tab_width, tab_height, tab_spacing, \
                              finishing_passes: numbers; centre, tabs, finishing, \
                              finishing_repeat: booleans; tab_shape: rectangular|triangular; \
-                             hand: right|left; depth: engrave's, mm; outer_radius, peck, \
+                             hand: right|left; depth: engrave's and slot's, mm; outer_radius, peck, \
                              chip_break, dwell, pitch, max_depth, finishing_stepover, \
                              finishing_feed: {value, given}}",
                         ),
@@ -1120,7 +1120,13 @@ impl Bench for Cam {
                             "reverse",
                             ParamKind::Bool,
                             false,
-                            "engrave: each curve the other way",
+                            "engrave, slot: each curve the other way",
+                        ),
+                        param(
+                            "pattern",
+                            ParamKind::String,
+                            false,
+                            "slot: bidirectional|directional (bidirectional)",
                         ),
                         param("name", ParamKind::String, false, "the operation's name"),
                     ],
@@ -1132,6 +1138,11 @@ impl Bench for Cam {
                          a stepdown at most each time with multiple depths. V-carve cuts the \
                          areas its sketches close down their middle with a V-bit, as deep as \
                          they are wide, no deeper than passes.max_depth = {value, given}."
+                            .into(),
+                        "Slot cuts along the same curves and edges as Engrave, as wide as its \
+                         tool, passes.depth below the top (3 mm), a stepdown a level (1 mm): \
+                         bidirectional ramps back and forth along each, directional cuts each \
+                         level from its start, lifting back between them."
                             .into(),
                         "A library tool's first preset sets its feeds and speeds.".into(),
                         "Drilling: peck backs out between pecks, and with chip_break only that \
@@ -1523,6 +1534,18 @@ impl Bench for Cam {
                     if let Some(d) = text("direction") {
                         *direction = serde_json::from_value(json!(d))
                             .map_err(|_| format!("no direction '{d}'"))?;
+                    }
+                    if let Some(r) = args.get("reverse").and_then(Value::as_bool) {
+                        *reverse = r;
+                    }
+                }
+                if let StrategySpec::Slot {
+                    pattern, reverse, ..
+                } = &mut data.operation.strategy
+                {
+                    if let Some(p) = text("pattern") {
+                        *pattern = serde_json::from_value(json!(p))
+                            .map_err(|_| format!("no slot pattern '{p}'"))?;
                     }
                     if let Some(r) = args.get("reverse").and_then(Value::as_bool) {
                         *reverse = r;

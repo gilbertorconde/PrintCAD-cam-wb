@@ -4,8 +4,8 @@
 //! what the rows' widgets do.
 
 use camcraft_core::job::{
-    ContourOrder, FaceDirection, Finishing, Operation, PassOrder, RadialDirection, StrategySpec,
-    TabShape, Tabs, ThreadHand, ToolKind, ToolSpec, TraceDirection,
+    ContourOrder, FaceDirection, Finishing, Operation, PassOrder, RadialDirection, SlotPattern,
+    StrategySpec, TabShape, Tabs, ThreadHand, ToolKind, ToolSpec, TraceDirection,
 };
 use printcad_bench_sdk::api::*;
 use printcad_bench_sdk::serde_json::{self, Value};
@@ -53,7 +53,7 @@ pub struct PassesData {
     pub pitch: Opt,
     #[serde(default)]
     pub hand: ThreadHand,
-    /// How deep an engraving cuts below its top.
+    /// How deep an engraving or a slot cuts below its top.
     #[serde(default = "half")]
     pub depth: f64,
     /// The deepest a V-carving goes; the V's own full depth unless given.
@@ -217,7 +217,9 @@ impl PassesData {
                 self.pitch = Opt::of(pitch);
                 self.hand = hand;
             }
-            StrategySpec::Engrave { depth, .. } => self.depth = depth,
+            StrategySpec::Engrave { depth, .. } | StrategySpec::Slot { depth, .. } => {
+                self.depth = depth
+            }
             StrategySpec::VCarve { max_depth } => self.max_depth = Opt::of(max_depth),
             _ => {}
         }
@@ -317,7 +319,9 @@ impl PassesData {
                 *pitch = self.pitch.get();
                 *hand = self.hand;
             }
-            StrategySpec::Engrave { depth, .. } => *depth = self.depth,
+            StrategySpec::Engrave { depth, .. } | StrategySpec::Slot { depth, .. } => {
+                *depth = self.depth
+            }
             StrategySpec::VCarve { max_depth } => *max_depth = self.max_depth.get(),
             _ => {}
         }
@@ -385,7 +389,7 @@ impl PassesData {
             Dim::Length,
         );
         add(
-            matches!(s, StrategySpec::Engrave { .. }),
+            matches!(s, StrategySpec::Engrave { .. } | StrategySpec::Slot { .. }),
             "depth",
             "Depth",
             Dim::Length,
@@ -475,6 +479,16 @@ const TRACE_DIRECTIONS: [(TraceDirection, &str); 3] = [
     (TraceDirection::Climb, "Climb"),
     (TraceDirection::Conventional, "Conventional"),
     (TraceDirection::AsDrawn, "As drawn"),
+];
+const SLOT_PATTERNS: [(SlotPattern, &str); 2] = [
+    (
+        SlotPattern::Bidirectional,
+        "Both ways: back and forth, ramping down",
+    ),
+    (
+        SlotPattern::Directional,
+        "One way: a level each time, lifting back",
+    ),
 ];
 const TAB_SHAPES: [(TabShape, &str); 2] = [
     (TabShape::Rectangular, "Rectangular"),
@@ -641,6 +655,36 @@ pub fn strategy_rows(data: &OperationData, tool: Option<&ToolSpec>, feature: &st
                    along an open one, a stepdown at most each time, then once at \
                    the depth."
                 .into(),
+            mono: false,
+        });
+    }
+    if let StrategySpec::Slot {
+        pattern, reverse, ..
+    } = s
+    {
+        rows.push(length("passes/depth", "Depth", p.depth));
+        rows.push(pick(
+            "passes/slot_pattern",
+            "Pattern",
+            &SLOT_PATTERNS,
+            pattern,
+        ));
+        rows.push(Widget::Toggle {
+            id: "passes/reverse".into(),
+            label: "Reverse".into(),
+            on: reverse,
+        });
+        let width = match tool {
+            Some(t) => format!("{:.2} mm, the tool's", t.diameter),
+            None => "the tool's".into(),
+        };
+        rows.push(Widget::Text {
+            text: format!(
+                "The slot is {width} wide, along each curve as drawn. Both ways, it goes \
+                 a stepdown deeper each time along it, ramping as it goes, then once at \
+                 the depth; one way, it cuts each level from the start, lifting at the \
+                 end, and goes into each as the linking's entry says."
+            ),
             mono: false,
         });
     }
@@ -960,10 +1004,17 @@ pub fn passes_event(
             );
         }
         ("reverse", PanelEvent::Toggle { on, .. }) => {
-            let StrategySpec::Engrave { reverse, .. } = s else {
+            let (StrategySpec::Engrave { reverse, .. } | StrategySpec::Slot { reverse, .. }) = s
+            else {
                 return false;
             };
             return set(Some(reverse), Some(*on));
+        }
+        ("slot_pattern", PanelEvent::Choice { index, .. }) => {
+            let StrategySpec::Slot { pattern, .. } = s else {
+                return false;
+            };
+            return set(Some(pattern), SLOT_PATTERNS.get(*index).map(|(x, _)| *x));
         }
         ("hand", PanelEvent::Choice { index, .. }) => {
             return set(

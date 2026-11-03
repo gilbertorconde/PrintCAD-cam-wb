@@ -62,7 +62,11 @@ panels, the drawing and the helper that runs camcraft.
   and edges, open or closed, at a depth (0.5 mm unless set), each ramped
   down along itself, round a closed one and back and forth along an open
   one, so it never lifts between its levels, its arcs written as `G2` and
-  `G3`; and V-carving closed areas, letters among them, with a V-bit down
+  `G3`; slots along the same curves and edges, as wide as the tool, 3 mm
+  deep unless set and a millimetre a level, both ways (back and forth,
+  ramping down as an engraving does) or one way (each level from the
+  start, lifting back, entered by a ramp along the slot or a plunge),
+  their arcs arcs at every level; and V-carving closed areas, letters among them, with a V-bit down
   their middle, as deep as each is wide: past its deepest it cuts the walls
   that deep and leaves the flat floor between, and says so, for a flat end
   mill to clear. An operation
@@ -183,6 +187,9 @@ local rough = cam.operation{setup = setup.feature, strategy = "adaptive", tool =
                            heights = {bottom_from = "model-top", bottom = -6}}
 local name = cam.operation{setup = setup.feature, strategy = "engrave", tool = "60° V-bit",
                            sketches = {"<sketch id>"}, passes = {depth = 0.4}}
+local keyway = cam.operation{setup = setup.feature, strategy = "slot", tool = "1/4 upcut",
+                             sketches = {"<sketch id>"}, pattern = "directional",
+                             passes = {depth = 4}, stepdown = 1}
 local letters = cam.operation{setup = setup.feature, strategy = "v-carve", tool = "60° V-bit",
                               sketches = {"<sketch id>"}, passes = {max_depth = {value = 2, given = true}}}
 cam.status{id = setup.feature}          -- queued, running, ready (with its checks), failed
