@@ -38,7 +38,9 @@ use camcraft_core::job::{StrategySpec, ToolSpec};
 use printcad_bench_sdk::api::*;
 use printcad_bench_sdk::{Bench, Value, bench, host, json, serde_json};
 
-use data::{OperationData, STRATEGIES, SetupData, models_of, strategy_word};
+use data::{
+    CylinderAxis, OperationData, STRATEGIES, SetupData, StockKind, models_of, strategy_word,
+};
 use runs::{Computed, JOB, Runs, State};
 
 /// The package's id: its feature kinds, tools, commands and menu entries all
@@ -892,8 +894,35 @@ impl Bench for Cam {
                             "margin",
                             ParamKind::Number,
                             false,
-                            "mm of stock round the bodies and on top; 2",
+                            "mm of stock round the bodies and on top (a cylinder's: \
+                             round them and at each end); 2",
                         ),
+                        param(
+                            "stock",
+                            ParamKind::String,
+                            false,
+                            "box (round the bodies, the default), fixed-box or cylinder",
+                        ),
+                        param(
+                            "size",
+                            ParamKind::List,
+                            false,
+                            "a fixed box's {x, y, z} in mm",
+                        ),
+                        param(
+                            "axis",
+                            ParamKind::String,
+                            false,
+                            "a cylinder's: tool (up the tool, the default), x or y (lying \
+                             along the machine's)",
+                        ),
+                        param(
+                            "diameter",
+                            ParamKind::Number,
+                            false,
+                            "a cylinder of a fixed size, mm; with length",
+                        ),
+                        param("length", ParamKind::Number, false, "a fixed cylinder's, mm"),
                         param(
                             "post",
                             ParamKind::String,
@@ -1060,6 +1089,10 @@ impl Bench for Cam {
                 "size_x",
                 "size_y",
                 "size_z",
+                "margin_radial",
+                "margin_ends",
+                "diameter",
+                "length",
                 "offset_x",
                 "offset_y",
                 "offset_z",
@@ -1115,6 +1148,10 @@ impl Bench for Cam {
                 p("size_x", "Stock X", Dim::Length),
                 p("size_y", "Stock Y", Dim::Length),
                 p("size_z", "Stock Z", Dim::Length),
+                p("margin_radial", "Stock margin, round", Dim::Length),
+                p("margin_ends", "Stock margin, each end", Dim::Length),
+                p("diameter", "Stock diameter", Dim::Length),
+                p("length", "Stock length", Dim::Length),
                 p("offset_x", "Work zero X offset", Dim::Length),
                 p("offset_y", "Work zero Y offset", Dim::Length),
                 p("offset_z", "Work zero Z offset", Dim::Length),
@@ -1191,11 +1228,50 @@ impl Bench for Cam {
                         .map_err(|_| "bodies is a list of body ids")?,
                     None => self.chosen_bodies(),
                 };
+                // Read before the setup is made, so a wrong one makes none.
+                let stock = match text("stock").as_deref() {
+                    None => None,
+                    Some("box") => Some(StockKind::Around),
+                    Some("fixed-box") => Some(StockKind::Fixed),
+                    Some("cylinder") => Some(StockKind::Cylinder),
+                    Some(other) => {
+                        return Err(format!("no stock '{other}': box, fixed-box or cylinder"));
+                    }
+                };
+                let size: Option<[f64; 3]> = match args.get("size") {
+                    Some(v) => Some(
+                        serde_json::from_value(v.clone()).map_err(|_| "size is {x, y, z} in mm")?,
+                    ),
+                    None => None,
+                };
+                let axis = match text("axis").as_deref() {
+                    None | Some("tool") => CylinderAxis::Tool,
+                    Some("x") => CylinderAxis::X,
+                    Some("y") => CylinderAxis::Y,
+                    Some(other) => return Err(format!("no axis '{other}': tool, x or y")),
+                };
                 let id = self.make_setup(bodies, text("name").as_deref())?;
                 if let Some((_, mut data)) = setup_node(&id) {
                     if let Some(m) = number("margin") {
                         data.margin_side = m;
                         data.margin_top = m;
+                        data.margin_radial = m;
+                        data.margin_ends = m;
+                    }
+                    if let Some(kind) = stock {
+                        data.stock = kind;
+                    }
+                    if let Some([x, y, z]) = size {
+                        (data.size_x, data.size_y, data.size_z) = (x, y, z);
+                    }
+                    data.cylinder_axis = axis;
+                    if let Some(d) = number("diameter") {
+                        data.diameter = d;
+                        data.cylinder_fixed = true;
+                    }
+                    if let Some(l) = number("length") {
+                        data.length = l;
+                        data.cylinder_fixed = true;
                     }
                     if let Some(post) = text("post") {
                         data.post_profile = self.settings.posts.get(&post).cloned();

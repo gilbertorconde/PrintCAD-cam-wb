@@ -11,9 +11,10 @@
 use std::collections::BTreeMap;
 
 use camcraft_core::job::{
-    Along, Boundary, BoxOf, Containment, Depths, FeatureRef, FixedBox, Height, HeightRef, Heights,
-    Job, Leave, MachiningBoundary, ModelDef, Operation, Origin, Outline, PointRef, Preset,
-    Selection, Setup, Snap, StockDef, StockSpec, StockToLeave, StrategySpec, ToolSpec,
+    Along, BarAxis, Boundary, BoxOf, Containment, Depths, FeatureRef, FixedBox, FixedCylinder,
+    Height, HeightRef, Heights, Job, Leave, MachiningBoundary, ModelDef, Operation, Origin,
+    Outline, Place, PointRef, Preset, Selection, Setup, Snap, StockDef, StockSpec, StockToLeave,
+    StrategySpec, ToolSpec,
 };
 use camcraft_core::setup::frame::{Axis, Orientation};
 use printcad_bench_sdk::serde_json;
@@ -31,6 +32,33 @@ pub enum StockKind {
     Around,
     /// A box of a fixed size, centred on the bodies, its top flush with theirs.
     Fixed,
+    /// A round bar: round the bodies, or of a fixed size.
+    Cylinder,
+}
+
+/// Which way a cylinder of stock lies, as the part sits.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CylinderAxis {
+    /// Up the tool: a disc, or a bar stood on end.
+    #[default]
+    Tool,
+    /// Lying along the machine's X.
+    X,
+    /// Lying along the machine's Y.
+    Y,
+}
+
+impl CylinderAxis {
+    pub const ALL: [CylinderAxis; 3] = [CylinderAxis::Tool, CylinderAxis::X, CylinderAxis::Y];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            CylinderAxis::Tool => "Along the tool axis",
+            CylinderAxis::X => "Along machine X",
+            CylinderAxis::Y => "Along machine Y",
+        }
+    }
 }
 
 /// Where a setup's work zero is.
@@ -122,6 +150,23 @@ pub struct SetupData {
     pub size_x: f64,
     pub size_y: f64,
     pub size_z: f64,
+    /// Which way a cylinder lies.
+    #[serde(default)]
+    pub cylinder_axis: CylinderAxis,
+    /// Whether a cylinder is of a fixed size, rather than round the bodies.
+    #[serde(default)]
+    pub cylinder_fixed: bool,
+    /// Extra material all round the bodies, and at each end, of a cylinder
+    /// round them.
+    #[serde(default = "two")]
+    pub margin_radial: f64,
+    #[serde(default = "two")]
+    pub margin_ends: f64,
+    /// A fixed cylinder's size.
+    #[serde(default = "hundred")]
+    pub diameter: f64,
+    #[serde(default = "hundred")]
+    pub length: f64,
     /// The document direction the spindle points away from the part along.
     pub z_axis: Axis,
     /// The document direction that becomes the machine's X.
@@ -163,6 +208,12 @@ impl SetupData {
             size_x: 100.0,
             size_y: 100.0,
             size_z: 20.0,
+            cylinder_axis: CylinderAxis::Tool,
+            cylinder_fixed: false,
+            margin_radial: two(),
+            margin_ends: two(),
+            diameter: hundred(),
+            length: hundred(),
             z_axis: Axis::PosZ,
             x_axis: Axis::PosX,
             zero: Zero::StockCorner,
@@ -196,6 +247,44 @@ impl SetupData {
             StockKind::Fixed => {
                 StockSpec::FixedBox(FixedBox::centred([self.size_x, self.size_y, self.size_z]))
             }
+            StockKind::Cylinder if self.cylinder_fixed => {
+                StockSpec::FixedCylinder(FixedCylinder {
+                    models: Vec::new(),
+                    axis: self.cylinder_model_axis(),
+                    diameter: self.diameter,
+                    length: self.length,
+                    // Up the tool, its top flush with the bodies', as a
+                    // fixed box's; lying, centred on them.
+                    place: match self.cylinder_axis {
+                        CylinderAxis::Tool if is_positive(self.z_axis) => {
+                            Place::Max { offset: 0.0 }
+                        }
+                        CylinderAxis::Tool => Place::Min { offset: 0.0 },
+                        _ => Place::Center {},
+                    },
+                })
+            }
+            StockKind::Cylinder => StockSpec::CylinderAroundModels {
+                models: Vec::new(),
+                axis: self.cylinder_model_axis(),
+                margin: self.margin_radial,
+                ends: self.margin_ends,
+            },
+        }
+    }
+
+    /// The document axis a cylinder of stock lies along: the setup's axis
+    /// it is set to lie along, as the part sits.
+    fn cylinder_model_axis(&self) -> BarAxis {
+        let along = match self.cylinder_axis {
+            CylinderAxis::Tool => self.z_axis,
+            CylinderAxis::X => self.x_axis,
+            CylinderAxis::Y => self.orientation().y(),
+        };
+        match along {
+            Axis::PosX | Axis::NegX => BarAxis::X,
+            Axis::PosY | Axis::NegY => BarAxis::Y,
+            Axis::PosZ | Axis::NegZ => BarAxis::Z,
         }
     }
 
@@ -253,6 +342,14 @@ impl SetupData {
                 .all(positive)
         {
             return Some("The stock's size must be more than 0 every way.".into());
+        }
+        if self.stock == StockKind::Cylinder {
+            if self.cylinder_fixed && !(positive(self.diameter) && positive(self.length)) {
+                return Some("The stock's diameter and length must be more than 0.".into());
+            }
+            if !self.cylinder_fixed && !(self.margin_radial >= 0.0 && self.margin_ends >= 0.0) {
+                return Some("The stock's margins cannot be less than 0.".into());
+            }
         }
         if !(1.0..=99.0).contains(&self.wcs) {
             return Some("The work offset must be 54 to 59, or another the machine has.".into());
@@ -599,6 +696,19 @@ impl OperationData {
 }
 
 /// Whether `v` is a number more than zero (NaN is not).
+fn two() -> f64 {
+    2.0
+}
+
+fn hundred() -> f64 {
+    100.0
+}
+
+/// Whether `a` points the way its document axis does.
+fn is_positive(a: Axis) -> bool {
+    matches!(a, Axis::PosX | Axis::PosY | Axis::PosZ)
+}
+
 fn positive(v: f64) -> bool {
     v > 0.0
 }
@@ -860,6 +970,87 @@ mod tests {
             back.setups[0].operations[0].selection.faces[0].model,
             "Part (2)"
         );
+    }
+
+    #[test]
+    fn a_cylinder_of_stock_reads_back_as_camcraft_writes_it() {
+        let mut setup = SetupData::new(vec!["b1".into()], "grbl", 0.05);
+        setup.stock = StockKind::Cylinder;
+        setup.margin_radial = 3.0;
+        setup.margin_ends = 1.5;
+        let models = models_of(&setup, |_| Some("Part".into()));
+        let spec = |setup: &SetupData| {
+            let job = job("S", setup, &models, &[]);
+            let text = camcraft_session::job_text(&job).unwrap();
+            let back = camcraft_session::parse_job(&text, "t").unwrap();
+            assert_eq!(back, job);
+            assert_eq!(SetupData::from(&setup.to_value()).unwrap(), *setup);
+            back.stocks[0].spec.clone()
+        };
+        assert_eq!(
+            spec(&setup),
+            StockSpec::CylinderAroundModels {
+                models: vec![],
+                axis: BarAxis::Z,
+                margin: 3.0,
+                ends: 1.5,
+            }
+        );
+        // The part on its side, the tool along the document's Y: a bar up
+        // the tool lies along Y, and one along the machine's Y along the
+        // document's Z (Y is Z × X: −Y × +X).
+        setup.z_axis = Axis::NegY;
+        setup.x_axis = Axis::PosX;
+        let StockSpec::CylinderAroundModels { axis, .. } = spec(&setup) else {
+            panic!();
+        };
+        assert_eq!(axis, BarAxis::Y);
+        setup.cylinder_axis = CylinderAxis::Y;
+        let StockSpec::CylinderAroundModels { axis, .. } = spec(&setup) else {
+            panic!();
+        };
+        assert_eq!(axis, BarAxis::Z);
+        // Of a fixed size up the tool, its top flush with the bodies': the
+        // tool points down the document's Y, so the top is the low side.
+        setup.cylinder_axis = CylinderAxis::Tool;
+        setup.cylinder_fixed = true;
+        setup.diameter = 80.0;
+        setup.length = 25.0;
+        assert_eq!(
+            spec(&setup),
+            StockSpec::FixedCylinder(FixedCylinder {
+                models: vec![],
+                axis: BarAxis::Y,
+                diameter: 80.0,
+                length: 25.0,
+                place: Place::Min { offset: 0.0 },
+            })
+        );
+        setup.cylinder_axis = CylinderAxis::X;
+        let StockSpec::FixedCylinder(c) = spec(&setup) else {
+            panic!();
+        };
+        assert_eq!((c.axis, c.place), (BarAxis::X, Place::Center {}));
+        assert_eq!(setup.problem(), None);
+        setup.diameter = 0.0;
+        assert!(setup.problem().unwrap().contains("diameter"));
+    }
+
+    #[test]
+    fn a_setup_from_before_cylinders_reads() {
+        let setup = SetupData::new(vec!["b1".into()], "grbl", 0.05);
+        let mut value = setup.to_value();
+        for key in [
+            "cylinder_axis",
+            "cylinder_fixed",
+            "margin_radial",
+            "margin_ends",
+            "diameter",
+            "length",
+        ] {
+            value.as_object_mut().unwrap().remove(key);
+        }
+        assert_eq!(SetupData::from(&value).unwrap(), setup);
     }
 
     #[test]
