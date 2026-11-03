@@ -56,6 +56,20 @@ which is the hole it leaves. In `camcraft-post`, the cycles are `G73`,
 `readback` reads the three cycles and checks a tap is fed at its pitch a
 turn, both ways, with the spindle turning its way.
 
+And stock can be a round bar. In `camcraft-core`, `StockSpec` has
+`CylinderAroundModels` (along a model axis through the middle of the
+models' box, its radius a margin past the farthest of them from it, and
+longer at each end) and `FixedCylinder` (a diameter and a length, centred
+on the models across its axis and placed along it as a fixed box is). In
+`camcraft-sim`, a `Block` is a box or a `Bar` along X, Y or Z, and
+`Stock::from_blocks` starts the height field as one: a disc up the tool is
+material over its circle only, a bar lying across it stands to its curve.
+`Prepared::stocks` and `SetupResult::stocks` are blocks; what needs only a
+bound (the stock's top and bottom, facing, linking, verifying, the work
+zero) takes the box round them, and adaptive clearing clears what each
+stands above a level, a disc's circle or a bar's width there. Facing still
+faces the box round round stock, over air at its corners.
+
 And one test: ogeom is 0.11.1 here, which printCAD's shapes need, and it
 meshes `round_edge_loose_fit.step`'s seam that 0.11.0 drew off the torus, so
 `a_loose_fit_is_refused_for_ogeoms_seam` became

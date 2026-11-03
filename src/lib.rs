@@ -38,8 +38,10 @@ use camcraft_core::job::{StrategySpec, ToolSpec};
 use printcad_bench_sdk::api::*;
 use printcad_bench_sdk::{Bench, Value, bench, host, json, serde_json};
 
-use data::{OperationData, STRATEGIES, SetupData, models_of, strategy_word};
-use runs::{JOB, Runs, State};
+use data::{
+    CylinderAxis, OperationData, STRATEGIES, SetupData, StockKind, models_of, strategy_word,
+};
+use runs::{Computed, JOB, Runs, State};
 
 /// The package's id: its feature kinds, tools, commands and menu entries all
 /// start with it.
@@ -307,6 +309,28 @@ fn run_status(run: &cam_protocol::Run, index: Option<usize>) -> FeatureStatus {
             FeatureState::Done,
             &format!("Every check passed ({:.1} s)", run.seconds),
         ),
+    }
+}
+
+/// How a setup's run stands, for its badge, or for operation `op`'s (its
+/// feature id) when one is given.
+fn computed_status(computed: &Computed, op: Option<&str>) -> FeatureStatus {
+    match &computed.state {
+        State::Queued => status(FeatureState::Running, "Waiting for another setup to finish"),
+        State::Running(job) => FeatureStatus {
+            job: Some(*job),
+            ..status(FeatureState::Running, "Working out the toolpaths")
+        },
+        State::Stopped => status(FeatureState::OutOfDate, "Its run was stopped"),
+        State::Failed(why) => status(FeatureState::Failed, why),
+        State::Ready(run) => match op {
+            None => run_status(run, None),
+            Some(id) => match computed.operations.iter().position(|o| o == id) {
+                Some(index) => run_status(run, Some(index)),
+                // Added since it ran: it runs with the next.
+                None => status(FeatureState::NotRun, "Not run yet"),
+            },
+        },
     }
 }
 
@@ -616,7 +640,10 @@ impl Cam {
             return;
         };
         match request_for(&node, &setup) {
-            Ok(request) => self.runs.want(id, request, again),
+            Ok(request) => {
+                let operations = operations_of(id).into_iter().map(|(n, _)| n.id).collect();
+                self.runs.want(id, request, operations, again);
+            }
             Err(why) => self.runs.refuse(id, why),
         }
         // The tree's badges follow the run.
@@ -625,28 +652,20 @@ impl Cam {
 
     /// How a setup's or an operation's work stands, for its badge in the
     /// tree: its setup's run, and of that run, what is the operation's.
+    ///
+    /// printCAD asks for it without the document, so the setup's operations
+    /// cannot be looked up then: the run says which of its operations this
+    /// is.
     fn status_of(&self, node: &Node) -> FeatureStatus {
-        let (setup, index) = if node.kind == SETUP_KIND {
+        let (setup, op) = if node.kind == SETUP_KIND {
             (Some(node.id.clone()), None)
         } else {
             let setup = OperationData::from(&node.data).and_then(|d| d.setup);
-            let index = setup
-                .as_ref()
-                .and_then(|s| operations_of(s).iter().position(|(n, _)| n.id == node.id));
-            (setup, index)
+            (setup, Some(node.id.as_str()))
         };
-        let Some(computed) = setup.and_then(|s| self.runs.get(&s)) else {
-            return status(FeatureState::NotRun, "Not run yet");
-        };
-        match &computed.state {
-            State::Queued => status(FeatureState::Running, "Waiting for another setup to finish"),
-            State::Running(job) => FeatureStatus {
-                job: Some(*job),
-                ..status(FeatureState::Running, "Working out the toolpaths")
-            },
-            State::Stopped => status(FeatureState::OutOfDate, "Its run was stopped"),
-            State::Failed(why) => status(FeatureState::Failed, why),
-            State::Ready(run) => run_status(run, index),
+        match setup.and_then(|s| self.runs.get(&s)) {
+            Some(computed) => computed_status(computed, op),
+            None => status(FeatureState::NotRun, "Not run yet"),
         }
     }
 
@@ -875,8 +894,35 @@ impl Bench for Cam {
                             "margin",
                             ParamKind::Number,
                             false,
-                            "mm of stock round the bodies and on top; 2",
+                            "mm of stock round the bodies and on top (a cylinder's: \
+                             round them and at each end); 2",
                         ),
+                        param(
+                            "stock",
+                            ParamKind::String,
+                            false,
+                            "box (round the bodies, the default), fixed-box or cylinder",
+                        ),
+                        param(
+                            "size",
+                            ParamKind::List,
+                            false,
+                            "a fixed box's {x, y, z} in mm",
+                        ),
+                        param(
+                            "axis",
+                            ParamKind::String,
+                            false,
+                            "a cylinder's: tool (up the tool, the default), x or y (lying \
+                             along the machine's)",
+                        ),
+                        param(
+                            "diameter",
+                            ParamKind::Number,
+                            false,
+                            "a cylinder of a fixed size, mm; with length",
+                        ),
+                        param("length", ParamKind::Number, false, "a fixed cylinder's, mm"),
                         param(
                             "post",
                             ParamKind::String,
@@ -1043,6 +1089,10 @@ impl Bench for Cam {
                 "size_x",
                 "size_y",
                 "size_z",
+                "margin_radial",
+                "margin_ends",
+                "diameter",
+                "length",
                 "offset_x",
                 "offset_y",
                 "offset_z",
@@ -1098,6 +1148,10 @@ impl Bench for Cam {
                 p("size_x", "Stock X", Dim::Length),
                 p("size_y", "Stock Y", Dim::Length),
                 p("size_z", "Stock Z", Dim::Length),
+                p("margin_radial", "Stock margin, round", Dim::Length),
+                p("margin_ends", "Stock margin, each end", Dim::Length),
+                p("diameter", "Stock diameter", Dim::Length),
+                p("length", "Stock length", Dim::Length),
                 p("offset_x", "Work zero X offset", Dim::Length),
                 p("offset_y", "Work zero Y offset", Dim::Length),
                 p("offset_z", "Work zero Z offset", Dim::Length),
@@ -1174,11 +1228,50 @@ impl Bench for Cam {
                         .map_err(|_| "bodies is a list of body ids")?,
                     None => self.chosen_bodies(),
                 };
+                // Read before the setup is made, so a wrong one makes none.
+                let stock = match text("stock").as_deref() {
+                    None => None,
+                    Some("box") => Some(StockKind::Around),
+                    Some("fixed-box") => Some(StockKind::Fixed),
+                    Some("cylinder") => Some(StockKind::Cylinder),
+                    Some(other) => {
+                        return Err(format!("no stock '{other}': box, fixed-box or cylinder"));
+                    }
+                };
+                let size: Option<[f64; 3]> = match args.get("size") {
+                    Some(v) => Some(
+                        serde_json::from_value(v.clone()).map_err(|_| "size is {x, y, z} in mm")?,
+                    ),
+                    None => None,
+                };
+                let axis = match text("axis").as_deref() {
+                    None | Some("tool") => CylinderAxis::Tool,
+                    Some("x") => CylinderAxis::X,
+                    Some("y") => CylinderAxis::Y,
+                    Some(other) => return Err(format!("no axis '{other}': tool, x or y")),
+                };
                 let id = self.make_setup(bodies, text("name").as_deref())?;
                 if let Some((_, mut data)) = setup_node(&id) {
                     if let Some(m) = number("margin") {
                         data.margin_side = m;
                         data.margin_top = m;
+                        data.margin_radial = m;
+                        data.margin_ends = m;
+                    }
+                    if let Some(kind) = stock {
+                        data.stock = kind;
+                    }
+                    if let Some([x, y, z]) = size {
+                        (data.size_x, data.size_y, data.size_z) = (x, y, z);
+                    }
+                    data.cylinder_axis = axis;
+                    if let Some(d) = number("diameter") {
+                        data.diameter = d;
+                        data.cylinder_fixed = true;
+                    }
+                    if let Some(l) = number("length") {
+                        data.length = l;
+                        data.cylinder_fixed = true;
                     }
                     if let Some(post) = text("post") {
                         data.post_profile = self.settings.posts.get(&post).cloned();
@@ -1769,5 +1862,45 @@ mod tests {
         assert_eq!(done.state, FeatureState::Done);
         assert_eq!(done.note.as_deref(), Some("2 passes"));
         assert_eq!(run_status(&run, None).state, FeatureState::Done);
+    }
+
+    #[test]
+    fn each_operation_shows_its_own_checks() {
+        use cam_protocol::{Finding, OperationRun, Run};
+        // A tap the post refuses fails its own check, and only its own.
+        let run = Run {
+            passed: false,
+            findings: vec![Finding {
+                level: Level::Fail,
+                code: "post".into(),
+                text: "post GRBL Tap: tapping is posted only as a cycle".into(),
+                operation: Some(1),
+                at_move: None,
+            }],
+            operations: vec![
+                OperationRun {
+                    made: "generated".into(),
+                    summary: "4 holes".into(),
+                    ..OperationRun::default()
+                },
+                OperationRun {
+                    made: "generated".into(),
+                    ..OperationRun::default()
+                },
+            ],
+            ..Run::default()
+        };
+        let computed = Computed::ready(run, vec!["chip".into(), "tap".into()]);
+        let setup = computed_status(&computed, None);
+        assert_eq!(setup.state, FeatureState::Failed);
+        assert!(setup.note.unwrap().contains("Tap"));
+        let chip = computed_status(&computed, Some("chip"));
+        assert_eq!(chip.state, FeatureState::Done);
+        assert_eq!(chip.note.as_deref(), Some("4 holes"));
+        let tap = computed_status(&computed, Some("tap"));
+        assert_eq!(tap.state, FeatureState::Failed);
+        // One added since the run is not the setup's failure.
+        let new = computed_status(&computed, Some("new"));
+        assert_eq!(new.state, FeatureState::NotRun);
     }
 }

@@ -20,6 +20,7 @@ use camcraft_geom::contour::RegionError;
 use camcraft_geom::mesh::{Aabb, MeshError, TriMesh};
 use camcraft_geom::shadow::{Shadow, shadow_above};
 use camcraft_geom::topology::Body;
+use camcraft_sim::stock::{Axis as FrameAxis, Bar, Block};
 use glam::DVec3;
 
 use crate::job::{BoxOf, HeightContext, Job, JobError, Origin, Setup, StockSpec};
@@ -72,7 +73,7 @@ pub struct Prepared {
     /// Its bounds.
     pub model_bounds: Aabb,
     /// Each stock block.
-    pub stocks: Vec<Aabb>,
+    pub stocks: Vec<Block>,
     /// How model coordinates became these.
     pub frame: Frame,
     /// The part's shadow, once cast ([`Prepared::shadow`]).
@@ -87,7 +88,7 @@ impl Prepared {
 
     /// The box around every stock block.
     pub fn stock_bounds(&self) -> Aabb {
-        Aabb::union_all(&self.stocks).unwrap_or(self.model_bounds)
+        bounds_all(&self.stocks).unwrap_or(self.model_bounds)
     }
 
     /// What a height resolves against in this setup: its stock's top and
@@ -135,71 +136,133 @@ fn bounds_of(names: &[String], bodies: &Bodies<'_>) -> Result<Aabb, PrepareError
     out.ok_or_else(|| PrepareError::Job(JobError::NoModels(String::new())))
 }
 
+/// The box around every one of `blocks`.
+pub fn bounds_all(blocks: &[Block]) -> Option<Aabb> {
+    let boxes: Vec<Aabb> = blocks.iter().map(Block::bounds).collect();
+    Aabb::union_all(&boxes)
+}
+
 /// A stock block in model coordinates. One around no named models is around
-/// `model_box`, the box of the models of the setup using it.
-fn block(spec: &StockSpec, model_box: Aabb, bodies: &Bodies<'_>) -> Result<Aabb, PrepareError> {
+/// `setup_models`, the models of the setup using it.
+fn block(
+    spec: &StockSpec,
+    setup_models: &[String],
+    bodies: &Bodies<'_>,
+) -> Result<Block, PrepareError> {
+    let named = spec.models();
+    let models = if named.is_empty() {
+        setup_models
+    } else {
+        named
+    };
+    let around = bounds_of(models, bodies)?;
     Ok(match spec {
-        StockSpec::AroundModels {
-            models,
-            margin,
-            below,
-        } => {
-            let around = if models.is_empty() {
-                model_box
-            } else {
-                bounds_of(models, bodies)?
-            };
-            Aabb {
-                min: DVec3::new(
-                    around.min.x - margin[0],
-                    around.min.y - margin[1],
-                    around.min.z - below,
-                ),
-                max: DVec3::new(
-                    around.max.x + margin[0],
-                    around.max.y + margin[1],
-                    around.max.z + margin[2],
-                ),
-            }
-        }
+        StockSpec::AroundModels { margin, below, .. } => Block::Box(Aabb {
+            min: DVec3::new(
+                around.min.x - margin[0],
+                around.min.y - margin[1],
+                around.min.z - below,
+            ),
+            max: DVec3::new(
+                around.max.x + margin[0],
+                around.max.y + margin[1],
+                around.max.z + margin[2],
+            ),
+        }),
         StockSpec::FixedBox(b) => {
-            let against = if b.models.is_empty() {
-                model_box
-            } else {
-                bounds_of(&b.models, bodies)?
-            };
             let ([px, py, pz], [sx, sy, sz]) = (b.place, b.size);
-            let (lo, hi) = (against.min, against.max);
+            let (lo, hi) = (around.min, around.max);
             let min = DVec3::new(
                 px.low(lo.x, hi.x, sx),
                 py.low(lo.y, hi.y, sy),
                 pz.low(lo.z, hi.z, sz),
             );
-            Aabb {
+            Block::Box(Aabb {
                 min,
                 max: min + DVec3::from_array(b.size),
+            })
+        }
+        StockSpec::CylinderAroundModels {
+            axis, margin, ends, ..
+        } => {
+            let a = axis.vector();
+            let centre = around.center();
+            // The farthest any of them reaches from the axis through the
+            // middle of their box.
+            let mut reach: f64 = 0.0;
+            for n in models {
+                let body = bodies
+                    .get(n.as_str())
+                    .ok_or_else(|| PrepareError::NotLoaded(n.clone()))?;
+                for v in body.mesh().vertices() {
+                    let off = *v - centre;
+                    reach = reach.max((off - a * off.dot(a)).length());
+                }
             }
+            let along = (around.max - around.min).dot(a);
+            Block::Bar(Bar {
+                axis: FrameAxis::of(axis.index()),
+                centre,
+                radius: reach + margin,
+                length: along + 2.0 * ends,
+            })
+        }
+        StockSpec::FixedCylinder(c) => {
+            let a = c.axis.vector();
+            let (lo, hi) = (around.min.dot(a), around.max.dot(a));
+            let middle = c.place.low(lo, hi, c.length) + c.length * 0.5;
+            let centre = around.center();
+            Block::Bar(Bar {
+                axis: FrameAxis::of(c.axis.index()),
+                centre: centre + a * (middle - centre.dot(a)),
+                radius: c.diameter * 0.5,
+                length: c.length,
+            })
         }
     })
 }
 
-/// A stock block in model coordinates, for a setup machining `models`: where it
-/// is, whichever setup it is shown for.
+/// A stock block in model coordinates, for a setup machining `models`: the box
+/// around it, wherever it is, whichever setup it is shown for.
 pub fn stock_block(
     spec: &StockSpec,
     models: &[String],
     bodies: &Bodies<'_>,
 ) -> Result<Aabb, PrepareError> {
-    block(spec, bounds_of(models, bodies)?, bodies)
+    Ok(block(spec, models, bodies)?.bounds())
 }
 
 /// `b` turned the way the part sits. The turn only swaps and negates, so a box
-/// stays a box: its corners' low and high ends are the new box.
-fn turn(o: Orientation, b: &Aabb) -> Aabb {
-    let (a, c) = (o.apply(b.min), o.apply(b.max));
-    Aabb {
-        min: a.min(c),
-        max: a.max(c),
+/// stays a box, its corners' low and high ends the new box, and a bar along an
+/// axis lies along another.
+fn turn(o: Orientation, b: &Block) -> Block {
+    match b {
+        Block::Box(b) => {
+            let (a, c) = (o.apply(b.min), o.apply(b.max));
+            Block::Box(Aabb {
+                min: a.min(c),
+                max: a.max(c),
+            })
+        }
+        Block::Bar(bar) => {
+            let along = o.apply(match bar.axis {
+                FrameAxis::X => DVec3::X,
+                FrameAxis::Y => DVec3::Y,
+                FrameAxis::Z => DVec3::Z,
+            });
+            let axis = if along.x != 0.0 {
+                FrameAxis::X
+            } else if along.y != 0.0 {
+                FrameAxis::Y
+            } else {
+                FrameAxis::Z
+            };
+            Block::Bar(Bar {
+                axis,
+                centre: o.apply(bar.centre),
+                ..*bar
+            })
+        }
     }
 }
 
@@ -212,8 +275,8 @@ pub fn stock_in_frame(
     frame: &Frame,
     bodies: &Bodies<'_>,
 ) -> Result<Aabb, PrepareError> {
-    let b = turn(frame.orientation, &stock_block(spec, models, bodies)?);
-    Ok(b.translated(-frame.origin))
+    let b = turn(frame.orientation, &block(spec, models, bodies)?);
+    Ok(b.bounds().translated(-frame.origin))
 }
 
 /// Where setup `index`'s part and stock are, in its own frame.
@@ -236,11 +299,11 @@ pub fn prepare(job: &Job, index: usize, bodies: &Bodies<'_>) -> Result<Prepared,
         })
         .collect::<Result<Vec<_>, _>>()?;
     let model_box = bounds_of(&setup.models, bodies)?;
-    let blocks = blocks_of(job, setup, model_box, bodies)?;
+    let blocks = blocks_of(job, setup, bodies)?;
 
     let o = setup.orientation;
-    let turned_blocks: Vec<Aabb> = blocks.iter().map(|b| turn(o, b)).collect();
-    let turned_model = turn(o, &model_box);
+    let turned_blocks: Vec<Block> = blocks.iter().map(|b| turn(o, b)).collect();
+    let turned_model = turn(o, &Block::Box(model_box)).bounds();
     let origin = work_zero(job, setup, bodies, &turned_blocks, turned_model)?;
     let frame = Frame {
         orientation: o,
@@ -277,20 +340,15 @@ pub fn prepare(job: &Job, index: usize, bodies: &Bodies<'_>) -> Result<Prepared,
 }
 
 /// Each of `setup`'s stock blocks, in model coordinates. A block around no named
-/// models is around `model_box`, the setup's.
-fn blocks_of(
-    job: &Job,
-    setup: &Setup,
-    model_box: Aabb,
-    bodies: &Bodies<'_>,
-) -> Result<Vec<Aabb>, PrepareError> {
+/// models is around the setup's.
+fn blocks_of(job: &Job, setup: &Setup, bodies: &Bodies<'_>) -> Result<Vec<Block>, PrepareError> {
     let mut blocks = Vec::with_capacity(setup.stocks.len());
     for name in &setup.stocks {
         let def = job.stock(name).ok_or_else(|| JobError::UnknownStock {
             setup: setup.name.clone(),
             stock: name.clone(),
         })?;
-        blocks.push(block(&def.spec, model_box, bodies)?);
+        blocks.push(block(&def.spec, &setup.models, bodies)?);
     }
     if blocks.is_empty() {
         return Err(JobError::NoStock(setup.name.clone()).into());
@@ -304,7 +362,7 @@ fn work_zero(
     job: &Job,
     setup: &Setup,
     bodies: &Bodies<'_>,
-    turned_blocks: &[Aabb],
+    turned_blocks: &[Block],
     turned_model: Aabb,
 ) -> Result<DVec3, PrepareError> {
     let o = setup.orientation;
@@ -326,7 +384,7 @@ fn work_zero(
             offset,
         } => {
             let b = match of {
-                BoxOf::Stock => Aabb::union_all(turned_blocks).unwrap_or(turned_model),
+                BoxOf::Stock => bounds_all(turned_blocks).unwrap_or(turned_model),
                 BoxOf::Model => turned_model,
             };
             DVec3::new(

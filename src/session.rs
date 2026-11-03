@@ -6,7 +6,7 @@
 //! Until the session has run the setup again, and wherever it cannot, the
 //! coarse moments of the run's own answer play instead.
 
-use cam_protocol::{SessionIn, SessionOut, SessionReady, StockPatch, class, unbase64};
+use cam_protocol::{SessionIn, SessionOut, SessionReady, StockPatch, class, is_bare, unbase64};
 use printcad_bench_sdk::api::*;
 use printcad_bench_sdk::{host, serde_json};
 
@@ -161,9 +161,14 @@ fn grid(ready: &SessionReady) -> Result<u64, String> {
         .map(|(c, r)| point(ready, c, r, 0))
         .collect();
     let colours = vec![STOCK; positions.len()];
+    let bare = unbase64(&ready.bare).ok_or("the session's bare squares are not base64")?;
     let mut indices = Vec::with_capacity(((cols - 1) * (rows - 1) * 6) as usize);
     for r in 0..rows - 1 {
         for c in 0..cols - 1 {
+            // No stock there to begin with.
+            if is_bare(&bare, (r * (cols - 1) + c) as usize) {
+                continue;
+            }
             let at = r * cols + c;
             indices.extend([at, at + 1, at + cols + 1, at, at + cols + 1, at + cols]);
         }

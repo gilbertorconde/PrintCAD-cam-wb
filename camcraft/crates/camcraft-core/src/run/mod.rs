@@ -31,7 +31,6 @@ use std::cell::OnceCell;
 use std::sync::Arc;
 
 use camcraft_sim::stock::{PackedStock, PartSurface, Stock};
-use glam::DVec2;
 
 use crate::cutter::allowance::{Allowance, EffectiveTool};
 use crate::cutter::dropcutter::DropCutter;
@@ -99,12 +98,8 @@ pub fn run_prepared_planned(
         .map(|t| t.diameter)
         .fold(None, |n: Option<f64>, d| Some(n.map_or(d, |n| n.min(d))));
     let sim_pitch = sim_pitch(job.tolerance, hi - lo, narrowest);
-    let blocks: Vec<(DVec2, DVec2, f64)> = prepared
-        .stocks
-        .iter()
-        .map(|b| (b.min.truncate(), b.max.truncate(), b.max.z))
-        .collect();
-    let mut stock = Stock::from_boxes(&blocks, ctx.stock_bottom - 1.0, sim_pitch)?;
+    let blocks = &prepared.stocks;
+    let mut stock = Stock::from_blocks(blocks, ctx.stock_bottom - 1.0, sim_pitch)?;
     let cutter = DropCutter::new(mesh);
     // Found once for the setup, when an operation first needs them.
     let flats = OnceCell::new();
@@ -167,7 +162,7 @@ pub fn run_prepared_planned(
             prepared,
             cutter: &cutter,
             bounds: (lo, hi),
-            blocks: &blocks,
+            blocks,
             flats: &flats,
         };
         operations.push(run_operation(&work, &target, &mut stock)?);

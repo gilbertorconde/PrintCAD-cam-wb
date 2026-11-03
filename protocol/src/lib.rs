@@ -16,7 +16,7 @@ pub const HELPER: &str = "camcraft-helper";
 
 /// Bumped whenever a request or response changes shape, so a package never
 /// reads an answer from a helper of another build.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 /// One setup to run.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -90,6 +90,9 @@ pub struct Run {
     pub warnings: Vec<String>,
     /// The box around the stock, low and high corners.
     pub stock: [[f64; 3]; 2],
+    /// The stock, when it is a round bar: drawn as one, inside its box.
+    #[serde(default)]
+    pub cylinder: Option<Cylinder>,
     /// The work zero.
     pub origin: [f64; 3],
     /// Each operation, in the setup's order.
@@ -101,6 +104,14 @@ pub struct Run {
     pub playback: Option<Playback>,
     /// How long it took, in seconds.
     pub seconds: f64,
+}
+
+/// A round bar of stock, in the document's coordinates.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct Cylinder {
+    /// The middles of its two ends.
+    pub ends: [[f64; 3]; 2],
+    pub radius: f64,
 }
 
 /// The material and the tool at moments along a setup's run, coarsely: a
@@ -354,6 +365,32 @@ pub struct SessionReady {
     /// When each move of each operation ends, in machining seconds from
     /// the setup's start.
     pub times: Vec<Vec<f32>>,
+    /// The grid's squares (from point `(c, r)` to `(c + 1, r + 1)`, row by
+    /// row) with no stock over them at the start, as round stock leaves
+    /// its box's corners: a bit each, the lowest first, in base64. Empty
+    /// when there are none.
+    #[serde(default)]
+    pub bare: String,
+}
+
+/// Whether square `i` is one of `bare`'s, as [`SessionReady::bare`] packs
+/// them.
+pub fn is_bare(bare: &[u8], i: usize) -> bool {
+    bare.get(i / 8).is_some_and(|b| b & (1 << (i % 8)) != 0)
+}
+
+/// Squares, each bare or not, packed as [`SessionReady::bare`] has them.
+pub fn pack_bare(squares: impl IntoIterator<Item = bool>) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (i, bare) in squares.into_iter().enumerate() {
+        if i % 8 == 0 {
+            out.push(0);
+        }
+        if bare && let Some(last) = out.last_mut() {
+            *last |= 1 << (i % 8);
+        }
+    }
+    out
 }
 
 /// How a point of the material stands against the part.
@@ -468,6 +505,19 @@ mod tests {
         assert_eq!(program.made_by(4), Some(2));
         assert_eq!(program.made_by(7), None);
         assert_eq!(Program::default().line_of(0), None, "not known");
+    }
+
+    #[test]
+    fn bare_squares_read_back() {
+        let squares = [
+            true, false, false, true, false, false, false, false, true, true,
+        ];
+        let packed = pack_bare(squares);
+        assert_eq!(packed.len(), 2);
+        for (i, bare) in squares.iter().enumerate() {
+            assert_eq!(is_bare(&packed, i), *bare, "{i}");
+        }
+        assert!(!is_bare(&packed, 40), "past the end, not bare");
     }
 
     #[test]

@@ -463,6 +463,7 @@ fn a_session_plays_back_at_full_resolution() {
     };
     assert!(ready.cols > 100 && ready.cols <= 600, "{}", ready.cols);
     assert_eq!(ready.times.len(), 1);
+    assert!(ready.bare.is_empty(), "a box has stock all over");
     let patch = |i: usize| match &said[i] {
         SessionOut::Stock(p) => p.clone(),
         other => panic!("{other:?}"),
@@ -600,5 +601,91 @@ selection = { edges = [
         taps[0].ends_with("F480"),
         "0.8 mm a turn at 600: {}",
         taps[0]
+    );
+}
+
+/// Round stock comes back as a cylinder, in the model's coordinates, inside
+/// the box it gives; and the material, played back or swept again, is drawn
+/// over the disc only, not its box's corners.
+#[test]
+fn round_stock_is_drawn_round() {
+    use cam_protocol::{SessionIn, SessionOut, is_bare, unbase64};
+    let request = Request {
+        version: VERSION,
+        job: JOB.replace(
+            "kind = \"around-models\"\nmargin = [2.0, 2.0, 2.0]",
+            "kind = \"cylinder-around-models\"\naxis = \"z\"\nmargin = 3.0\nends = 1.0",
+        ),
+        shapes: BTreeMap::from([(
+            "part".to_string(),
+            Shape {
+                text: native("hinge_jig.step"),
+                placement: IDENTITY,
+            },
+        )]),
+        max_points: 2000,
+        ..Request::default()
+    };
+    let run = answer(&request).unwrap();
+    let c = run.cylinder.expect("a cylinder");
+    let [lo, hi] = run.stock;
+    let [a, b] = c.ends;
+    // Up the tool, its ends' middles over each other, at the box's foot
+    // and top, and the box as wide as it.
+    assert_eq!((a[0], a[1]), (b[0], b[1]));
+    assert!((a[2] - lo[2]).abs() < 1e-9 && (b[2] - hi[2]).abs() < 1e-9);
+    assert!((hi[0] - lo[0] - 2.0 * c.radius).abs() < 1e-9);
+    assert!((hi[1] - lo[1] - 2.0 * c.radius).abs() < 1e-9);
+    let middle = [a[0], a[1]];
+    // No triangle of the material over a corner of the box.
+    let outside = |p: [f32; 3]| {
+        let (dx, dy) = (f64::from(p[0]) - middle[0], f64::from(p[1]) - middle[1]);
+        (dx * dx + dy * dy).sqrt()
+    };
+    let check = |positions: &[[f32; 3]], indices: &[u32], what: &str| {
+        let squares = indices.len() / 6;
+        assert!(squares > 0, "{what}: none drawn");
+        for t in indices.chunks(3) {
+            let centre = std::array::from_fn(|i| {
+                t.iter().map(|&k| positions[k as usize][i]).sum::<f32>() / 3.0
+            });
+            assert!(
+                outside(centre) < c.radius * 1.05,
+                "{what}: a triangle {} out",
+                outside(centre)
+            );
+        }
+    };
+    let material = run.material.as_ref().unwrap();
+    check(&material.positions, &material.indices, "material");
+    let play = run.playback.as_ref().unwrap();
+    let base: Vec<[f32; 3]> = play.base.clone();
+    check(&base, &play.indices, "playback");
+
+    // The session says which squares are bare: the corners, not the middle.
+    let mut out = Vec::new();
+    crate::session::serve(
+        SessionIn::Open(Box::new(request)),
+        std::io::Cursor::new(String::new()),
+        &mut out,
+    )
+    .unwrap();
+    let said: SessionOut = serde_json::from_str(String::from_utf8(out).unwrap().trim()).unwrap();
+    let SessionOut::Ready(ready) = said else {
+        panic!("{said:?}");
+    };
+    let bare = unbase64(&ready.bare).unwrap();
+    let (w, h) = ((ready.cols - 1) as usize, (ready.rows - 1) as usize);
+    assert!(
+        is_bare(&bare, 0) && is_bare(&bare, w * h - 1),
+        "the corners"
+    );
+    assert!(!is_bare(&bare, (h / 2) * w + w / 2), "the middle");
+    let count = (0..w * h).filter(|&i| is_bare(&bare, i)).count() as f64;
+    // A square less its circle: 1 − π/4 of it.
+    let share = count / (w * h) as f64;
+    assert!(
+        (share - (1.0 - std::f64::consts::FRAC_PI_4)).abs() < 0.05,
+        "{share}"
     );
 }

@@ -67,6 +67,138 @@ fn two_boxes_are_their_union() {
     ));
 }
 
+/// Boxes through `from_blocks` are the stock `from_boxes` makes of them.
+#[test]
+fn boxes_as_blocks_are_boxes() {
+    use camcraft_geom::mesh::Aabb;
+    let a = (dvec2(0.0, 0.0), dvec2(10.0, 10.0), 5.0);
+    let b = (dvec2(7.3, -2.0), dvec2(30.0, 10.0), 8.0);
+    let blocks = [a, b].map(|(lo, hi, top): (DVec2, DVec2, f64)| {
+        Block::Box(Aabb {
+            min: lo.extend(-1.0),
+            max: hi.extend(top),
+        })
+    });
+    assert_eq!(
+        Stock::from_blocks(&blocks, -2.0, 0.37).unwrap(),
+        Stock::from_boxes(&[a, b], -2.0, 0.37).unwrap()
+    );
+}
+
+/// A disc standing up the tool: material at its top over the circle, none
+/// over its box's corners, and as much of it as the circle holds, the grid's
+/// half cell round its edge apart.
+#[test]
+fn a_disc_is_material_over_its_circle_only() {
+    let bar = Block::Bar(Bar {
+        axis: Axis::Z,
+        centre: dvec3(5.0, -3.0, 4.0),
+        radius: 10.0,
+        length: 8.0,
+    });
+    let b = bar.bounds();
+    assert_eq!(b.min, dvec3(-5.0, -13.0, 0.0));
+    assert_eq!(b.max, dvec3(15.0, 7.0, 8.0));
+    let pitch = 0.25;
+    let s = Stock::from_blocks(&[bar], -1.0, pitch).unwrap();
+    assert_eq!(s.height_at(5.0, -3.0), Some(8.0));
+    assert_eq!(s.height_at(14.0, -3.0), Some(8.0));
+    // The box's corner is air: the floor.
+    assert_eq!(s.height_at(-4.5, -12.5), Some(-1.0));
+    let field = s.field();
+    for iy in 0..field.ny() {
+        for ix in 0..field.nx() {
+            let p = field.position(ix, iy).unwrap();
+            let d = p.distance(dvec2(5.0, -3.0));
+            let h = field.get(ix, iy).unwrap();
+            if d <= 10.0 {
+                assert_eq!(h, 8.0, "inside, at {p}");
+            } else if d > 10.0 + pitch {
+                assert_eq!(h, -1.0, "outside, at {p}");
+            }
+        }
+    }
+    // Over the floor: the disc's volume, and at most half a cell round it.
+    let disc = std::f64::consts::PI * 100.0 * 9.0;
+    let ring = 2.0 * std::f64::consts::PI * 10.0 * pitch * 9.0;
+    let v = s.volume();
+    assert!(v > disc - 1.0 && v < disc + ring, "{v} against {disc}");
+}
+
+/// A bar lying along X: its top is the circle's over each column across it,
+/// never below it, and only as much above as half a cell lets it be.
+#[test]
+fn a_lying_bar_stands_to_its_curve() {
+    for (axis, across) in [(Axis::X, 1), (Axis::Y, 0)] {
+        let bar = Block::Bar(Bar {
+            axis,
+            centre: dvec3(0.0, 0.0, 10.0),
+            radius: 6.0,
+            length: 30.0,
+        });
+        let pitch = 0.2;
+        let s = Stock::from_blocks(&[bar], 3.0, pitch).unwrap();
+        let field = s.field();
+        for iy in 0..field.ny() {
+            for ix in 0..field.nx() {
+                let p = field.position(ix, iy).unwrap();
+                let off = [p.x, p.y][across].abs();
+                let h = field.get(ix, iy).unwrap();
+                if off <= 6.0 {
+                    let curve = 10.0 + (36.0 - off * off).sqrt();
+                    assert!(h >= curve - 1e-5, "below the bar at {p}: {h} < {curve}");
+                    let near = (off - pitch * 0.5).max(0.0);
+                    let most = 10.0 + (36.0 - near * near).sqrt();
+                    assert!(h <= most + 1e-5, "above at {p}: {h} > {most}");
+                } else if off > 6.0 + pitch {
+                    assert_eq!(h, 3.0, "past its side at {p}");
+                }
+            }
+        }
+        // Its top along its length is its top.
+        let along = if across == 1 {
+            (12.0, 0.0)
+        } else {
+            (0.0, 12.0)
+        };
+        assert!((s.height_at(along.0, along.1).unwrap() - 16.0).abs() < 1e-5);
+    }
+}
+
+/// Where a block stands above a height, seen from above: a box's footprint, a
+/// disc's circle, a lying bar's width at that height.
+#[test]
+fn a_block_above_a_height() {
+    let disc = Block::Bar(Bar {
+        axis: Axis::Z,
+        centre: dvec3(0.0, 0.0, 5.0),
+        radius: 10.0,
+        length: 10.0,
+    });
+    let ring = disc.above(2.0, 0.01).unwrap();
+    for p in &ring {
+        let d = p.length();
+        assert!(d >= 10.0 - 1e-9 && d <= 10.01 + 1e-9, "corner {p} at {d}");
+    }
+    assert!(disc.above(10.0, 0.01).is_none(), "nothing above its top");
+    let bar = Block::Bar(Bar {
+        axis: Axis::X,
+        centre: dvec3(0.0, 0.0, 5.0),
+        radius: 10.0,
+        length: 40.0,
+    });
+    let width = |z: f64| {
+        let r = bar.above(z, 0.01).unwrap();
+        r.iter().map(|p| p.y).fold(f64::MIN, f64::max)
+            - r.iter().map(|p| p.y).fold(f64::MAX, f64::min)
+    };
+    assert!((width(11.0) - 16.0).abs() < 1e-9, "{}", width(11.0));
+    assert!(
+        (width(-3.0) - 20.0).abs() < 1e-9,
+        "below its axis, its widest"
+    );
+}
+
 #[test]
 fn rejects_an_inverted_block() {
     let e = Stock::block(dvec2(0.0, 0.0), dvec2(1.0, 1.0), 0.0, 5.0, 0.5);

@@ -11,7 +11,7 @@ use camcraft_post::profile::Profile;
 use printcad_bench_sdk::api::*;
 use printcad_bench_sdk::host;
 
-use crate::data::{OperationData, Pick, STRATEGIES, SetupData, StockKind, Zero};
+use crate::data::{CylinderAxis, OperationData, Pick, STRATEGIES, SetupData, StockKind, Zero};
 use crate::linking::{linking_event, linking_group};
 use crate::passes::{finishing_group, passes_event, strategy_rows, tabs_group};
 use crate::picking::Slot;
@@ -358,8 +358,16 @@ pub fn setup_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
     let mut stock = vec![choice(
         "stock",
         "Stock",
-        vec!["Round the bodies".into(), "A box of a fixed size".into()],
-        usize::from(setup.stock == StockKind::Fixed),
+        vec![
+            "A box round the bodies".into(),
+            "A box of a fixed size".into(),
+            "Cylinder".into(),
+        ],
+        match setup.stock {
+            StockKind::Around => 0,
+            StockKind::Fixed => 1,
+            StockKind::Cylinder => 2,
+        },
     )];
     match setup.stock {
         StockKind::Around => {
@@ -396,6 +404,60 @@ pub fn setup_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
                 text: "Centred on the bodies, its top flush with theirs.".into(),
                 mono: false,
             });
+        }
+        StockKind::Cylinder => {
+            stock.push(choice(
+                "cylinder_axis",
+                "Axis",
+                CylinderAxis::ALL.iter().map(|a| a.label().into()).collect(),
+                CylinderAxis::ALL
+                    .iter()
+                    .position(|&a| a == setup.cylinder_axis)
+                    .unwrap_or(0),
+            ));
+            stock.push(choice(
+                "cylinder_size",
+                "Size",
+                vec!["Round the bodies".into(), "Fixed".into()],
+                usize::from(setup.cylinder_fixed),
+            ));
+            if setup.cylinder_fixed {
+                stock.push(number(
+                    "diameter",
+                    "Diameter",
+                    setup.diameter,
+                    Dim::Length,
+                    2,
+                    id,
+                ));
+                stock.push(number("length", "Length", setup.length, Dim::Length, 2, id));
+                stock.push(Widget::Text {
+                    text: if setup.cylinder_axis == CylinderAxis::Tool {
+                        "Centred on the bodies, its top flush with theirs."
+                    } else {
+                        "Centred on the bodies."
+                    }
+                    .into(),
+                    mono: false,
+                });
+            } else {
+                stock.push(number(
+                    "margin_radial",
+                    "Margin, round",
+                    setup.margin_radial,
+                    Dim::Length,
+                    2,
+                    id,
+                ));
+                stock.push(number(
+                    "margin_ends",
+                    "Margin, each end",
+                    setup.margin_ends,
+                    Dim::Length,
+                    2,
+                    id,
+                ));
+            }
         }
     }
     panel.push(group("Stock", stock));
@@ -555,6 +617,10 @@ pub fn setup_event(cam: &mut Cam, id: &str, event: PanelEvent) {
                 "size_x" => &mut setup.size_x,
                 "size_y" => &mut setup.size_y,
                 "size_z" => &mut setup.size_z,
+                "margin_radial" => &mut setup.margin_radial,
+                "margin_ends" => &mut setup.margin_ends,
+                "diameter" => &mut setup.diameter,
+                "length" => &mut setup.length,
                 "offset_x" => &mut setup.offset_x,
                 "offset_y" => &mut setup.offset_y,
                 "offset_z" => &mut setup.offset_z,
@@ -568,12 +634,16 @@ pub fn setup_event(cam: &mut Cam, id: &str, event: PanelEvent) {
         PanelEvent::Choice { id: field, index } => {
             match field.as_str() {
                 "stock" => {
-                    setup.stock = if index == 1 {
-                        StockKind::Fixed
-                    } else {
-                        StockKind::Around
+                    setup.stock = match index {
+                        1 => StockKind::Fixed,
+                        2 => StockKind::Cylinder,
+                        _ => StockKind::Around,
                     }
                 }
+                "cylinder_axis" => {
+                    setup.cylinder_axis = CylinderAxis::ALL.get(index).copied().unwrap_or_default();
+                }
+                "cylinder_size" => setup.cylinder_fixed = index == 1,
                 "z_axis" => {
                     setup.z_axis = Axis::ALL.get(index).copied().unwrap_or(Axis::PosZ);
                     setup.square_axes();

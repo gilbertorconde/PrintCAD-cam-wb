@@ -11,7 +11,7 @@ use camcraft_core::job::Job;
 use camcraft_core::path::simadapt::sim_moves;
 use camcraft_core::run::cutting_tool;
 use camcraft_session::Ran;
-use camcraft_sim::stock::Stock;
+use camcraft_sim::stock::{Block, Stock};
 use glam::{DVec2, DVec3};
 
 use crate::{Drawn, to_f32};
@@ -56,23 +56,16 @@ pub(crate) fn playback(job: &Job, ran: &Ran, draws: &[Drawn]) -> Option<Playback
         .collect();
     let zero = r.frame.to_model(DVec3::ZERO);
     let axis = to_f32(r.frame.to_model(DVec3::Z) - zero);
-    let mut indices = Vec::with_capacity((nx - 1) * (ny - 1) * 6);
-    for j in 0..ny - 1 {
-        for i in 0..nx - 1 {
-            let a = (j * nx + i) as u32;
-            let c = a + nx as u32;
-            indices.extend([a, a + 1, c + 1, a, c + 1, c]);
-        }
-    }
+    let indices = crate::grid_indices(nx, ny, lo, step, &r.stocks);
     let low = r
         .stocks
         .iter()
-        .map(|b| b.min.z)
+        .map(|b| b.bounds().min.z)
         .fold(f64::INFINITY, f64::min);
     let high = r
         .stocks
         .iter()
-        .map(|b| b.max.z)
+        .map(Block::top)
         .fold(f64::NEG_INFINITY, f64::max);
     // A stock with no height, or none at all (the folds start infinite).
     if (high - low).partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
@@ -81,12 +74,7 @@ pub(crate) fn playback(job: &Job, ran: &Ran, draws: &[Drawn]) -> Option<Playback
     let quantum = (high - low) / f64::from(u16::MAX);
 
     // The stock, swept on a coarse grid of its own.
-    let boxes: Vec<(DVec2, DVec2, f64)> = r
-        .stocks
-        .iter()
-        .map(|b| (b.min.truncate(), b.max.truncate(), b.max.z))
-        .collect();
-    let mut stock = Stock::from_boxes(&boxes, low, span.x.max(span.y) / SWEPT as f64).ok()?;
+    let mut stock = Stock::from_blocks(&r.stocks, low, span.x.max(span.y) / SWEPT as f64).ok()?;
     let floor = stock.floor();
 
     // The moments, spread evenly over all the moves, each operation's last

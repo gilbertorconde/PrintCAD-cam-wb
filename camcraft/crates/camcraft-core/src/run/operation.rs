@@ -5,7 +5,7 @@ use std::cell::OnceCell;
 
 use camcraft_geom::contour::Region;
 use camcraft_geom::topology::EdgeKind;
-use camcraft_sim::stock::{SimReport, Stock};
+use camcraft_sim::stock::{Block, SimReport, Stock};
 use glam::{DVec2, DVec3, dvec2};
 
 use super::error::in_op;
@@ -75,9 +75,8 @@ pub(super) struct Work<'a> {
     pub(super) cutter: &'a DropCutter<'a>,
     /// The stock's footprint in XY, lower and upper corner.
     pub(super) bounds: (DVec2, DVec2),
-    /// The blocks of material the setup starts from, each its footprint's lower
-    /// and upper corner and its top.
-    pub(super) blocks: &'a [(DVec2, DVec2, f64)],
+    /// The blocks of material the setup starts from.
+    pub(super) blocks: &'a [Block],
     /// The heights of the part's flat faces, found for the setup when an
     /// operation first needs them.
     pub(super) flats: &'a OnceCell<Vec<f64>>,

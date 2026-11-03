@@ -32,6 +32,10 @@ pub struct Computed {
     pub state: State,
     /// What it had last time it ran, shown while it runs again.
     pub last: Option<Box<Run>>,
+    /// Its operations' feature ids, in the order it runs them: which of the
+    /// run's operations each is. Kept here because a feature's badge is
+    /// asked for without the document, where they could be looked up.
+    pub operations: Vec<String>,
 }
 
 impl Computed {
@@ -47,6 +51,18 @@ impl Computed {
     pub fn stale(&self) -> bool {
         !matches!(self.state, State::Ready(_))
     }
+
+    /// A run of `operations` that is ready, as one comes back.
+    #[cfg(test)]
+    pub fn ready(run: Run, operations: Vec<String>) -> Self {
+        Self {
+            key: 0,
+            request: None,
+            state: State::Ready(Box::new(run)),
+            last: None,
+            operations,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -59,14 +75,16 @@ impl Runs {
         self.setups.get(setup)
     }
 
-    /// Run `setup` from `request` unless it has a run, or one coming, from the
-    /// same request; `again` runs a stopped or failed one again too.
-    pub fn want(&mut self, setup: &str, request: String, again: bool) {
+    /// Run `setup` from `request`, which runs `operations` (their feature
+    /// ids, in order), unless it has a run, or one coming, from the same
+    /// request; `again` runs a stopped or failed one again too.
+    pub fn want(&mut self, setup: &str, request: String, operations: Vec<String>, again: bool) {
         let key = digest(&request);
-        if let Some(known) = self.setups.get(setup)
+        if let Some(known) = self.setups.get_mut(setup)
             && known.key == key
             && (!again || !matches!(known.state, State::Stopped | State::Failed(_)))
         {
+            known.operations = operations;
             return;
         }
         self.stop(setup);
@@ -81,6 +99,7 @@ impl Runs {
                 request: Some(request),
                 state: State::Queued,
                 last,
+                operations,
             },
         );
         self.pump();
@@ -97,6 +116,7 @@ impl Runs {
                 request: None,
                 state: State::Failed(why),
                 last,
+                operations: Vec::new(),
             },
         );
         self.pump();

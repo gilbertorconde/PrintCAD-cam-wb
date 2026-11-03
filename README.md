@@ -31,7 +31,10 @@ panels, the drawing and the helper that runs camcraft.
 
 - **Setups.** A setup (`io.github.gilbertorconde.cam.setup`) names the bodies
   it machines, its stock (a box round them with margins, or one of a fixed
-  size), how the part sits (the tool axis along any of the six directions),
+  size, or a cylinder: round bar up the tool, as a disc, or lying along the
+  machine's X or Y, round the bodies with a margin all round and at each end,
+  or of a fixed diameter and length centred on them), how the part sits (the
+  tool axis along any of the six directions),
   its work zero (a corner or the middle of the stock or of the bodies, or the
   document's origin, plus an offset), its post and its tolerance. New setup on
   the toolbar makes one on the selected body, or on every shown one.
@@ -103,7 +106,7 @@ panels, the drawing and the helper that runs camcraft.
 
   ![3D finishing half way: the passes still to run, over the material roughing left](docs/screenshots/finishing.png)
 
-- **Drawn over the model.** The stock's box, the work zero, each operation's
+- **Drawn over the model.** The stock's box or cylinder, the work zero, each operation's
   toolpath (rapids dashed while it is edited), and the material left.
 - **G-code through the save dialog,** one program per operation, or every
   program of a setup into a folder at once, for GRBL,
@@ -125,6 +128,8 @@ panels, the drawing and the helper that runs camcraft.
 ```lua
 local cam = pc.io.github.gilbertorconde.cam
 local setup = cam.setup{bodies = {"<body id>"}, margin = 3, post = "grbl"}
+local disc = cam.setup{bodies = {"<body id>"}, stock = "cylinder", axis = "tool",
+                       diameter = 80, length = 25}  -- or margin = 3 round the bodies
 local rough = cam.operation{setup = setup.feature, strategy = "adaptive", tool = "1/4 upcut",
                            heights = {bottom_from = "model-top", bottom = -6}}
 cam.status{id = setup.feature}          -- queued, running, ready (with its checks), failed

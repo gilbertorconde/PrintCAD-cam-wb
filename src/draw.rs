@@ -1,7 +1,7 @@
 //! What the view draws: each setup's stock and work zero, its operations'
 //! toolpaths, and the material it leaves.
 
-use cam_protocol::{HeightPlane, Run};
+use cam_protocol::{Cylinder, HeightPlane, Run};
 use printcad_bench_sdk::api::*;
 
 use crate::playback::{material_at, tool_at, tool_tip};
@@ -234,6 +234,11 @@ fn stock_box(frame: &mut Frame, run: &Run, mine: bool) {
     if lo == hi {
         return;
     }
+    let color = if mine { STOCK } else { MUTED };
+    if let Some(c) = &run.cylinder {
+        frame.lines.extend(cylinder(c, color));
+        return;
+    }
     let p = |x: bool, y: bool, z: bool| {
         [
             if x { hi[0] } else { lo[0] } as f32,
@@ -249,7 +254,6 @@ fn stock_box(frame: &mut Frame, run: &Run, mine: bool) {
             p(false, true, z),
         ]
     };
-    let color = if mine { STOCK } else { MUTED };
     for z in [false, true] {
         frame.lines.push(Polyline {
             points: ring(z),
@@ -267,4 +271,49 @@ fn stock_box(frame: &mut Frame, run: &Run, mine: bool) {
             ..Default::default()
         });
     }
+}
+
+/// How many sides a drawn circle of stock has.
+const ROUND: usize = 72;
+
+/// A round bar of stock as an outline: a circle round each end, and four
+/// lines along it between them.
+fn cylinder(c: &Cylinder, color: Rgb) -> Vec<Polyline> {
+    let [a, b] = c.ends;
+    let along = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    // Two directions square to the axis and to each other. The axis lies
+    // along one of the document's, so the next one round is square to it.
+    let (u, v) = if along[0].abs() > along[1].abs().max(along[2].abs()) {
+        ([0.0, 1.0, 0.0], [0.0, 0.0, 1.0])
+    } else if along[1].abs() > along[2].abs() {
+        ([0.0, 0.0, 1.0], [1.0, 0.0, 0.0])
+    } else {
+        ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0])
+    };
+    let at = |end: [f64; 3], angle: f64| -> [f32; 3] {
+        let (s, c_) = angle.sin_cos();
+        std::array::from_fn(|i| (end[i] + c.radius * (c_ * u[i] + s * v[i])) as f32)
+    };
+    let mut out: Vec<Polyline> = [a, b]
+        .into_iter()
+        .map(|end| Polyline {
+            points: (0..ROUND)
+                .map(|k| at(end, std::f64::consts::TAU * k as f64 / ROUND as f64))
+                .collect(),
+            color,
+            dashed: true,
+            closed: true,
+            ..Default::default()
+        })
+        .collect();
+    for k in 0..4 {
+        let angle = std::f64::consts::FRAC_PI_2 * f64::from(k);
+        out.push(Polyline {
+            points: vec![at(a, angle), at(b, angle)],
+            color,
+            dashed: true,
+            ..Default::default()
+        });
+    }
+    out
 }
