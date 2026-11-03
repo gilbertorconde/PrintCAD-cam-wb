@@ -14,7 +14,9 @@
 //! What the text does is checked by reading it back as a controller would
 //! ([`readback`]) and replaying it against the path it was posted from.
 
+pub mod custom;
 pub mod op;
+pub mod placeholder;
 pub mod profile;
 pub mod readback;
 pub mod render;

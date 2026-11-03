@@ -79,6 +79,7 @@ pub fn single_operation(spec: &FinishSpec, model: ModelDef) -> Job {
     setup.wcs = spec.wcs;
     setup.operations = vec![Operation {
         name: "finish".into(),
+        gcode: String::new(),
         strategy: spec.strategy,
         tool: Some(TOOL.into()),
         preset: None,

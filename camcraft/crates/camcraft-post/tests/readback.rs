@@ -600,3 +600,65 @@ fn rotaries_need_a_safe_retract() {
     let e = Profile::from_toml(&toml::to_string(&p).unwrap()).unwrap_err();
     assert!(e.to_string().contains("safe_retract"), "{e}");
 }
+
+/// Custom G-code is not read, so a person's lines nothing here understands
+/// read back, in every profile; but what moves the machine or changes a mode
+/// is refused in it, on its line; a block written where the program has
+/// none, or left out, is caught; and after it the program must set the
+/// tool, the work offset and the spindle again before it cuts.
+#[test]
+fn custom_gcode_reads_back_and_cannot_hide_a_move() {
+    use camcraft_post::op::CustomGcode;
+    let path = fixture();
+    let custom = |text: &str| ProgramSpec {
+        before: vec![CustomGcode::new("Probe", text)],
+        after: vec![CustomGcode::new("End", "M64 P1\n#100 = 5")],
+        ..spec()
+    };
+    let unread = custom("o100 call [1]\nM98 P2000\n(MSG, @operation@)\n#<depth> = 3\nM0");
+    for (what, profile) in profiles() {
+        reads_back(
+            &path,
+            &unread,
+            &profile,
+            &format!("{what} with custom G-code"),
+        );
+    }
+
+    let profile = Profile::builtin("linuxcnc").unwrap().unwrap();
+    for bad in ["G0 Z5", "M0\nG91", "X10", "G28 Z0", "M6 T2", "M30", "G20"] {
+        let spec = custom(bad);
+        let text = post(&path, &spec, &profile);
+        let p = check(&text, &path, &spec, &profile).unwrap_err();
+        assert!(p.what.starts_with("custom G-code: "), "{bad}: {p}");
+        let line = text.lines().nth(p.line.unwrap() - 1).unwrap();
+        assert!(bad.lines().any(|b| b == line), "{bad}: on {line:?}");
+    }
+
+    // Posted with a block, checked as if it had none; and the other way.
+    let text = post(&path, &unread, &profile);
+    assert!(check(&text, &path, &spec(), &profile).is_err());
+    let plain = post(&path, &spec(), &profile);
+    let p = check(&plain, &path, &unread, &profile).unwrap_err();
+    assert!(p.what.contains("custom G-code"), "{p}");
+
+    // Moved after the operation's start, which sets everything again, to
+    // just before its first move: the tool, the work offset and the spindle
+    // it set are no longer known to be as they were.
+    let mut lines: Vec<&str> = text.lines().collect();
+    let begin = lines
+        .iter()
+        .position(|l| *l == "(custom gcode: Probe)")
+        .unwrap();
+    let end = begin
+        + lines[begin..]
+            .iter()
+            .position(|l| *l == "(end custom gcode)")
+            .unwrap();
+    let block: Vec<&str> = lines.drain(begin..=end).collect();
+    let first = lines.iter().position(|l| l.starts_with("G0 ")).unwrap();
+    lines.splice(first..first, block);
+    let moved = lines.join("\n") + "\n";
+    let p = check(&moved, &path, &unread, &profile).unwrap_err();
+    assert!(p.what.contains("before tool 3 is in"), "{p}\n{moved}");
+}

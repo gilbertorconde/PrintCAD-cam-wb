@@ -854,3 +854,133 @@ fn an_engraving_posts_its_arcs_and_draws_its_curves() {
     let shift = drawn.boundary[2][0][0] - drawn.boundary[0][0][0];
     assert!((shift - 10.0).abs() < 1e-3, "{shift}");
 }
+
+/// The day a program is posted on, counted from 1970 as the clock counts.
+#[test]
+fn days_are_dates() {
+    assert_eq!(crate::civil(0), (1970, 1, 1));
+    assert_eq!(crate::civil(11_016), (2000, 2, 29));
+    assert_eq!(crate::civil(20_760), (2026, 11, 3));
+}
+
+/// The job, its rough between two Custom G-code operations, posted with a
+/// profile of one's own: `gcode` is the first one's text, and `travel` the
+/// profile's travel table.
+fn custom_request(gcode: &str, travel: &str) -> Request {
+    let grbl = include_str!("../../camcraft/crates/camcraft-post/profiles/grbl.toml");
+    let mine = grbl
+        .replacen("\"GRBL\"", "\"My mill\"", 1)
+        .replacen(
+            "header = [",
+            "tool_change_lines = [\"(fit tool @tool@)\", \"T@tool@\", \"M0\"]\n\
+             header = [\n  \"(posted @date@)\",",
+            1,
+        )
+        .replacen("[format]", &format!("{travel}\n[format]"), 1);
+    let job = JOB.replacen(
+        "[[setup.operation]]\nname = \"rough\"",
+        &format!(
+            "[[setup.operation]]\nname = \"clamps\"\nstrategy = \"custom-gcode\"\n\
+             gcode = \"\"\"{gcode}\"\"\"\n\n[[setup.operation]]\nname = \"rough\""
+        ),
+        1,
+    ) + "\n[[setup.operation]]\nname = \"done\"\nstrategy = \"custom-gcode\"\n\
+         gcode = \"M64 P1\"\n";
+    Request {
+        version: VERSION,
+        job: job.replace("post = \"grbl\"", "post = \"My mill\""),
+        shapes: BTreeMap::from([(
+            "part".to_string(),
+            Shape {
+                text: native("hinge_jig.step"),
+                placement: IDENTITY,
+            },
+        )]),
+        max_points: 0,
+        post: Some(mine),
+        read: None,
+    }
+}
+
+/// Custom G-code is written into the program beside it, where it stands,
+/// its placeholders filled from that program, with the profile's own tool
+/// change and the day it was posted; it has no program of its own, and
+/// cuts nothing.
+#[test]
+fn custom_gcode_goes_into_the_program_beside_it() {
+    let request = custom_request("M0 (check the clamps for @operation@)\nG4 P1", "");
+    let run = answer(&request).unwrap();
+    let failed: Vec<_> = run
+        .findings
+        .iter()
+        .filter(|f| f.level == Level::Fail)
+        .collect();
+    assert!(run.passed, "{failed:?}");
+    let names: Vec<&str> = run.operations.iter().map(|o| o.made.as_str()).collect();
+    assert_eq!(names, ["custom-gcode", "generated", "custom-gcode"]);
+    assert!(run.operations[0].program.is_none());
+    assert_eq!(run.operations[0].summary, "2 line(s) of custom G-code");
+    assert!(run.operations[0].strokes.is_empty());
+    let text = &run.operations[1].program.as_ref().unwrap().text;
+    let at = |line: &str| {
+        text.lines()
+            .position(|l| l == line)
+            .unwrap_or_else(|| panic!("no {line:?} in\n{text}"))
+    };
+    assert!(at("(custom gcode: clamps)") < at("M0 (check the clamps for rough)"));
+    assert!(at("G4 P1") < at("(rough - pocket-clearing - T1 G54)"));
+    assert!(at("(fit tool 1)") < at("T1"));
+    assert!(at("(rough - pocket-clearing - T1 G54)") < at("(custom gcode: done)"));
+    assert!(at("M64 P1") < at("M30"));
+    assert!(
+        !text.split_whitespace().any(|w| w == "M6"),
+        "its own tool change: {text}"
+    );
+    let posted = text.lines().next().unwrap();
+    assert!(
+        posted.len() == "(posted 2026-11-03)".len() && posted.starts_with("(posted 20"),
+        "{posted}"
+    );
+}
+
+/// What moves the machine in custom G-code is a failed check on its own
+/// operation; a call of a subprogram a warning.
+#[test]
+fn custom_gcode_that_moves_is_a_failed_check() {
+    let run = answer(&custom_request("M0\nG0 Z5", "")).unwrap();
+    assert!(!run.passed);
+    let f = run
+        .findings
+        .iter()
+        .find(|f| f.level == Level::Fail)
+        .unwrap();
+    assert_eq!((f.code.as_str(), f.operation), ("CC108", Some(0)), "{f:?}");
+    assert!(f.text.contains("line 2: G0 is refused"), "{f:?}");
+
+    let run = answer(&custom_request("M98 P100", "")).unwrap();
+    assert!(run.passed);
+    assert!(
+        run.findings
+            .iter()
+            .any(|f| f.code == "CC216" && f.level == Level::Warn && f.operation == Some(0)),
+        "{:?}",
+        run.findings
+    );
+}
+
+/// Inside the machine's travel, a program passes; past it, it is a failed
+/// check on the operation that goes there, saying which axis and how far.
+#[test]
+fn a_program_past_the_travel_is_a_failed_check() {
+    let inside = answer(&custom_request("M0", "[travel]\nz = [-100, 100]")).unwrap();
+    assert!(inside.passed, "{:?}", inside.findings);
+    let past = answer(&custom_request("M0", "[travel]\nz = [-1, 100]")).unwrap();
+    assert!(!past.passed);
+    let f = past.findings.iter().find(|f| f.code == "travel").unwrap();
+    assert_eq!((f.level, f.operation), (Level::Fail, Some(1)), "{f:?}");
+    assert!(
+        f.text.starts_with("travel rough: Z goes from -") && f.text.contains("of -1 to 100 mm"),
+        "{}",
+        f.text
+    );
+}

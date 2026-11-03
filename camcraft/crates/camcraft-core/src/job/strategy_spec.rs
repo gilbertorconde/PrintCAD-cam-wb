@@ -289,6 +289,11 @@ pub enum StrategySpec {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_depth: Option<f64>,
     },
+    /// Lines of G-code of a person's own, written into the program where it
+    /// stands in the setup, as Fusion's Manual NC: the operation's
+    /// [`gcode`](super::Operation::gcode). It has no tool and no toolpath,
+    /// and cuts nothing.
+    CustomGcode {},
 }
 
 impl StrategySpec {
@@ -320,6 +325,7 @@ impl StrategySpec {
             StrategySpec::VCarve { .. } => "v-carve",
             StrategySpec::Slot { .. } => "slot",
             StrategySpec::Chamfer { .. } => "chamfer",
+            StrategySpec::CustomGcode {} => "custom-gcode",
         }
     }
 
@@ -357,7 +363,8 @@ impl StrategySpec {
             | StrategySpec::Drill { .. }
             | StrategySpec::VCarve { .. }
             | StrategySpec::Slot { .. }
-            | StrategySpec::Chamfer { .. } => false,
+            | StrategySpec::Chamfer { .. }
+            | StrategySpec::CustomGcode {} => false,
         }
     }
 

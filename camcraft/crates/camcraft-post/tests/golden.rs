@@ -30,7 +30,7 @@ use camcraft_core::path::toolpath::Toolpath;
 use camcraft_post::op::{ProgramSpec, lower};
 use camcraft_post::profile::Profile;
 use camcraft_post::readback;
-use camcraft_post::render::render;
+use camcraft_post::render::{render, render_dated};
 use common::{chip_breaking, drilling, engraving, fixture, slot, spec, tapping};
 
 fn check(profile_name: &str) {
@@ -47,9 +47,20 @@ fn check(profile_name: &str) {
 
 /// Render `path` for `profile` and compare with `tests/golden/<file>.nc`.
 fn check_against(profile: &Profile, path: &Toolpath, spec: &ProgramSpec, file: &str) {
+    check_dated(profile, path, spec, file, None);
+}
+
+/// [`check_against`], posted on `date`.
+fn check_dated(
+    profile: &Profile,
+    path: &Toolpath,
+    spec: &ProgramSpec,
+    file: &str,
+    date: Option<&str>,
+) {
     let profile_name = file;
     let ops = lower(path, spec).unwrap();
-    let (got, report) = render(&ops, profile, "golden");
+    let (got, report) = render_dated(&ops, profile, "golden", date);
 
     assert!(report.lines > 10, "suspiciously short program");
     // Read back as a controller would, it cuts the path it was posted from.
@@ -260,6 +271,65 @@ fn an_a_and_b_table_positions_a_tilted_setup() {
         ..spec()
     };
     check_against(&p, &fixture(), &spec, "linuxcnc-rotary-ab");
+}
+
+/// A machine profile of one's own with blocks of its own, every one with
+/// placeholders, its own tool change and travel, and Custom G-code before
+/// the operation and after it: what it writes, and that it reads back.
+#[test]
+fn custom_blocks_are_stable() {
+    use camcraft_post::op::CustomGcode;
+    let linuxcnc = include_str!("../profiles/linuxcnc.toml");
+    let (_, tables) = linuxcnc.split_at(linuxcnc.find("[format]").unwrap());
+    let text = format!(
+        r#"
+name = "My mill"
+extension = "ngc"
+comment = ["(", ")"]
+arc_style = "ij"
+tool_change = "m6"
+spindle = [6000, 24000]
+header = [
+  "%",
+  "(@name@: @operation@, @strategy@)",
+  "(posted @date@ in @units@ on @wcs@)",
+  "G90 G94 G17 G40 G49 G80",
+]
+tool_change_lines = [
+  "(change to tool @tool@: @tool_comment@)",
+  "T@tool@ M6",
+  "G43 H@tool@",
+  "M0 (check tool @tool@ at @rpm@ rev/min, @coolant@)",
+]
+safe_retract = ["G53 G0 Z0"]
+end_home = ["G53 G0 X0 Y0 (park after @operation@)"]
+footer = ["(end of @name@, @@ the shop)", "M30", "%"]
+
+[travel]
+x = [-50, 300]
+y = [-50, 200]
+z = [-80, 60]
+
+{tables}"#
+    );
+    let profile = Profile::from_toml(&text).unwrap();
+    let spec = ProgramSpec {
+        before: vec![CustomGcode::new(
+            "Check clamps",
+            "(MSG, check the clamps before @operation@)\nM0\nM7\nG4 P2",
+        )],
+        after: vec![CustomGcode::new("Signal", "M64 P0 (done with T@tool@)\nM1")],
+        ..spec()
+    };
+    let (low, high) = camcraft_post::op::extents(&fixture()).unwrap();
+    assert!(profile.travel_problems(low, high).is_empty());
+    check_dated(
+        &profile,
+        &fixture(),
+        &spec,
+        "linuxcnc-custom",
+        Some("2026-11-03"),
+    );
 }
 
 /// Every builtin profile must have a golden file. Adding a profile without one

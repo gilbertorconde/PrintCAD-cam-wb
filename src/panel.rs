@@ -407,6 +407,12 @@ fn verdict(run: &Run, only: Option<usize>) -> Vec<Widget> {
                         text: op.summary.clone(),
                         mono: false,
                     });
+                } else if op.made == "custom-gcode" {
+                    out.push(Widget::Value {
+                        label: "G-code".into(),
+                        value: op.summary.clone(),
+                        mono: false,
+                    });
                 } else {
                     out.push(Widget::Value {
                         label: "Toolpath".into(),
@@ -687,6 +693,7 @@ pub fn setup_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
             label: n.name.clone(),
             detail: Some(match run.and_then(|r| r.operations.get(i)) {
                 Some(o) if o.made == "generated" => format!("{:.0} mm cut", o.cut_mm),
+                Some(o) if o.made == "custom-gcode" => o.summary.clone(),
                 Some(o) => o.made.clone(),
                 None => crate::data::strategy_word(&d.strategy()).into(),
             }),
@@ -1298,6 +1305,19 @@ pub fn operation_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
         label: "Runs".into(),
         on: data.operation.enabled,
     });
+    if data.is_custom() {
+        panel.extend(gcode_rows(&data));
+        panel.push(Widget::Separator);
+        if let Some((setup_node, _)) = setup {
+            let index = operations_of(&setup_node.id)
+                .iter()
+                .position(|(n, _)| n.id == id);
+            panel.extend(run_widgets(cam, &setup_node.id, index));
+        } else {
+            panel.push(note(NoteKind::Info, "Choose the setup it belongs to."));
+        }
+        return panel;
+    }
 
     // The tool.
     let setup_data = setup.map(|(_, d)| d);
@@ -1577,6 +1597,67 @@ pub fn operation_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
     panel
 }
 
+/// A Custom G-code operation's lines, a row each and an empty one to add
+/// one, what each line may not do, and the placeholders they may name.
+fn gcode_rows(data: &OperationData) -> Vec<Widget> {
+    let lines = data.gcode_lines();
+    let row = |i: usize, text: &str| {
+        vec![
+            Cell::Text {
+                text: format!("{}", i + 1),
+                mono: true,
+                strong: false,
+            },
+            Cell::Edit { text: text.into() },
+        ]
+    };
+    let mut rows: Vec<Vec<Cell>> = lines.iter().enumerate().map(|(i, l)| row(i, l)).collect();
+    rows.push(row(lines.len(), ""));
+    let mut children = vec![
+        Widget::Text {
+            text: "Written into the program where it stands in the setup: before the next \
+                   operation's start, or, last, after the one before ends. Type a line into \
+                   the empty row to add one; empty a line to take it out."
+                .into(),
+            mono: false,
+        },
+        Widget::Sheet {
+            id: "gcode".into(),
+            columns: vec!["".into(), "G-code".into()],
+            rows,
+        },
+    ];
+    for (i, line) in lines.iter().enumerate() {
+        let said = camcraft_post::placeholder::problem(line)
+            .map(|why| (NoteKind::Error, why))
+            .or_else(|| match camcraft_post::custom::concern(line)? {
+                camcraft_post::custom::Concern::Refused(why) => Some((NoteKind::Error, why)),
+                camcraft_post::custom::Concern::Unread(why) => Some((NoteKind::Warning, why)),
+            });
+        if let Some((kind, why)) = said {
+            children.push(note(kind, format!("Line {}: {why}", i + 1)));
+        }
+    }
+    children.push(Widget::Text {
+        text: "It may not move the machine or change a mode: no X, Y, Z (or A, B, C) words, \
+               no G code but G4, no M6, M2 or M30. Placeholders are filled from the program \
+               it goes into: "
+            .to_string()
+            + &camcraft_post::placeholder::PLACEHOLDERS
+                .iter()
+                .map(|(n, what)| format!("@{n}@ {what}"))
+                .collect::<Vec<_>>()
+                .join("; ")
+            + ".",
+        mono: false,
+    });
+    vec![Widget::Group {
+        title: "G-code".into(),
+        open: true,
+        children,
+    }]
+}
+
 pub fn operation_event(cam: &mut Cam, id: &str, event: PanelEvent) {
     let Some((_, mut data)) = operation_node(id) else {
         return;
@@ -1841,6 +1922,12 @@ pub fn operation_event(cam: &mut Cam, id: &str, event: PanelEvent) {
                 });
             }
         }
+        PanelEvent::CellText {
+            id: table,
+            row,
+            column: 1,
+            value,
+        } if table == "gcode" => data.set_gcode_line(row, &value),
         PanelEvent::Button { id: b } if b == "clear_picks" => {
             data.faces.clear();
             data.edges.clear();

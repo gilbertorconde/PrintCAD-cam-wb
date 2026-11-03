@@ -276,7 +276,8 @@ impl Operation {
             | StrategySpec::Engrave { .. }
             | StrategySpec::VCarve { .. }
             | StrategySpec::Slot { .. }
-            | StrategySpec::Chamfer { .. } => None,
+            | StrategySpec::Chamfer { .. }
+            | StrategySpec::CustomGcode {} => None,
         }
     }
 }

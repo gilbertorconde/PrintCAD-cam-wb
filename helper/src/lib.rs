@@ -28,10 +28,11 @@ use camcraft_geom::mesh::Aabb;
 use camcraft_import::native::load_native;
 use camcraft_post::op::lower_counted;
 use camcraft_post::profile::Profile;
-use camcraft_post::render::render;
+use camcraft_post::render::render_dated;
 use camcraft_session::checks::Level as CheckLevel;
 use camcraft_session::{
-    Model, Models, Ran, load_profile, parse_job, program_spec, run_setup_planned,
+    Model, Models, Ran, custom_gcode, load_profile, parse_job, program_spec, run_setup_planned,
+    travel_problems,
 };
 use camcraft_sim::stock::{Axis, Block};
 use glam::{DAffine3, DMat4, DVec2, DVec3};
@@ -190,8 +191,11 @@ pub(crate) fn execute(
     let mut refused = Vec::new();
     // Machining seconds before the operation under way.
     let mut elapsed = 0.0;
+    let custom = custom_gcode(setup, &ran.result.operations);
+    let date = today();
     for (k, op) in ran.result.operations.iter().enumerate() {
         let heights = match (setup.operations.get(k), stock_box) {
+            _ if op.made == Made::Text => Vec::new(),
             (Some(spec), Some(stock)) => {
                 let mut ctx = ran.result.heights;
                 if spec.heights.measured_from_selection() || down_to_picks(spec) {
@@ -211,17 +215,23 @@ pub(crate) fn execute(
             Made::Kept => "kept",
             Made::Skipped => "skipped",
             Made::Disabled => "disabled",
+            Made::Text => "custom-gcode",
         };
         let mut drawn = strokes(&op.path, &frame, tolerance, request.max_points);
         let program = if op.made.has_paths() {
             let name = camcraft_session::program_name(&setup.name, k, &op.name);
             // As `camcraft_session::program` posts it, keeping which move
             // each line is of.
-            let posted = program_spec(op, setup.wcs, &frame, &profile)
-                .and_then(|spec| lower_counted(&op.path, &spec));
+            let posted = program_spec(op, setup.wcs, &frame, &profile).and_then(|mut spec| {
+                if let Some((before, after)) = custom.get(k) {
+                    spec.before.clone_from(before);
+                    spec.after.clone_from(after);
+                }
+                lower_counted(&op.path, &spec)
+            });
             match posted {
                 Ok((ops, made)) => {
-                    let (text, report) = render(&ops, &profile, &name);
+                    let (text, report) = render_dated(&ops, &profile, &name, Some(&date));
                     Some(Program {
                         name,
                         extension: profile.extension.clone(),
@@ -245,13 +255,38 @@ pub(crate) fn execute(
         } else {
             None
         };
+        // Past the machine's travel, the program stops at its limits part
+        // way through, or crashes into them: a failed check, as the
+        // simulator's are, which Save anyway still gets past.
+        if op.made.has_paths() {
+            refused.extend(
+                travel_problems(op, &profile)
+                    .into_iter()
+                    .map(|why| Finding {
+                        level: Level::Fail,
+                        code: "travel".into(),
+                        text: format!("travel {}: {why}", op.name),
+                        operation: Some(k),
+                        at_move: None,
+                    }),
+            );
+        }
+        let summary = if op.made == Made::Text {
+            let lines = setup
+                .operations
+                .get(k)
+                .map_or(0, |o| o.gcode.lines().count());
+            format!("{lines} line(s) of custom G-code")
+        } else {
+            format!(
+                "{} passes, {} links stayed down, removed {:.0} mm³",
+                op.passes, op.links.stayed_down, op.sim.removed_mm3
+            )
+        };
         operations.push(OperationRun {
             name: op.name.clone(),
             made: made.into(),
-            summary: format!(
-                "{} passes, {} links stayed down, removed {:.0} mm³",
-                op.passes, op.links.stayed_down, op.sim.removed_mm3
-            ),
+            summary,
             warnings: op
                 .warnings
                 .iter()
@@ -421,6 +456,34 @@ pub(crate) fn line_moves(made: &[usize], op_lines: &[u64], lines: u64) -> Vec<u3
         out.push(now);
     }
     out
+}
+
+/// Today's date, as `2026-11-03`, in UTC: what a program's `@date@` says.
+fn today() -> String {
+    let days = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() / 86_400);
+    let (y, m, d) = civil(i64::try_from(days).unwrap_or(0));
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// The year, month and day `days` after 1970-01-01, in the proleptic
+/// Gregorian calendar (Howard Hinnant's `civil_from_days`).
+pub(crate) fn civil(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    (
+        y,
+        u32::try_from(m).unwrap_or(1),
+        u32::try_from(d).unwrap_or(1),
+    )
 }
 
 /// Whether a 2D operation goes down to its picks without a bottom: it has some,

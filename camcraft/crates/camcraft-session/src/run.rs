@@ -106,6 +106,7 @@ fn summary(result: &SetupResult) -> Vec<String> {
         .map(|op| match op.made {
             Made::Skipped => format!("{}: not generated", op.name),
             Made::Disabled => format!("{}: turned off", op.name),
+            Made::Text => format!("{}: custom G-code", op.name),
             Made::Generated | Made::Kept => format!(
                 "{}: {} passes, {} links stayed down, {} ramped, {} down a helix, \
                  removed {:.0} mm3, travel saved {:.0}%, rapid contacts {}{}",

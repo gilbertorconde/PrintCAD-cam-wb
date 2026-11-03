@@ -14,6 +14,7 @@ use camcraft_core::path::toolpath::Arc;
 use glam::{DVec2, DVec3};
 
 use crate::op::{CycleKind, Op};
+use crate::placeholder::{Values, fill};
 use crate::profile::{ArcStyle, Profile, ProgramUnits, ToolChangeStyle};
 
 /// Arcs shorter than this across their chord, in millimetres, are written as
@@ -38,24 +39,84 @@ pub struct RenderReport {
     pub op_lines: Vec<u64>,
 }
 
-/// Render a stream into G-code.
+/// Render a stream into G-code, `@date@` left empty.
 pub fn render(ops: &[Op], profile: &Profile, program_name: &str) -> (String, RenderReport) {
+    render_dated(ops, profile, program_name, None)
+}
+
+/// Render a stream into G-code, posted on `date` (as `2026-11-03`) where it
+/// is given, which `@date@` is replaced with.
+pub fn render_dated(
+    ops: &[Op],
+    profile: &Profile,
+    program_name: &str,
+    date: Option<&str>,
+) -> (String, RenderReport) {
     let mut w = Writer::new(profile);
-    // The name goes in the header's comments: made safe to, or a name with a
-    // delimiter in it would end one early.
-    let name = profile.escaped(program_name);
-    for line in &profile.header {
-        w.raw(&line.replace("{name}", &name));
+    w.values = values(ops, program_name, date);
+    let p = w.p;
+    for line in &p.header {
+        w.filled(line);
     }
     w.report.op_lines.reserve(ops.len());
     for op in ops {
         w.op(op);
         w.report.op_lines.push(w.report.lines);
     }
-    for line in &profile.footer {
-        w.raw(&line.replace("{name}", &name));
+    for line in &p.footer {
+        w.filled(line);
     }
     (w.out, w.report)
+}
+
+/// What the placeholders of a program of `ops` called `name` stand for: the
+/// values of its operation, as its instructions give them.
+fn values(ops: &[Op], name: &str, date: Option<&str>) -> Values {
+    let mut v = Values {
+        name: name.to_string(),
+        date: date.map(str::to_string),
+        ..Values::default()
+    };
+    for op in ops {
+        match op {
+            Op::SectionStart {
+                op_name,
+                tool,
+                strategy,
+                wcs,
+            } => {
+                v.operation.clone_from(op_name);
+                v.tool = *tool;
+                v.strategy.clone_from(strategy);
+                v.wcs = *wcs;
+            }
+            Op::ToolChange { comment, .. } => v.tool_comment.clone_from(comment),
+            Op::SpindleOn { rpm, dir } => {
+                v.rpm = *rpm;
+                v.spindle = *dir;
+            }
+            Op::CoolantOn(c) => v.coolant = *c,
+            Op::Units(u) => v.units = *u,
+            _ => {}
+        }
+    }
+    v
+}
+
+/// The comment custom G-code is written after, which says whose it is:
+/// read back, it begins with [`custom_mark`].
+pub fn custom_begin(profile: &Profile, name: &str) -> String {
+    profile.comment(&format!("custom gcode: {name}"))
+}
+
+/// How the comment before custom G-code begins, as `profile` writes it.
+pub fn custom_mark(profile: &Profile) -> String {
+    format!("{}{}", profile.comment.0, profile.escaped("custom gcode"))
+}
+
+/// The comment custom G-code is written before.
+pub fn custom_end(profile: &Profile) -> String {
+    profile.comment("end custom gcode")
 }
 
 struct Writer<'a> {
@@ -77,6 +138,8 @@ struct Writer<'a> {
     // The tool whose length offset the next Z word takes up, after a tool
     // change, where the profile says to.
     offset: Option<u32>,
+    // What the placeholders in the profile's lines stand for.
+    values: Values,
 }
 
 impl<'a> Writer<'a> {
@@ -93,7 +156,16 @@ impl<'a> Writer<'a> {
             plane: None,
             inches: false,
             offset: None,
+            values: Values::default(),
         }
+    }
+
+    /// One of the profile's lines, or a custom one, its placeholders filled:
+    /// words a person typed made safe to stand in a comment.
+    fn filled(&mut self, line: &str) {
+        let p = self.p;
+        let text = fill(line, &self.values, &|t| p.escaped(t));
+        self.raw(&text);
     }
 
     /// Select `plane` for arcs, unless it is in force.
@@ -128,7 +200,7 @@ impl<'a> Writer<'a> {
     /// unknown.
     fn lines(&mut self, lines: &[String]) {
         for line in lines {
-            self.raw(line);
+            self.filled(line);
         }
         if !lines.is_empty() {
             self.lost();
@@ -247,6 +319,17 @@ impl<'a> Writer<'a> {
                 self.lost();
             }
             Op::Comment(text) => self.comment(text),
+            Op::Custom(custom) => {
+                let begin = custom_begin(self.p, &custom.name);
+                self.raw(&begin);
+                for line in &custom.lines {
+                    self.filled(line);
+                }
+                let end = custom_end(self.p);
+                self.raw(&end);
+                // It may have moved nothing, but what it did is not known.
+                self.lost();
+            }
             Op::Rotary(at) => {
                 // The part turns under the tool: only with the tool clear.
                 if !self.raised {
@@ -269,8 +352,18 @@ impl<'a> Writer<'a> {
         }
     }
 
-    /// Change to `tool`, by changer or by hand, as the profile says.
+    /// Change to `tool`, by changer or by hand, as the profile says: its own
+    /// lines, where it gives them, or its style's.
     fn tool_change(&mut self, tool: u32, comment: &str) {
+        if !self.p.tool_change_lines.is_empty() {
+            let p = self.p;
+            for line in &p.tool_change_lines {
+                self.filled(line);
+            }
+            // A macro or the operator may have moved anything, down included.
+            self.lost();
+            return;
+        }
         match self.p.tool_change {
             ToolChangeStyle::M6 => {
                 if !comment.is_empty() {

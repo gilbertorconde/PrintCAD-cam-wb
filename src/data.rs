@@ -533,6 +533,13 @@ impl SetupData {
         if self.bodies.is_empty() {
             return Some("Pick the bodies the setup machines.".into());
         }
+        // Its copy of a post of one's own, which a newer package may read
+        // more strictly than the one it was kept with.
+        if let Some(text) = &self.post_profile
+            && let Err(e) = camcraft_post::profile::Profile::from_toml(text)
+        {
+            return Some(format!("Its post, {}, does not load: {e}", self.post));
+        }
         if !positive(self.tolerance) {
             return Some("The tolerance must be more than 0.".into());
         }
@@ -743,6 +750,36 @@ impl OperationData {
         self.operation.strategy
     }
 
+    /// Whether it is Custom G-code: lines for the program, with no tool.
+    pub fn is_custom(&self) -> bool {
+        matches!(self.strategy(), StrategySpec::CustomGcode {})
+    }
+
+    /// Its custom G-code's lines, one a line.
+    pub fn gcode_lines(&self) -> Vec<String> {
+        self.operation.gcode.lines().map(str::to_string).collect()
+    }
+
+    /// Set line `row` of its custom G-code to `text`: a row past the last
+    /// adds a line, and an empty line is taken out.
+    pub fn set_gcode_line(&mut self, row: usize, text: &str) {
+        let mut lines = self.gcode_lines();
+        let text = text.trim_end();
+        match (row < lines.len(), text.is_empty()) {
+            (true, true) => {
+                lines.remove(row);
+            }
+            (true, false) => {
+                if let Some(line) = lines.get_mut(row) {
+                    *line = text.to_string();
+                }
+            }
+            (false, false) => lines.push(text.to_string()),
+            (false, true) => {}
+        }
+        self.operation.gcode = lines.join("\n");
+    }
+
     /// The operation's own numbers into the top-level fields.
     pub fn read_numbers(&mut self) {
         let op = &self.operation;
@@ -864,6 +901,8 @@ impl OperationData {
     ) {
         let mut op = Operation::new("", strategy);
         op.tool = self.operation.tool.clone();
+        // Kept, should it be Custom G-code again.
+        op.gcode.clone_from(&self.operation.gcode);
         op.passes.feed = self.feed;
         op.passes.rpm = self.operation.passes.rpm;
         op.linking.plunge_feed = self.plunge;
@@ -902,6 +941,10 @@ impl OperationData {
     }
 
     pub fn problem(&self, tools: &BTreeMap<String, ToolSpec>) -> Option<String> {
+        // Its lines are checked with the run, which says which and why.
+        if self.is_custom() {
+            return None;
+        }
         let Some(name) = &self.operation.tool else {
             return Some("Pick the tool it cuts with.".into());
         };
@@ -960,7 +1003,7 @@ fn positive(v: f64) -> bool {
 
 /// The strategies a new operation may have, in the order the panel lists them,
 /// with what the panel calls them.
-pub const STRATEGIES: [(&str, &str); 17] = [
+pub const STRATEGIES: [(&str, &str); 18] = [
     ("adaptive", "Adaptive clearing (3D roughing)"),
     ("pocket-clearing", "Pocket clearing (3D roughing)"),
     ("parallel", "Parallel (3D finishing)"),
@@ -978,6 +1021,7 @@ pub const STRATEGIES: [(&str, &str); 17] = [
     ("slot", "Slot (along curves)"),
     ("chamfer", "Deburr / chamfer (along edges)"),
     ("v-carve", "V-carve"),
+    ("custom-gcode", "Custom G-code"),
 ];
 
 /// The panel's word for `strategy`.
@@ -1008,6 +1052,7 @@ pub fn strategy_word(strategy: &StrategySpec) -> &'static str {
         StrategySpec::VCarve { .. } => "V-carve",
         StrategySpec::Slot { .. } => "Slot",
         StrategySpec::Chamfer { .. } => "Chamfer",
+        StrategySpec::CustomGcode {} => "Custom G-code",
     }
 }
 
@@ -1031,7 +1076,8 @@ fn start_on_silhouette(op: &mut Operation) {
         | StrategySpec::Engrave { .. }
         | StrategySpec::VCarve { .. }
         | StrategySpec::Slot { .. }
-        | StrategySpec::Chamfer { .. } => return,
+        | StrategySpec::Chamfer { .. }
+        | StrategySpec::CustomGcode {} => return,
     };
     op.boundary.kind = Boundary::Silhouette;
     op.boundary.containment = containment;
@@ -1465,6 +1511,65 @@ mod tests {
             slot.problem(&setup.tools)
                 .unwrap()
                 .contains("end mill its width")
+        );
+    }
+
+    /// Custom G-code: its lines, edited a row at a time, survive the
+    /// document, reach the job with no tool, and read back; it is no
+    /// problem without a tool, and changing its strategy and back keeps them.
+    #[test]
+    fn custom_gcode_reads_back_as_camcraft_writes_it() {
+        let setup = SetupData::new(vec!["b1".into()], "grbl", 0.05);
+        let mut op = OperationData::new(
+            Some("s1".into()),
+            StrategySpec::named("custom-gcode").unwrap(),
+        );
+        assert!(op.is_custom());
+        op.set_gcode_line(0, "M0 (check the clamps)");
+        op.set_gcode_line(1, "M7  ");
+        op.set_gcode_line(5, "G4 P@rpm@");
+        op.set_gcode_line(1, "M8");
+        op.set_gcode_line(9, "");
+        assert_eq!(
+            op.gcode_lines(),
+            ["M0 (check the clamps)", "M8", "G4 P@rpm@"]
+        );
+        op.set_gcode_line(1, "");
+        assert_eq!(op.gcode_lines(), ["M0 (check the clamps)", "G4 P@rpm@"]);
+        assert_eq!(op.problem(&setup.tools), None, "it has no tool");
+        let back = OperationData::from(&op.to_value()).unwrap();
+        assert_eq!(back, op);
+        let models = models_of(&setup, |_| Some("Part".into()));
+        let job = job("S", &setup, &models, &[("Clamps".to_string(), &op)]);
+        let text = camcraft_session::job_text(&job).unwrap();
+        let back = camcraft_session::parse_job(&text, "t").unwrap();
+        assert_eq!(back, job);
+        let read = &back.setups[0].operations[0];
+        assert_eq!(read.strategy, StrategySpec::CustomGcode {});
+        assert_eq!(read.gcode, "M0 (check the clamps)\nG4 P@rpm@");
+        assert_eq!(read.tool, None);
+        assert_eq!(strategy_word(&read.strategy), "Custom G-code");
+        let mut changed = op.clone();
+        changed.set_strategy(StrategySpec::named("face").unwrap(), None, 0.05);
+        changed.set_strategy(StrategySpec::named("custom-gcode").unwrap(), None, 0.05);
+        assert_eq!(changed.gcode_lines(), op.gcode_lines());
+    }
+
+    /// A setup's copy of a post of one's own that does not load says why in
+    /// its panel, before it is run.
+    #[test]
+    fn a_setups_post_that_does_not_load_is_its_problem() {
+        let mut setup = SetupData::new(vec!["b1".into()], "My mill", 0.05);
+        let grbl = include_str!("../camcraft/crates/camcraft-post/profiles/grbl.toml");
+        setup.post_profile = Some(grbl.replacen("\"GRBL\"", "\"My mill\"", 1));
+        assert_eq!(setup.problem(), None);
+        setup.post_profile = Some(grbl.replacen("\"({name})\"", "\"(@nmae@)\"", 1));
+        let said = setup.problem().unwrap();
+        assert!(
+            said.starts_with(
+                "Its post, My mill, does not load: header is not usable: line 1: @nmae@"
+            ),
+            "{said}"
         );
     }
 

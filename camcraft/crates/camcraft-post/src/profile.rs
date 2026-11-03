@@ -4,6 +4,41 @@
 //! says how to format numbers, whether to suppress modal words, how a tool change is
 //! expressed, and what goes at the top and bottom of a file.
 //!
+//! # Placeholders
+//!
+//! The lines a profile gives (`header`, `footer`, `safe_retract`, `end_home` and
+//! `tool_change_lines`) can name a value of the program they go into as
+//! `@name@`, which is replaced with it; `@@` is an `@` itself, and `{name}` the
+//! program's name, as a header always had it:
+//!
+//! | Placeholder | Replaced with |
+//! | --- | --- |
+//! | `@name@` | the program's name |
+//! | `@operation@` | the operation's name |
+//! | `@strategy@` | its strategy, as a job file names it |
+//! | `@tool@` | the tool's number |
+//! | `@tool_comment@` | the tool's description |
+//! | `@rpm@` | the spindle's speed, rev/min |
+//! | `@spindle@` | `M3` or `M4`: the way the spindle turns |
+//! | `@coolant@` | `flood`, `mist` or `off` |
+//! | `@coolant_code@` | `M8`, `M7` or `M9` |
+//! | `@units@` | `mm` or `inch` |
+//! | `@units_code@` | `G21` or `G20` |
+//! | `@wcs@` | the work offset, `G54` to `G59` |
+//! | `@date@` | the day it was posted, `2026-11-03`, where that is known; else nothing |
+//!
+//! Words a person typed (the names and the tool's description) are made safe to
+//! stand in a comment, as the profile writes comments. A name that is not a
+//! placeholder makes the profile invalid, saying which and where
+//! ([`crate::placeholder`]).
+//!
+//! # Travel
+//!
+//! `[travel]` gives, for any of X, Y and Z, the lowest and highest the
+//! program's own coordinates may go, in its units: how far the machine goes
+//! each way from the work zero as it is usually set. A program that goes past
+//! them is a failed check ([`Profile::travel_problems`]).
+//!
 //! # Modal suppression tracks what was *emitted*
 //!
 //! Leaving out an axis word because it has not changed is correct only if the
@@ -17,8 +52,10 @@
 //! uses. Comparing unrounded values while emitting rounded ones lets a move be
 //! suppressed as "unchanged" when the machine would have seen a different number.
 
+use glam::DVec3;
 use serde::Deserialize;
 
+use crate::placeholder;
 use crate::rotary::Rotary;
 
 /// How a tool change is expressed.
@@ -106,6 +143,33 @@ pub struct Modal {
     pub suppress_feed: bool,
 }
 
+/// How far a program's coordinates may go along each axis, in its units: the
+/// machine's travel, measured from the work zero as it is set for the work.
+/// An axis left out may go anywhere.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Travel {
+    /// The lowest and highest X.
+    #[serde(default)]
+    pub x: Option<[f64; 2]>,
+    /// The lowest and highest Y.
+    #[serde(default)]
+    pub y: Option<[f64; 2]>,
+    /// The lowest and highest Z.
+    #[serde(default)]
+    pub z: Option<[f64; 2]>,
+}
+
+impl Travel {
+    /// Each axis given, by its letter.
+    fn axes(&self) -> impl Iterator<Item = (char, usize, [f64; 2])> {
+        [('X', self.x), ('Y', self.y), ('Z', self.z)]
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, (axis, range))| range.map(|r| (axis, i, r)))
+    }
+}
+
 /// One machine dialect.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -152,13 +216,24 @@ pub struct Profile {
     /// turn outside them is warned about. Absent, any speed goes.
     #[serde(default)]
     pub spindle: Option<[u32; 2]>,
+    /// How far the program's coordinates may go, in its units: see the
+    /// module's "Travel". Absent, they are not checked.
+    #[serde(default)]
+    pub travel: Option<Travel>,
     /// The machine's rotary axes, for 3+2 machining: a setup tilted is
     /// stood up the spindle by them before it cuts ([`Rotary`]). Absent, a
     /// tilted setup is fixtured tilted by hand.
     #[serde(default)]
     pub rotary: Option<Rotary>,
-    /// Lines emitted before anything else. `{name}` is replaced.
+    /// Lines emitted before anything else. Its placeholders are replaced, as
+    /// every block's are (see the module's "Placeholders").
     pub header: Vec<String>,
+    /// Lines that change the tool, in place of the `tool_change` style's own:
+    /// a macro, or a pause with the machine's own words. They must name the
+    /// tool, `@tool@`. After them where the machine is is not known, as after
+    /// a change by hand. Empty, the style's own.
+    #[serde(default)]
+    pub tool_change_lines: Vec<String>,
     /// Lines that take the tool straight up clear of everything, as far as the
     /// machine goes, such as `G28 G91 Z0`: before each tool change and before the
     /// program ends. Empty, the tool is not sent up, and the first move after a
@@ -323,7 +398,85 @@ impl Profile {
                 reason: format!("its slowest, {low}, is faster than its fastest, {high}"),
             });
         }
+        if let Some(travel) = &self.travel {
+            for (axis, _, [low, high]) in travel.axes() {
+                if !(low.is_finite() && high.is_finite()) || low >= high {
+                    return Err(ProfileError::BadValue {
+                        field: "travel",
+                        reason: format!(
+                            "{} = [{low}, {high}] is not a range: give its lowest, then its highest",
+                            axis.to_ascii_lowercase()
+                        ),
+                    });
+                }
+            }
+        }
+        for (field, lines) in self.blocks() {
+            for (i, line) in lines.iter().enumerate() {
+                if let Some(why) = placeholder::problem(line) {
+                    return Err(ProfileError::BadValue {
+                        field,
+                        reason: format!("line {}: {why}", i + 1),
+                    });
+                }
+            }
+        }
+        if !self.tool_change_lines.is_empty()
+            && !self.tool_change_lines.iter().any(|l| l.contains("@tool@"))
+        {
+            return Err(ProfileError::BadValue {
+                field: "tool_change_lines",
+                reason: "they never say which tool: put @tool@ in them, as `T@tool@ M6`".into(),
+            });
+        }
         Ok(())
+    }
+
+    /// Each block of lines the profile gives, by its field.
+    fn blocks(&self) -> [(&'static str, &[String]); 5] {
+        [
+            ("header", &self.header),
+            ("tool_change_lines", &self.tool_change_lines),
+            ("safe_retract", &self.safe_retract),
+            ("end_home", &self.end_home),
+            ("footer", &self.footer),
+        ]
+    }
+
+    /// What is wrong with a program that goes from `low` to `high`, in
+    /// millimetres in its own coordinates, on this machine: each axis it
+    /// takes past the `travel`, saying how far it goes and how far it may.
+    pub fn travel_problems(&self, low: DVec3, high: DVec3) -> Vec<String> {
+        let Some(travel) = &self.travel else {
+            return Vec::new();
+        };
+        let (scale, unit) = match self.units {
+            ProgramUnits::Mm => (1.0, "mm"),
+            ProgramUnits::Inch => (1.0 / MM_PER_INCH, "in"),
+        };
+        let (low, high) = (low * scale, high * scale);
+        // Within the places it is written to is within.
+        let slack = 0.5
+            * 10f64.powi(-i32::from(match self.units {
+                ProgramUnits::Mm => self.format.axis_decimals,
+                ProgramUnits::Inch => self.format.inch_axis_decimals,
+            }));
+        travel
+            .axes()
+            .filter(|&(_, i, [min, max])| low[i] < min - slack || high[i] > max + slack)
+            .map(|(axis, i, [min, max])| {
+                let n = |v: f64| self.length(v / scale, self.units == ProgramUnits::Inch);
+                format!(
+                    "{axis} goes from {} to {} {unit}, past {}'s travel of {} to {} {unit} \
+                     from the work zero",
+                    n(low[i]),
+                    n(high[i]),
+                    self.name,
+                    n(min),
+                    n(max)
+                )
+            })
+            .collect()
     }
 
     /// What is wrong with turning the spindle at `rpm` on this machine, if
@@ -439,7 +592,12 @@ impl Profile {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::float_cmp, clippy::panic)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::float_cmp,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 mod tests {
     use super::*;
 
@@ -631,6 +789,108 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// GRBL with `extra` TOML added, which a profile's own blocks or tables
+    /// may be.
+    fn grbl_with(extra: &str) -> Result<Profile, ProfileError> {
+        let grbl = include_str!("../profiles/grbl.toml");
+        // Top-level keys go before the first table.
+        let (top, tables) = grbl.split_at(grbl.find("[format]").unwrap());
+        Profile::from_toml(&format!("{top}\n{extra}\n{tables}"))
+    }
+
+    /// A placeholder that is not one makes the profile invalid, saying which
+    /// block, which line, and which name; known ones and `{name}` load.
+    #[test]
+    fn an_unknown_placeholder_is_refused_saying_where() {
+        let ok = grbl_with("tool_change_lines = [\"(fit @tool_comment@)\", \"T@tool@ M6\"]");
+        assert!(ok.is_ok(), "{ok:?}");
+        let e = grbl_with("end_home = [\"G28 G91 X0 Y0\", \"(done @nmae@)\"]").unwrap_err();
+        let said = e.to_string();
+        assert!(
+            said.starts_with("end_home is not usable: line 2: @nmae@ is not a placeholder"),
+            "{said}"
+        );
+        let e = grbl_with("end_home = [\"G28 G91 X0 Y0 (me@home)\"]").unwrap_err();
+        assert!(e.to_string().contains("never closed"), "{e}");
+    }
+
+    /// Its own tool change must say which tool, or every program would cut
+    /// with whatever was in.
+    #[test]
+    fn a_tool_change_of_ones_own_names_the_tool() {
+        let e = grbl_with("tool_change_lines = [\"M6\"]").unwrap_err();
+        assert!(
+            matches!(
+                e,
+                ProfileError::BadValue {
+                    field: "tool_change_lines",
+                    ..
+                }
+            ),
+            "{e}"
+        );
+    }
+
+    /// Travel inside its range is fine, outside it is said, axis by axis,
+    /// in the program's units; an axis not given goes anywhere.
+    #[test]
+    fn travel_is_checked_axis_by_axis() {
+        use glam::dvec3;
+        let p = grbl_with("[travel]\nx = [-10, 300]\nz = [-60, 40]").unwrap();
+        assert!(
+            p.travel_problems(dvec3(-10.0, -500.0, -60.0), dvec3(300.0, 900.0, 40.0))
+                .is_empty()
+        );
+        // Within the places it is written to is within.
+        assert!(
+            p.travel_problems(dvec3(-10.0004, 0.0, 0.0), dvec3(0.0, 0.0, 0.0))
+                .is_empty()
+        );
+        let past = p.travel_problems(dvec3(-10.0, 0.0, -75.5), dvec3(320.0, 0.0, 10.0));
+        assert_eq!(past.len(), 2, "{past:?}");
+        assert!(
+            past[0].starts_with("X goes from -10 to 320 mm, past GRBL's travel of -10 to 300 mm"),
+            "{}",
+            past[0]
+        );
+        assert!(
+            past[1].starts_with("Z goes from -75.5 to 10 mm"),
+            "{}",
+            past[1]
+        );
+        let mut inch = p.clone();
+        inch.units = ProgramUnits::Inch;
+        inch.travel = Some(Travel {
+            x: Some([0.0, 10.0]),
+            ..Travel::default()
+        });
+        let past = inch.travel_problems(dvec3(0.0, 0.0, 0.0), dvec3(279.4, 0.0, 0.0));
+        assert!(past[0].contains("to 11 in, past"), "{past:?}");
+        let none = Profile::builtin("grbl").unwrap().unwrap();
+        assert!(
+            none.travel_problems(DVec3::splat(-1e6), DVec3::splat(1e6))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_travel_must_be_a_range() {
+        for bad in ["x = [300, 0]", "y = [1, 1]", "z = [nan, 3]"] {
+            let e = grbl_with(&format!("[travel]\n{bad}")).unwrap_err();
+            assert!(
+                matches!(
+                    e,
+                    ProfileError::BadValue {
+                        field: "travel",
+                        ..
+                    }
+                ),
+                "{bad}: {e}"
+            );
+        }
+        assert!(grbl_with("[travel]\nq = [0, 1]").is_err(), "no Q axis");
     }
 
     #[test]

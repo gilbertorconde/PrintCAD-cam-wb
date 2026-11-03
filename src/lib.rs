@@ -812,7 +812,12 @@ impl Cam {
         let (_, setup_data) = setup_node(setup).ok_or("no such setup")?;
         let ops = operations_of(setup);
         let mut data = OperationData::new(Some(setup.to_string()), strategy);
-        let last = ops.last().and_then(|(_, d)| d.operation.tool.clone());
+        // Custom G-code cuts with nothing.
+        let last = ops
+            .iter()
+            .rev()
+            .find_map(|(_, d)| d.operation.tool.clone())
+            .filter(|_| !data.is_custom());
         if let Some(tool) = last.and_then(|t| Some((setup_data.tools.get(&t)?.clone(), t))) {
             let preset = tool.0.presets.first().cloned();
             data.use_tool(&tool.1, &tool.0, preset.as_ref(), setup_data.tolerance);
@@ -1146,6 +1151,13 @@ impl Bench for Cam {
                             false,
                             "chamfer: auto|flipped (auto: away from the material)",
                         ),
+                        param(
+                            "gcode",
+                            ParamKind::String,
+                            false,
+                            "custom-gcode: its lines, newline between them, @name@ \
+                             placeholders filled",
+                        ),
                         param("name", ParamKind::String, false, "the operation's name"),
                     ],
                     returns: "{feature}".into(),
@@ -1175,6 +1187,13 @@ impl Bench for Cam {
                          warning."
                             .into(),
                         "A library tool's first preset sets its feeds and speeds.".into(),
+                        "Custom G-code (strategy custom-gcode) has no tool and no toolpath: its \
+                         gcode lines are written into the program where it stands, before the \
+                         next operation's start, or after the last one's end. Placeholders such \
+                         as @tool@, @rpm@ and @operation@ are the program's. A line that moves \
+                         the machine or changes a mode (an axis word, any G code but G4, M6, \
+                         M2, M30) is a failed check; a subprogram call a warning."
+                            .into(),
                         "Drilling: peck backs out between pecks, and with chip_break only that \
                          far (G73); pitch, mm a turn, taps each hole instead (G84, or G74 with \
                          hand = left), fed at the pitch times the spindle's speed, and posted \
@@ -1212,6 +1231,16 @@ impl Bench for Cam {
                         .into(),
                     params: vec![param("text", ParamKind::String, true, "the profile's TOML")],
                     returns: "{name}: the post's name, for a setup's `post`".into(),
+                    notes: vec![
+                        "A profile that does not load is refused, saying which field and why: \
+                         an unknown @placeholder@ names its block and line."
+                            .into(),
+                        "Besides camcraft's fields, it may give the spindle's range \
+                         (spindle = [min, max]), the travel its programs must keep inside \
+                         ([travel] x = [min, max], y, z, in the program's units from the work \
+                         zero), and its own tool change (tool_change_lines, naming @tool@)."
+                            .into(),
+                    ],
                     ..Default::default()
                 },
                 Command {
@@ -1331,6 +1360,10 @@ impl Bench for Cam {
                 p("axis_dz", "Tool axis direction Z", Dim::Number),
                 p("tolerance", "Tolerance", Dim::Length),
             ];
+        }
+        // Custom G-code has no numbers to bind.
+        if OperationData::from(&node.data).is_some_and(|d| d.is_custom()) {
+            return Vec::new();
         }
         let mut out = vec![
             p("stepover", "Stepover", Dim::Length),
@@ -1585,6 +1618,11 @@ impl Bench for Cam {
                 {
                     *side = serde_json::from_value(json!(d))
                         .map_err(|_| format!("no chamfer side '{d}'"))?;
+                }
+                if data.is_custom()
+                    && let Some(text) = text("gcode")
+                {
+                    data.operation.gcode = text;
                 }
                 if let StrategySpec::Slot {
                     pattern, reverse, ..
