@@ -30,6 +30,7 @@ use crate::setup::{Bodies, Prepared};
 use crate::strategy::StrategyError;
 use crate::strategy::adaptive::{AdaptiveParams, adaptive_rough, flat_heights};
 use crate::strategy::drilling::{DrillParams, DrillReport, Hole, Tap, drill, holes, nearest_first};
+use crate::strategy::engrave::{EngraveParams, Trace, engrave};
 use crate::strategy::face::{FaceParams, LevelsAsked, face};
 use crate::strategy::flat::{FlatParams, flat_finish};
 use crate::strategy::morph::{MorphParams, MorphedSpiralReport, morphed_spiral};
@@ -43,12 +44,15 @@ use crate::strategy::pocket_clearing::{ClearingParams, pocket_clearing};
 use crate::strategy::projected::{Curve, ProjectParams, ProjectReport, project};
 use crate::strategy::reach::LevelReach;
 use crate::strategy::scallop::{ScallopParams, contact_region, scallop_finish};
+use crate::strategy::vcarve::{VCarveParams, vcarve};
 use crate::strategy::waterline::{WaterlineParams, waterline};
 
+mod carving;
 mod clearing;
 mod finishing;
 mod link;
 
+use carving::{engrave_paths, vcarve_paths};
 use clearing::{adaptive_paths, drill_paths, face_paths, planar_paths, pocket_clearing_paths};
 pub(super) use clearing::{drill_holes, heights_of, planar_areas};
 use finishing::{
@@ -148,6 +152,10 @@ pub(super) enum Target {
     Holes(Vec<Hole>),
     /// A 2D operation's areas, each with its floor.
     Areas(Vec<Area>),
+    /// The curves an engraving follows.
+    Traces(Vec<Trace>),
+    /// The area a V-carving carves.
+    Carve(Region),
 }
 
 /// Work out one operation's paths, link them over the material as it stands, and
@@ -161,11 +169,15 @@ pub(super) fn run_operation(
     let ctx = work.heights;
     let mut warnings = Vec::new();
 
-    let (limit, holes, found) = match target {
-        Target::Limit(limit) => (limit.as_ref(), &[][..], &[][..]),
-        Target::Holes(holes) => (None, holes.as_slice(), &[][..]),
-        Target::Areas(areas) => (None, &[][..], areas.as_slice()),
-    };
+    let (mut limit, mut holes, mut found, mut traces, mut carved) =
+        (None, &[][..], &[][..], &[][..], None);
+    match target {
+        Target::Limit(l) => limit = l.as_ref(),
+        Target::Holes(h) => holes = h.as_slice(),
+        Target::Areas(a) => found = a.as_slice(),
+        Target::Traces(t) => traces = t.as_slice(),
+        Target::Carve(area) => carved = Some(area),
+    }
     let (raw, passes, detail) = match op.strategy {
         StrategySpec::Parallel { angle } => parallel_paths(work, angle, limit, &mut warnings)?,
         StrategySpec::Scallop {
@@ -248,6 +260,15 @@ pub(super) fn run_operation(
             holes,
             &mut warnings,
         )?,
+        StrategySpec::Engrave {
+            depth,
+            direction,
+            reverse,
+        } => engrave_paths(work, (depth, direction, reverse), traces, &mut warnings)?,
+        StrategySpec::VCarve { max_depth } => match carved {
+            Some(area) => vcarve_paths(work, max_depth, area, &mut warnings)?,
+            None => return Err(in_op(op)(FeatureError::NothingToCarve)),
+        },
     };
 
     // Ordering is a Toolpath -> Toolpath transform, applied before linking so the
@@ -393,6 +414,8 @@ pub(super) fn not_made(op: &Operation, spec: Option<&ToolSpec>, made: Made) -> O
         StrategySpec::Profile { .. } => StrategyDetail::Profile(Default::default()),
         StrategySpec::Pocket { .. } => StrategyDetail::Pocket(Default::default()),
         StrategySpec::Face { .. } => StrategyDetail::Face(Default::default()),
+        StrategySpec::Engrave { .. } => StrategyDetail::Engrave(Default::default()),
+        StrategySpec::VCarve { .. } => StrategyDetail::VCarve(Default::default()),
         StrategySpec::Drill {
             peck,
             dwell,

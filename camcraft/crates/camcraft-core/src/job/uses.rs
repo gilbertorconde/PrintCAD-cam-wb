@@ -13,6 +13,8 @@ impl StrategySpec {
             boundary: true,
             outline: false,
             holes: false,
+            traces: false,
+            carves: false,
             stepover: true,
             load: false,
             feed: true,
@@ -156,6 +158,8 @@ impl StrategySpec {
                 boundary: false,
                 outline: false,
                 holes: true,
+                traces: false,
+                carves: false,
                 stepover: false,
                 load: false,
                 // Each hole is fed down at the plunge feed, or a tap at its
@@ -181,6 +185,33 @@ impl StrategySpec {
                 top: None,
                 bottom: Some(HeightRef::ModelBottom),
             },
+            // Its picks are what it follows, each ramped down along itself,
+            // in its own order, from the part's top: where a sketch drawn on
+            // it lies. It cuts to size.
+            StrategySpec::Engrave { .. } => Uses {
+                boundary: false,
+                traces: true,
+                stepover: false,
+                stock_to_leave: Leave::None,
+                tabs: false,
+                helix: HelixSize::Tool,
+                ramp: false,
+                top: Some(HeightRef::ModelTop),
+                bottom: None,
+                ..cuts_loops
+            },
+            // Its picks are the areas it carves, along their middles, each
+            // round from where it is shallowest.
+            StrategySpec::VCarve { .. } => Uses {
+                boundary: false,
+                carves: true,
+                stepover: false,
+                stock_to_leave: Leave::None,
+                ramp: false,
+                top: Some(HeightRef::ModelTop),
+                bottom: None,
+                ..cuts_loops
+            },
         }
     }
 }
@@ -202,6 +233,12 @@ pub struct Uses {
     /// Holes: its picks are what it drills, not an area, and no height is
     /// measured from them, since each hole goes to its own bottom.
     pub holes: bool,
+    /// Curves: its picks, edges and curves, open or closed, are what the
+    /// tool's centre follows.
+    pub traces: bool,
+    /// Areas carved: what its picks enclose is cut along its middle, as deep
+    /// as a V-bit reaches its walls.
+    pub carves: bool,
     /// The distance between passes.
     pub stepover: bool,
     /// Its stepover is the tool's load, the width of cut it holds, rather than

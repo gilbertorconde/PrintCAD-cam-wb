@@ -562,6 +562,14 @@ fn bounded_runs_are_deterministic() {
 /// thicker, and one operation with the 6 mm flat and no stock to leave, made
 /// `strategy`.
 fn in_a_sheet(strategy: StrategySpec, body: &Body) -> (Job, SetupResult) {
+    let job = sheet_job(strategy);
+    let bodies: Bodies<'_> = [("dome", body)].into_iter().collect();
+    let result = run_setup(&job, 0, &bodies).unwrap();
+    (job, result)
+}
+
+/// The job [`in_a_sheet`] runs.
+fn sheet_job(strategy: StrategySpec) -> Job {
     use crate::job::StockSpec;
     let mut job: Job = toml::from_str(JOB).unwrap();
     job.setups[0].operations.retain(|op| op.name == "rough");
@@ -574,9 +582,7 @@ fn in_a_sheet(strategy: StrategySpec, body: &Body) -> (Job, SetupResult) {
     op.strategy = strategy;
     op.passes.stepdown = strategy.default_stepdown();
     op.passes.stock_to_leave = Default::default();
-    let bodies: Bodies<'_> = [("dome", body)].into_iter().collect();
-    let result = run_setup(&job, 0, &bodies).unwrap();
-    (job, result)
+    job
 }
 
 /// A part profiled out of a sheet with nothing picked: round its silhouette, the
@@ -1378,4 +1384,213 @@ fn a_lying_bar_is_faced_down_its_curve() {
     let taken = result.operations[0].sim.removed_mm3;
     let cap = segment * 50.0;
     assert!((taken - cap).abs() < 0.03 * cap, "took {taken} of {cap}");
+}
+
+/// A plate 40 mm square and 5 thick, in a sheet its size, and one operation
+/// of `strategy` with `tool`, following `curves` drawn on its top.
+fn drawn_on_a_plate(
+    strategy: StrategySpec,
+    tool: crate::job::ToolSpec,
+    curves: Vec<crate::job::Curve>,
+) -> (Job, SetupResult) {
+    use crate::job::StockSpec;
+    let body = Body::derived(synthetic::cuboid(
+        DVec3::new(-20.0, -20.0, 0.0),
+        DVec3::new(20.0, 20.0, 5.0),
+    ));
+    let mut job: Job = toml::from_str(JOB).unwrap();
+    job.setups[0].operations.retain(|op| op.name == "rough");
+    job.stocks[0].spec = StockSpec::AroundModels {
+        models: vec![],
+        margin: [0.0, 0.0, 0.0],
+        below: 0.0,
+    };
+    job.tools.insert("drawn".into(), tool);
+    let op = &mut job.setups[0].operations[0];
+    op.strategy = strategy;
+    op.tool = Some("drawn".into());
+    op.passes.stepdown = strategy.default_stepdown();
+    op.passes.stock_to_leave = Default::default();
+    op.selection.curves = curves;
+    let bodies: Bodies<'_> = [("dome", &body)].into_iter().collect();
+    let result = run_setup(&job, 0, &bodies).unwrap();
+    (job, result)
+}
+
+/// A circle of radius `r` about `(x, y)` on the plate's top, as two arcs.
+fn drawn_circle(x: f64, y: f64, r: f64) -> crate::job::Curve {
+    use crate::job::{Curve, Segment};
+    Curve {
+        start: [x + r, y, 5.0],
+        segments: vec![
+            Segment::Arc {
+                via: [x, y + r, 5.0],
+                to: [x - r, y, 5.0],
+            },
+            Segment::Arc {
+                via: [x, y - r, 5.0],
+                to: [x + r, y, 5.0],
+            },
+        ],
+    }
+}
+
+fn flat(diameter: f64) -> crate::job::ToolSpec {
+    crate::job::ToolSpec {
+        kind: crate::job::ToolKind::Flat,
+        diameter,
+        number: 3,
+        ..crate::job::ToolSpec::default()
+    }
+}
+
+/// Engraved half a millimetre into the plate along a circle and an open line:
+/// the circle's arcs are cut as arcs, material goes only from under the
+/// tool's path, and what it cuts into the part is meant, so verifies.
+#[test]
+fn an_engraving_cuts_only_along_its_curves_and_verifies() {
+    use crate::job::{Curve, Segment, TraceDirection};
+    use crate::path::toolpath::{MoveKind, MoveRole};
+    let line = Curve {
+        start: [-15.0, -15.0, 5.0],
+        segments: vec![Segment::Line {
+            to: [15.0, -15.0, 5.0],
+        }],
+    };
+    let engrave = StrategySpec::Engrave {
+        depth: 0.5,
+        direction: TraceDirection::Climb,
+        reverse: false,
+    };
+    let (_, result) = drawn_on_a_plate(engrave, flat(1.0), vec![drawn_circle(0.0, 0.0, 8.0), line]);
+    let op = &result.operations[0];
+    let StrategyDetail::Engrave(report) = op.detail else {
+        panic!("reported {:?}", op.detail);
+    };
+    assert_eq!((report.curves, report.closed), (2, 1));
+    assert!(report.arcs >= 4, "{report:?}");
+    let arcs = op
+        .path
+        .moves()
+        .iter()
+        .filter(|m| matches!(m.kind, MoveKind::Arc(_)))
+        .count();
+    assert_eq!(arcs as u64, report.arcs);
+    let deepest = op
+        .path
+        .moves()
+        .iter()
+        .filter(|m| m.role == MoveRole::Cut)
+        .map(|m| m.to.z)
+        .fold(f64::MAX, f64::min);
+    assert!((deepest - 4.5).abs() < 1e-9, "{deepest}");
+    assert!(op.sim.removed_mm3 > 0.0);
+    assert!(result.is_clean(), "{:?}", result.warnings());
+    assert_eq!(result.verify.gouged, 0);
+
+    // Every cell the material went down in is under the tool's path.
+    let before = result.keyframes[0].unpack().unwrap();
+    let after = result.keyframes[1].unpack().unwrap();
+    let (before, after) = (before.field(), after.field());
+    let near = |p: DVec2| {
+        let on_circle = (p.length() - 8.0).abs();
+        let on_line = if p.x.abs() <= 15.0 {
+            (p.y + 15.0).abs()
+        } else {
+            p.distance(dvec2(15.0 * p.x.signum(), -15.0))
+        };
+        on_circle.min(on_line)
+    };
+    let reach = 0.5 + 2.0 * before.pitch();
+    let mut lowered = 0;
+    for iy in 0..before.ny() {
+        for ix in 0..before.nx() {
+            let (Some(b), Some(a)) = (before.get(ix, iy), after.get(ix, iy)) else {
+                continue;
+            };
+            if a < b - 1e-3 {
+                lowered += 1;
+                let p = before.position(ix, iy).unwrap();
+                assert!(near(p) <= reach, "cut at {p}, {} from the curves", near(p));
+                assert!(a > 4.5 - 0.01, "cut to {a} at {p}");
+            }
+        }
+    }
+    assert!(lowered > 100, "{lowered}");
+}
+
+/// A V-carving of a circle drawn on the plate goes to its centre, as deep as
+/// the V is the circle's width there; any tool but a V-bit is refused.
+#[test]
+fn a_v_carving_goes_as_deep_as_the_area_is_wide() {
+    use crate::job::ToolKind;
+    let vbit = crate::job::ToolSpec {
+        kind: ToolKind::Cone,
+        diameter: 12.0,
+        angle: Some(90.0),
+        number: 4,
+        ..crate::job::ToolSpec::default()
+    };
+    let carve = StrategySpec::VCarve { max_depth: None };
+    let (mut job, result) = drawn_on_a_plate(carve, vbit, vec![drawn_circle(0.0, 0.0, 2.0)]);
+    let op = &result.operations[0];
+    let StrategyDetail::VCarve(report) = op.detail else {
+        panic!("reported {:?}", op.detail);
+    };
+    // A 90° V is as deep as it is wide either side.
+    assert!((report.deepest - 2.0).abs() < 0.02, "{report:?}");
+    let lowest = op
+        .path
+        .moves()
+        .iter()
+        .min_by(|a, b| a.to.z.total_cmp(&b.to.z))
+        .unwrap()
+        .to;
+    assert!(lowest.truncate().length() < 0.05, "{lowest}");
+    assert!((lowest.z - 3.0).abs() < 0.02, "{lowest}");
+    assert!(result.is_clean(), "{:?}", result.warnings());
+    assert_eq!(result.verify.gouged, 0);
+
+    job.tools.insert("drawn".into(), flat(6.0));
+    let refused = job.check_setup(0).unwrap_err().to_string();
+    assert!(refused.contains("V-bit"), "{refused}");
+}
+
+/// A picked round edge is followed as arcs: the plate's hole engraved round
+/// its rim, a chamfer's start.
+#[test]
+fn a_picked_round_edge_is_engraved_as_arcs() {
+    use crate::job::{FeatureRef, TraceDirection};
+    use crate::path::toolpath::MoveKind;
+    let body = Body::derived(synthetic::plate_with_hole(20.0, 5.0, 4.0, 48));
+    let engrave = StrategySpec::Engrave {
+        depth: 0.5,
+        direction: TraceDirection::AsDrawn,
+        reverse: false,
+    };
+    let mut job = sheet_job(engrave);
+    let op = &mut job.setups[0].operations[0];
+    op.selection.edges = vec![FeatureRef {
+        model: "dome".into(),
+        index: u32::MAX,
+        at: [4.0, 0.0, 5.0],
+    }];
+    let bodies: Bodies<'_> = [("dome", &body)].into_iter().collect();
+    let result = run_setup(&job, 0, &bodies).unwrap();
+    let op = &result.operations[0];
+    let StrategyDetail::Engrave(report) = op.detail else {
+        panic!("reported {:?}", op.detail);
+    };
+    assert_eq!((report.curves, report.closed), (1, 1));
+    for m in op
+        .path
+        .moves()
+        .iter()
+        .filter(|m| m.role != crate::path::toolpath::MoveRole::Rapid)
+    {
+        if let MoveKind::Arc(a) = m.kind {
+            assert!((a.centre.truncate()).length() < 1e-6, "{a:?}");
+        }
+    }
+    assert_eq!(report.arcs, 4, "{report:?}");
 }

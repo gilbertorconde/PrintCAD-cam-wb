@@ -230,11 +230,13 @@ pub struct OperationRun {
 }
 
 /// An operation's boundary as drawn over the stock, in the model's
-/// coordinates: each ring closed, its last point back to its first.
+/// coordinates: each ring closed, its last point back to its first, but for
+/// the open curves an engraving follows.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Outlines {
     /// The boundary as chosen: a 3D operation's machining boundary, a 2D
-    /// operation's outline.
+    /// operation's outline, the curves an engraving follows, the areas a
+    /// V-carving carves.
     pub boundary: Vec<Vec<[f32; 3]>>,
     /// Where the tool's centre may go against it (3D).
     pub limit: Vec<Vec<[f32; 3]>>,

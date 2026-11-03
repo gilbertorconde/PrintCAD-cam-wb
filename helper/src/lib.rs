@@ -271,7 +271,7 @@ pub(crate) fn execute(
             marks: marks(&ran, k, op, &drawn, elapsed),
             outlines: setup.operations.get(k).and_then(|spec| {
                 let uses = spec.strategy.uses();
-                if !(uses.boundary || uses.outline) {
+                if !(uses.boundary || uses.outline || uses.traces || uses.carves) {
                     return None;
                 }
                 let laid = prepared

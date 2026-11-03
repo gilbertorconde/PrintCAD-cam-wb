@@ -57,12 +57,12 @@ pub enum Containment {
     Outside,
 }
 
-/// Faces and edges picked on the models.
+/// Faces and edges picked on the models, and curves drawn beside them.
 ///
 /// What they mean is for the rest of the operation to say, which is why they live
 /// here and not with the strategy: a boundary or outline of the selection is
 /// their outline from above, a height can be measured from them, a drill's are
-/// the rims of its holes.
+/// the rims of its holes, an engraving's are what it follows.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Selection {
@@ -72,17 +72,82 @@ pub struct Selection {
     /// Edges picked.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub edges: Vec<FeatureRef>,
+    /// Curves drawn, a sketch's, in the coordinates the models are placed in.
+    /// They are on no model, so are not found again: they are what they say.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub curves: Vec<Curve>,
 }
 
 impl Selection {
     /// Whether nothing is picked.
     pub fn is_empty(&self) -> bool {
-        self.faces.is_empty() && self.edges.is_empty()
+        self.faces.is_empty() && self.edges.is_empty() && self.curves.is_empty()
     }
 
     /// Every pick, faces first.
     pub fn iter(&self) -> impl Iterator<Item = &FeatureRef> {
         self.faces.iter().chain(&self.edges)
+    }
+}
+
+/// A curve of lines and arcs, end to end from `start`, in the coordinates the
+/// models are placed in. It is closed when it ends where it starts. A spline
+/// comes as the lines that follow it within the job's tolerance.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Curve {
+    /// Where it starts.
+    pub start: [f64; 3],
+    /// Its pieces, in order, each from where the one before ends.
+    pub segments: Vec<Segment>,
+}
+
+/// One piece of a [`Curve`].
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum Segment {
+    /// The circular arc from where the curve is through `via` to `to`.
+    Arc {
+        /// A point on it between its ends.
+        via: [f64; 3],
+        /// Where it ends.
+        to: [f64; 3],
+    },
+    /// A straight line to `to`.
+    Line {
+        /// Where it ends.
+        to: [f64; 3],
+    },
+}
+
+impl Segment {
+    /// Where it ends.
+    pub fn to(&self) -> [f64; 3] {
+        match *self {
+            Segment::Arc { to, .. } | Segment::Line { to } => to,
+        }
+    }
+}
+
+impl Curve {
+    /// Where it ends.
+    pub fn end(&self) -> [f64; 3] {
+        self.segments.last().map_or(self.start, Segment::to)
+    }
+
+    /// Whether it ends where it starts, within `tolerance`.
+    pub fn closed(&self, tolerance: f64) -> bool {
+        let (a, b) = (self.start, self.end());
+        !self.segments.is_empty()
+            && (a[0] - b[0]).hypot(a[1] - b[1]).hypot(a[2] - b[2]) <= tolerance
+    }
+
+    /// Every point it gives: its start, and each segment's middle and end.
+    pub fn points(&self) -> impl Iterator<Item = [f64; 3]> + '_ {
+        std::iter::once(self.start).chain(self.segments.iter().flat_map(|s| match *s {
+            Segment::Arc { via, to } => vec![via, to],
+            Segment::Line { to } => vec![to],
+        }))
     }
 }
 
@@ -120,10 +185,12 @@ impl Default for MachiningBoundary {
 
 impl Operation {
     /// Whether what it cuts is its selection: a 2D outline or a 3D boundary of
-    /// it, or a drill's holes.
+    /// it, a drill's holes, or what an engraving follows or a V-carve cuts.
     pub fn cuts_selection(&self) -> bool {
         let uses = self.strategy.uses();
         uses.holes
+            || uses.traces
+            || uses.carves
             || (uses.outline && self.outline == Outline::Selection)
             || (uses.boundary && self.boundary.kind == Boundary::Selection)
     }

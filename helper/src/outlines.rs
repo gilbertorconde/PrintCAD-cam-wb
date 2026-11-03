@@ -2,12 +2,15 @@
 //! it: a 3D operation's machining boundary as chosen, where the tool's
 //! centre may go against it, and what the tool cuts outside the part; a 2D
 //! operation's outline at the height of what is picked in it, and what the
-//! tool cuts beside it (a band for a profile, all inside for a pocket).
+//! tool cuts beside it (a band for a profile, all inside for a pocket); the
+//! curves an engraving follows at its top, and the band the tool cuts along
+//! them; and the areas a V-carving carves, all of them cut.
 
 use cam_protocol::{CutPiece, Outlines};
 use camcraft_core::cutter::allowance::EffectiveTool;
 use camcraft_core::job::{Boundary, Job, Operation, StrategySpec};
 use camcraft_core::run::cutting_tool;
+use camcraft_core::setup::features::Picking;
 use camcraft_core::setup::frame::Frame;
 use camcraft_core::setup::{Bodies, Prepared, features};
 use camcraft_core::strategy::planar::{centre_offset, picked_pieces};
@@ -73,9 +76,67 @@ impl Ground<'_> {
             self.outline(op, tool.as_ref(), tolerance)
         } else if uses.boundary {
             self.boundary(op, tool.as_ref(), tolerance)
+        } else if uses.traces {
+            self.traces(op, tool.as_ref(), tolerance)
+        } else if uses.carves {
+            self.carved(op, tolerance)
         } else {
             None
         }
+    }
+
+    /// Where `op` cuts down from, its picks aside: its own top, or its
+    /// strategy's.
+    fn op_top(&self, op: &Operation) -> f64 {
+        op.levels_3d(&self.prepared.heights()).0
+    }
+
+    /// An engraving's curves at its top, open ones left open, and the band
+    /// the tool cuts along them.
+    fn traces(
+        &self,
+        op: &Operation,
+        tool: Option<&EffectiveTool>,
+        tolerance: f64,
+    ) -> Option<Outlines> {
+        let picking = Picking::new(&op.selection, self.prepared, self.bodies, tolerance);
+        let traces = picking.traces().ok()?;
+        let z = self.op_top(op);
+        let mut out = Outlines::default();
+        let mut lines = Vec::new();
+        for t in &traces {
+            let points: Vec<DVec2> = t.points(tolerance).iter().map(|p| p.truncate()).collect();
+            out.boundary.push(
+                points
+                    .iter()
+                    .map(|p| to_f32(self.frame.to_model(p.extend(z))))
+                    .collect(),
+            );
+            lines.push(points);
+        }
+        if let Some(tool) = tool {
+            let band = Region::around_polylines(&lines, tool.cutter_radius(), tolerance / 2.0);
+            out.cut = self.pieces(&band, z);
+        }
+        Some(out)
+    }
+
+    /// A V-carving's areas at its top, all of them cut.
+    fn carved(&self, op: &Operation, tolerance: f64) -> Option<Outlines> {
+        let area = features::boundary_shape(
+            Boundary::Selection,
+            &op.selection,
+            self.prepared,
+            self.bodies,
+            tolerance,
+        )
+        .ok()??;
+        let z = self.op_top(op);
+        Some(Outlines {
+            boundary: self.rings(&area, z),
+            limit: Vec::new(),
+            cut: self.pieces(&area, z),
+        })
     }
 
     fn boundary(

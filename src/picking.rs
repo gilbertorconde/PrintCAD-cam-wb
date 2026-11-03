@@ -2,7 +2,7 @@
 //! in the panel, and while it is, hovering shows what a click would take and
 //! a click takes it. An operation takes faces, and edges in loops (a click on
 //! an edge takes the loop it goes round at its height, shown before the
-//! click); a setup takes its work zero, a corner or the centre of a round
+//! click), or an engraving edges one at a time; a setup takes its work zero, a corner or the centre of a round
 //! edge.
 
 use printcad_bench_sdk::api::*;
@@ -35,6 +35,9 @@ pub struct Armed {
     /// The setup or operation picking, by id.
     pub feature: String,
     pub slot: Slot,
+    /// Edges are taken one at a time, not by the loop they go round: what
+    /// an engraving follows.
+    pub alone: bool,
     pub hover: Option<Hover>,
 }
 
@@ -88,13 +91,14 @@ fn face_loops(body: &str, at: [f32; 3]) -> Vec<Vec<[f32; 3]>> {
 /// The loop a click on `edge` takes, camcraft's way: of the loops of the two
 /// faces it runs between that hold it, the one that keeps flattest along
 /// `up`, the tool's axis: the edges joined to it end to end at its height.
-fn edge_loop(edge: &EdgeRef, up: [f32; 3]) -> Vec<[f32; 3]> {
+/// Taken `alone`, the edge itself.
+fn edge_loop(edge: &EdgeRef, up: [f32; 3], alone: bool) -> Vec<[f32; 3]> {
     let Some(names) = edge.faces else {
         return Vec::new();
     };
     let along = |p: &[f32; 3]| p[0] * up[0] + p[1] * up[1] + p[2] * up[2];
     // An edge that is not level is taken alone.
-    let level = along(&edge.direction).abs() < 0.1;
+    let level = !alone && along(&edge.direction).abs() < 0.1;
     let mut best: Option<(f32, Vec<[f32; 3]>)> = None;
     for name in names {
         let answer = host::call(
@@ -135,8 +139,8 @@ fn edge_loop(edge: &EdgeRef, up: [f32; 3]) -> Vec<[f32; 3]> {
 }
 
 /// What a click would take for `slot`, with the pointer at `pointer`, `up`
-/// being the setup's tool axis.
-pub fn hover(slot: Slot, pointer: &Pointer, up: [f32; 3]) -> Option<Hover> {
+/// being the setup's tool axis; edges `alone` or by their loops.
+pub fn hover(slot: Slot, pointer: &Pointer, up: [f32; 3], alone: bool) -> Option<Hover> {
     match slot {
         Slot::Faces => {
             let face = pointer.hover_face.as_ref()?;
@@ -152,7 +156,7 @@ pub fn hover(slot: Slot, pointer: &Pointer, up: [f32; 3]) -> Option<Hover> {
             Some(Hover::Edge {
                 body: edge.body.clone(),
                 at: edge.point,
-                round: edge_loop(edge, up),
+                round: edge_loop(edge, up, alone),
             })
         }
         Slot::Zero => {
@@ -234,6 +238,9 @@ pub fn draw(frame: &mut Frame, armed: &Armed, color: Rgb) {
     }
     frame.hud.footer.push(match armed.slot {
         Slot::Faces => "Click faces to pick them; click a picked one to take it out".into(),
+        Slot::Edges if armed.alone => "Click an edge to pick it; edges end to end are \
+                                       followed as one"
+            .into(),
         Slot::Edges => "Click an edge to pick the loop it goes round".into(),
         Slot::Zero => "Click a corner or a round edge for the work zero".into(),
     });

@@ -36,7 +36,7 @@ use crate::cutter::allowance::{Allowance, EffectiveTool};
 use crate::cutter::dropcutter::DropCutter;
 use crate::job::{Job, JobError, Operation, Setup, ToolSpec};
 use crate::path::simadapt::sim_moves;
-use crate::setup::features::Picking;
+use crate::setup::features::{FeatureError, Picking};
 use crate::setup::{Bodies, Prepared};
 
 pub use crate::path::toolpath::PLUNGE_RATIO;
@@ -136,8 +136,10 @@ pub fn run_prepared_planned(
         // Its picks, found once, however many of its settings read them.
         let picking = Picking::new(&op.selection, prepared, bodies, job.tolerance);
         let ctx = heights_of(op, &picking, &ctx)?;
-        // A drilling operation's picked edges are its holes, and a 2D one's
-        // outline is what it cuts round or clears, not a limit.
+        // A drilling operation's picked edges are its holes, a 2D one's
+        // outline is what it cuts round or clears, not a limit, an
+        // engraving's picks are what it follows, and a V-carving's what it
+        // carves.
         let uses = op.strategy.uses();
         let target = if uses.boundary {
             Target::Limit(
@@ -149,6 +151,17 @@ pub fn run_prepared_planned(
             Target::Areas(planar_areas(job, op, &picking, bodies, &ctx, &tool)?)
         } else if uses.holes {
             Target::Holes(drill_holes(job, op, prepared, bodies, &ctx)?)
+        } else if uses.traces {
+            Target::Traces(picking.traces().map_err(in_op(op))?)
+        } else if uses.carves {
+            if op.selection.is_empty() {
+                return Err(in_op(op)(FeatureError::NothingToCarve));
+            }
+            let area = picking
+                .boundary_shape(crate::job::Boundary::Selection)
+                .map_err(in_op(op))?
+                .unwrap_or_default();
+            Target::Carve(area)
         } else {
             // Facing works from the stock alone.
             Target::Limit(None)
@@ -198,9 +211,11 @@ pub fn run_prepared_planned(
 }
 
 /// The part as the setup's operations mean to leave it: cut past where one with
-/// negative stock to leave cut, which is then no gouge there, and nowhere else.
-/// Where each cut is the material it took down, between the stock before it and
-/// after (`keyframes`).
+/// negative stock to leave cut, which is then no gouge there, and nowhere else;
+/// and cut into where an engraving or a V-carving cut, as deep as it cut,
+/// since what they cut is drawn on the part, not modelled in it. Where each cut
+/// is the material it took down, between the stock before it and after
+/// (`keyframes`).
 fn cut_past(
     setup: &Setup,
     mut part: PartSurface,
@@ -209,7 +224,9 @@ fn cut_past(
     for (i, op) in setup.operations.iter().enumerate() {
         let leave = op.stock_to_leave();
         let (radial, axial) = (-leave.radial.min(0.0), -leave.axial.min(0.0));
-        if !op.enabled || (radial == 0.0 && axial == 0.0) {
+        let uses = op.strategy.uses();
+        let into = uses.traces || uses.carves;
+        if !op.enabled || (radial == 0.0 && axial == 0.0 && !into) {
             continue;
         }
         let (Some(before), Some(after)) = (keyframes.get(i), keyframes.get(i + 1)) else {
@@ -217,9 +234,15 @@ fn cut_past(
         };
         let (before, after) = (before.unpack()?, after.unpack()?);
         let (before, after) = (before.field(), after.field());
-        part = part.cut_past(radial, axial, |ix, iy| {
-            matches!((before.get(ix, iy), after.get(ix, iy)), (Some(b), Some(a)) if a < b - 1e-6)
-        });
+        let lowered = |ix, iy| match (before.get(ix, iy), after.get(ix, iy)) {
+            (Some(b), Some(a)) if a < b - 1e-6 => Some(a),
+            _ => None,
+        };
+        part = if into {
+            part.cut_into(lowered)
+        } else {
+            part.cut_past(radial, axial, |ix, iy| lowered(ix, iy).is_some())
+        };
     }
     Ok(part)
 }

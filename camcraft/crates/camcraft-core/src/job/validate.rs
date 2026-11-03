@@ -226,6 +226,13 @@ impl Job {
             for r in op.selection.iter() {
                 pick(format!("operation '{name}/{}'", op.name), &r.model, &r.at)?;
             }
+            // A curve is on no model: only its points are checked.
+            for at in op.selection.curves.iter().flat_map(|c| c.points()) {
+                if !at.iter().all(|v| v.is_finite()) {
+                    let owner = format!("operation '{name}/{}'", op.name);
+                    return Err(JobError::BadPick { owner, at });
+                }
+            }
         }
 
         running().try_for_each(|op| op.check(name, &self.tools))
@@ -518,6 +525,12 @@ impl Operation {
                     "greater than angle_from and at most a turn past it",
                 ));
             }
+        }
+        if let StrategySpec::Engrave { depth, .. } = self.strategy {
+            positive(&field("depth"), depth)?;
+        }
+        if let StrategySpec::VCarve { max_depth: Some(d) } = self.strategy {
+            positive(&field("max_depth"), d)?;
         }
         if let StrategySpec::Drill {
             peck,

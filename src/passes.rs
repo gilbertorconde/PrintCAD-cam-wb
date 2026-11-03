@@ -5,7 +5,7 @@
 
 use camcraft_core::job::{
     ContourOrder, FaceDirection, Finishing, Operation, PassOrder, RadialDirection, StrategySpec,
-    TabShape, Tabs, ThreadHand, ToolSpec,
+    TabShape, Tabs, ThreadHand, ToolKind, ToolSpec, TraceDirection,
 };
 use printcad_bench_sdk::api::*;
 use printcad_bench_sdk::serde_json::{self, Value};
@@ -53,6 +53,12 @@ pub struct PassesData {
     pub pitch: Opt,
     #[serde(default)]
     pub hand: ThreadHand,
+    /// How deep an engraving cuts below its top.
+    #[serde(default = "half")]
+    pub depth: f64,
+    /// The deepest a V-carving goes; the V's own full depth unless given.
+    #[serde(default)]
+    pub max_depth: Opt,
     pub tabs: bool,
     pub tab_shape: TabShape,
     pub tab_width: f64,
@@ -88,6 +94,8 @@ impl Default for PassesData {
             chip_break: Opt::default(),
             pitch: Opt::default(),
             hand: ThreadHand::default(),
+            depth: half(),
+            max_depth: Opt::default(),
             tabs: false,
             tab_shape: tabs.shape,
             tab_width: tabs.width,
@@ -99,11 +107,16 @@ impl Default for PassesData {
             finishing_feed: Opt::of(finishing.feed),
             finishing_repeat: finishing.repeat,
         };
-        for name in ["radial", "pocket-clearing", "face", "drill"] {
+        for name in ["radial", "pocket-clearing", "face", "drill", "engrave"] {
             out.read_strategy(&named(name));
         }
         out
     }
+}
+
+/// An engraving's depth in a document from before it had one: camcraft's.
+fn half() -> f64 {
+    0.5
 }
 
 fn named(name: &str) -> StrategySpec {
@@ -204,6 +217,8 @@ impl PassesData {
                 self.pitch = Opt::of(pitch);
                 self.hand = hand;
             }
+            StrategySpec::Engrave { depth, .. } => self.depth = depth,
+            StrategySpec::VCarve { max_depth } => self.max_depth = Opt::of(max_depth),
             _ => {}
         }
         if let StrategySpec::MorphedSpiral { centre, .. } = *s {
@@ -302,6 +317,8 @@ impl PassesData {
                 *pitch = self.pitch.get();
                 *hand = self.hand;
             }
+            StrategySpec::Engrave { depth, .. } => *depth = self.depth,
+            StrategySpec::VCarve { max_depth } => *max_depth = self.max_depth.get(),
             _ => {}
         }
         let uses = op.strategy.uses();
@@ -367,6 +384,12 @@ impl PassesData {
             "Pass extension",
             Dim::Length,
         );
+        add(
+            matches!(s, StrategySpec::Engrave { .. }),
+            "depth",
+            "Depth",
+            Dim::Length,
+        );
         let tabs = uses.tabs && self.tabs;
         add(tabs, "tab_width", "Tab width", Dim::Length);
         add(tabs, "tab_height", "Tab height", Dim::Length);
@@ -393,6 +416,12 @@ impl PassesData {
                 Dim::Length,
             ),
             (drill && self.dwell.given, "dwell", "Dwell, s", Dim::Number),
+            (
+                matches!(s, StrategySpec::VCarve { .. }) && self.max_depth.given,
+                "max_depth",
+                "Deepest",
+                Dim::Length,
+            ),
             (
                 matches!(s, StrategySpec::Drill { .. }) && tap,
                 "pitch",
@@ -441,6 +470,11 @@ const FACE_DIRECTIONS: [(FaceDirection, &str); 3] = [
 const HANDS: [(ThreadHand, &str); 2] = [
     (ThreadHand::Right, "Right-hand: G84"),
     (ThreadHand::Left, "Left-hand: G74"),
+];
+const TRACE_DIRECTIONS: [(TraceDirection, &str); 3] = [
+    (TraceDirection::Climb, "Climb"),
+    (TraceDirection::Conventional, "Conventional"),
+    (TraceDirection::AsDrawn, "As drawn"),
 ];
 const TAB_SHAPES: [(TabShape, &str); 2] = [
     (TabShape::Rectangular, "Rectangular"),
@@ -584,12 +618,69 @@ pub fn strategy_rows(data: &OperationData, tool: Option<&ToolSpec>, feature: &st
     if let StrategySpec::Drill { .. } = s {
         drill_rows(&mut rows, data, tool, feature);
     }
+    if let StrategySpec::Engrave {
+        direction, reverse, ..
+    } = s
+    {
+        rows.push(length("passes/depth", "Depth", p.depth));
+        rows.push(pick(
+            "passes/trace_direction",
+            "Direction",
+            &TRACE_DIRECTIONS,
+            direction,
+        ));
+        rows.push(Widget::Toggle {
+            id: "passes/reverse".into(),
+            label: "Reverse".into(),
+            on: reverse,
+        });
+        rows.push(Widget::Text {
+            text: "Climbing goes round each closed curve as cutting what it encloses \
+                   climbs; an open curve runs as drawn. Each curve ramps down along \
+                   itself at the ramp angle, round a closed one and back and forth \
+                   along an open one, a stepdown at most each time, then once at \
+                   the depth."
+                .into(),
+            mono: false,
+        });
+    }
+    if let StrategySpec::VCarve { .. } = s {
+        let full = match tool.and_then(v_depth) {
+            Some(d) => format!("the V's full depth, {d:.2} mm"),
+            None => "the V's full depth".into(),
+        };
+        optional_row(
+            &mut rows,
+            "passes",
+            "max_depth",
+            "Deepest",
+            &full,
+            p.max_depth,
+            Dim::Length,
+            feature,
+        );
+        rows.push(Widget::Text {
+            text: "The V goes down the middle of each area, as deep as it has to be to \
+                   reach the walls. Where the area is wider than that at the deepest, it \
+                   cuts the walls that deep and leaves the floor between them flat, \
+                   and says so: clear it with a flat end mill."
+                .into(),
+            mono: false,
+        });
+    }
     rows.push(length(
         "passes/max_cut_step",
         "Deepest step",
         p.max_cut_step,
     ));
     rows
+}
+
+/// How deep `tool`'s V goes before it is as wide as the tool, if it is a V.
+pub fn v_depth(tool: &ToolSpec) -> Option<f64> {
+    let half = (tool.angle? / 2.0).to_radians();
+    (tool.kind == ToolKind::Cone && half > 0.0)
+        .then(|| (tool.diameter - tool.tip_diameter).max(0.0) / 2.0 / half.tan())
 }
 
 /// A drilling operation's rows: its pecks, how they break the chip and the
@@ -771,6 +862,7 @@ fn start(field: &str, data: &OperationData, tool: Option<&ToolSpec>) -> Option<f
         "pitch" => coarse_pitch(d),
         "finishing_stepover" => 0.1 * d,
         "finishing_feed" => data.feed,
+        "max_depth" => 1.0,
         _ => return None,
     })
 }
@@ -858,6 +950,21 @@ pub fn passes_event(
             );
         }
         ("flat_areas", PanelEvent::Toggle { on, .. }) => return set(flat_areas_mut(s), Some(*on)),
+        ("trace_direction", PanelEvent::Choice { index, .. }) => {
+            let StrategySpec::Engrave { direction, .. } = s else {
+                return false;
+            };
+            return set(
+                Some(direction),
+                TRACE_DIRECTIONS.get(*index).map(|(x, _)| *x),
+            );
+        }
+        ("reverse", PanelEvent::Toggle { on, .. }) => {
+            let StrategySpec::Engrave { reverse, .. } = s else {
+                return false;
+            };
+            return set(Some(reverse), Some(*on));
+        }
         ("hand", PanelEvent::Choice { index, .. }) => {
             return set(
                 Some(&mut data.passes.hand),

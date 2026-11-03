@@ -31,7 +31,7 @@ use camcraft_post::op::{ProgramSpec, lower};
 use camcraft_post::profile::Profile;
 use camcraft_post::readback;
 use camcraft_post::render::render;
-use common::{chip_breaking, drilling, fixture, spec, tapping};
+use common::{chip_breaking, drilling, engraving, fixture, spec, tapping};
 
 fn check(profile_name: &str) {
     let profile = Profile::builtin(profile_name)
@@ -162,6 +162,32 @@ fn drilling_cycles_are_stable() {
         &tapping(ThreadHand::Left),
         "masso-tap-left",
     );
+}
+
+/// An engraving's arcs are written as arcs: round the circle `G2` or `G3` by
+/// its centre, and down it as a helix, each half turn a line.
+#[test]
+fn an_engraving_writes_its_arcs_as_arcs() {
+    let p = Profile::builtin("grbl").unwrap().unwrap();
+    let spec = ProgramSpec {
+        strategy: "engrave".into(),
+        ..spec()
+    };
+    check_against(&p, &engraving(), &spec, "grbl-engrave");
+    let ops = lower(&engraving(), &spec).unwrap();
+    let (text, _) = render(&ops, &p, "golden");
+    let arcs: Vec<&str> = text
+        .lines()
+        .filter(|l| l.split_whitespace().any(|w| w == "G2" || w == "G3"))
+        .collect();
+    // Climbing round with a clockwise spindle: clockwise, G2, a half turn a
+    // line, down the helix then round at the depth.
+    assert!(arcs.len() >= 4, "{text}");
+    assert!(
+        arcs.iter().all(|l| l.contains("G2") && l.contains('I')),
+        "{arcs:?}"
+    );
+    assert!(arcs.iter().any(|l| l.contains('Z')), "no helix: {arcs:?}");
 }
 
 /// Every builtin profile must have a golden file. Adding a profile without one

@@ -41,14 +41,26 @@ panels, the drawing and the helper that runs camcraft.
 - **Operations**, after Fusion's: adaptive and pocket clearing; parallel,
   scallop, contour, flat, spiral, radial and morphed spiral finishing; 2D
   profiles and pockets; facing; drilling: at once, in pecks backing out,
-  breaking the chip, or tapping, right- or left-hand. An operation
+  breaking the chip, or tapping, right- or left-hand; engraving along curves
+  and edges, open or closed, at a depth (0.5 mm unless set), each ramped
+  down along itself, round a closed one and back and forth along an open
+  one, so it never lifts between its levels, its arcs written as `G2` and
+  `G3`; and V-carving closed areas, letters among them, with a V-bit down
+  their middle, as deep as each is wide: past its deepest it cuts the walls
+  that deep and leaves the flat floor between, and says so, for a flat end
+  mill to clear. An operation
   (`io.github.gilbertorconde.cam.operation`) belongs to a setup and runs in the
   document's order, each against what the one before left. Drag one in the
   tree to run it sooner or later, or under another setup.
 - **Picking in the view,** as camcraft's: a pick row in the panel arms it,
   and while it is armed, hovering shows what a click takes. An operation
   takes faces, and edges by the loop they go round at their height (an edge
-  that is not level, alone); a click on a picked one takes it out. A setup's
+  that is not level, alone; an engraving's, each alone, and those end to
+  end followed as one); a click on a picked one takes it out. It can take
+  the document's sketches too, ticked in its panel: what their closed loops
+  enclose, or the loops themselves for an engraving. A sketch's text is its
+  letters' outlines. Its open curves close nothing, and a package cannot
+  read them, so only picked edges give an engraving an open curve. A setup's
   work zero can be a corner or a round edge's centre picked on the part.
 - **What an operation machines, drawn** while it is edited: its boundary as
   chosen, where the tool's centre may go against it, and, hatched, what the
@@ -132,6 +144,10 @@ local disc = cam.setup{bodies = {"<body id>"}, stock = "cylinder", axis = "tool"
                        diameter = 80, length = 25}  -- or margin = 3 round the bodies
 local rough = cam.operation{setup = setup.feature, strategy = "adaptive", tool = "1/4 upcut",
                            heights = {bottom_from = "model-top", bottom = -6}}
+local name = cam.operation{setup = setup.feature, strategy = "engrave", tool = "60° V-bit",
+                           sketches = {"<sketch id>"}, passes = {depth = 0.4}}
+local letters = cam.operation{setup = setup.feature, strategy = "v-carve", tool = "60° V-bit",
+                              sketches = {"<sketch id>"}, passes = {max_depth = {value = 2, given = true}}}
 cam.status{id = setup.feature}          -- queued, running, ready (with its checks), failed
 cam.import_tools{text = fusion_csv}     -- a Fusion tool library, exported as CSV
 cam.add_post{text = profile_toml}       -- a machine profile of your own

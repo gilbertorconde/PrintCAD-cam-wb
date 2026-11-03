@@ -126,6 +126,30 @@ impl PartSurface {
         self
     }
 
+    /// The part as an operation that cuts into it on purpose means to leave
+    /// it, an engraving or a carving: in each cell of the grid it is judged on
+    /// that `cut` gives a height for, no higher than that. What it cuts there
+    /// is then no gouge, and only there.
+    #[must_use]
+    pub fn cut_into(mut self, cut: impl Fn(u32, u32) -> Option<f64> + Sync) -> Self {
+        let (nx, ny, at) = (self.field.nx(), self.field.ny(), self.at);
+        self.field
+            .data_mut()
+            .par_chunks_mut(nx as usize)
+            .zip(0..ny)
+            .for_each(|(row, wy)| {
+                for (wx, slot) in (0..nx).zip(row) {
+                    if slot.is_nan() {
+                        continue;
+                    }
+                    if let Some(low) = cut(wx + at.0, wy + at.1) {
+                        *slot = slot.min(narrow(low));
+                    }
+                }
+            });
+        self
+    }
+
     /// The part's height at cell `(ix, iy)` of the grid it is judged on, if it
     /// has one there.
     pub(super) fn at_cell(&self, ix: i64, iy: i64) -> Option<f64> {
