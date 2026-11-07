@@ -3,7 +3,7 @@
 
 use cam_protocol::{Level, Run};
 use camcraft_core::job::{
-    Boundary, Containment, CutDirection, Depths, HeightRef, Leave, Outline, ProfileSide,
+    Boundary, Containment, CutDirection, Depths, HeightRef, Leave, Outline, ProfileSide, Programs,
     StrategySpec, ToolKind, ToolSpec,
 };
 use camcraft_core::setup::frame::{Axis, Orientation};
@@ -423,9 +423,15 @@ fn verdict(run: &Run, only: Option<usize>) -> Vec<Widget> {
                 for w in &op.warnings {
                     out.push(note(NoteKind::Warning, w.clone()));
                 }
-                if let Some(p) = &op.program {
+                // Its own, or, posted as one, its setup's.
+                if let Some(p) = op.program.as_ref().or(run.program.as_ref()) {
                     out.push(Widget::Value {
-                        label: "Program".into(),
+                        label: if p.is_setups() {
+                            "Setup's program"
+                        } else {
+                            "Program"
+                        }
+                        .into(),
                         value: format!("{} lines, {}", p.lines, p.post),
                         mono: true,
                     });
@@ -445,6 +451,14 @@ fn verdict(run: &Run, only: Option<usize>) -> Vec<Widget> {
                     }
                 }
             }
+        }
+        None if run.program.is_some() => {
+            out.push(button(
+                "save_setup",
+                "Save G-code…",
+                ButtonStyle::Primary,
+                run.passed,
+            ));
         }
         None => {
             let programs = run
@@ -673,6 +687,20 @@ pub fn setup_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
                 posts.clone(),
                 posts.iter().position(|p| *p == setup.post).unwrap_or(0),
             ),
+            choice(
+                "programs",
+                "Programs",
+                vec!["One for the setup".into(), "One per operation".into()],
+                usize::from(setup.programs == Programs::Operation),
+            ),
+            number(
+                "program_number",
+                "Program number",
+                setup.program_number,
+                Dim::Number,
+                0,
+                id,
+            ),
             number(
                 "tolerance",
                 "Tolerance",
@@ -841,6 +869,7 @@ pub fn setup_event(cam: &mut Cam, id: &str, event: PanelEvent) {
                 "wcs_x" => &mut setup.wcs_x,
                 "wcs_y" => &mut setup.wcs_y,
                 "wcs_z" => &mut setup.wcs_z,
+                "program_number" => &mut setup.program_number,
                 "tolerance" => &mut setup.tolerance,
                 _ => return,
             };
@@ -920,6 +949,13 @@ pub fn setup_event(cam: &mut Cam, id: &str, event: PanelEvent) {
                     // The one it had, which its post has not got.
                     None => return,
                 },
+                "programs" => {
+                    setup.programs = if index == 1 {
+                        Programs::Operation
+                    } else {
+                        Programs::Setup
+                    };
+                }
                 "new_strategy" => {
                     cam.new_strategy = index.min(STRATEGIES.len() - 1);
                     return;
@@ -991,6 +1027,10 @@ pub fn setup_event(cam: &mut Cam, id: &str, event: PanelEvent) {
         PanelEvent::Toggle { id: t, on } if t == "show_material" => cam.show_material = on,
         PanelEvent::Button { id: b } if b == "generate" => cam.refresh(id, true),
         PanelEvent::Button { id: b } if b == "stop" => cam.runs.stop(id),
+        PanelEvent::Button { id: b } if b == "save_setup" => match cam.program_of(id, false) {
+            Ok(p) => Cam::save(&p),
+            Err(e) => cam.hint = Some(e),
+        },
         PanelEvent::Button { id: b } if b == "save_all" => {
             let programs: Result<Vec<_>, String> = operations_of(id)
                 .iter()

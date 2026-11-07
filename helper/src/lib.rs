@@ -18,7 +18,7 @@ use cam_protocol::{
     Cylinder, Finding, HeightPlane, IDENTITY, Level, Mark, Material, OperationRun, Program,
     Request, Run, Stroke, VERSION,
 };
-use camcraft_core::job::{HeightContext, Operation, Outline};
+use camcraft_core::job::{HeightContext, Operation, Outline, Programs};
 use camcraft_core::path::toolpath::{MoveRole, Toolpath};
 use camcraft_core::run::Made;
 use camcraft_core::run::{PLUNGE_RATIO, Stage};
@@ -28,11 +28,11 @@ use camcraft_geom::mesh::Aabb;
 use camcraft_import::native::load_native;
 use camcraft_post::op::lower_counted;
 use camcraft_post::profile::Profile;
-use camcraft_post::render::render_dated;
+use camcraft_post::render::{Title, render_program};
 use camcraft_session::checks::Level as CheckLevel;
 use camcraft_session::{
     Model, Models, Ran, custom_gcode, load_profile, next_tools, parse_job, program_spec,
-    run_setup_planned, travel_check,
+    run_setup_planned, setup_program, setup_program_name, travel_check,
 };
 use camcraft_sim::stock::{Axis, Block};
 use glam::{DAffine3, DMat4, DVec2, DVec3};
@@ -198,6 +198,10 @@ pub(crate) fn execute(
     let custom = custom_gcode(setup, &ran.result.operations);
     let next = next_tools(&ran.result.operations);
     let date = today();
+    // One program for the setup, or one an operation, each numbered on
+    // from the setup's.
+    let one_each = setup.programs == Programs::Operation;
+    let mut numbered = 0u32;
     for (k, op) in ran.result.operations.iter().enumerate() {
         let heights = match (setup.operations.get(k), stock_box) {
             _ if op.made == Made::Text => Vec::new(),
@@ -223,7 +227,7 @@ pub(crate) fn execute(
             Made::Text => "custom-gcode",
         };
         let mut drawn = strokes(&op.path, &frame, tolerance, request.max_points);
-        let program = if op.made.has_paths() {
+        let program = if one_each && op.made.has_paths() {
             let name = camcraft_session::program_name(&setup.name, k, &op.name);
             // As `camcraft_session::program` posts it, keeping which move
             // each line is of.
@@ -238,13 +242,20 @@ pub(crate) fn execute(
             });
             match posted {
                 Ok((ops, made)) => {
-                    let (text, report) = render_dated(&ops, &profile, &name, Some(&date));
+                    let title = Title {
+                        name: &name,
+                        number: setup.number.saturating_add(numbered),
+                        date: Some(&date),
+                    };
+                    numbered += 1;
+                    let (text, report) = render_program(&ops, &profile, &title);
                     Some(Program {
                         name,
                         extension: profile.extension.clone(),
                         post: profile.name.clone(),
                         lines: usize::try_from(report.lines).unwrap_or(usize::MAX),
                         moves: line_moves(&made, &report.op_lines, report.lines),
+                        operations: Vec::new(),
                         text,
                     })
                 }
@@ -337,6 +348,43 @@ pub(crate) fn execute(
         draws.push(drawn);
     }
 
+    // The setup's program, every operation in it.
+    let program = if one_each || !ran.result.operations.iter().any(|op| op.made.has_paths()) {
+        None
+    } else {
+        let name = setup_program_name(&setup.name);
+        let title = Title {
+            name: &name,
+            number: setup.number,
+            date: Some(&date),
+        };
+        match setup_program(setup, &ran.result, &profile, &title) {
+            Ok(p) => {
+                let (operations, moves) = line_moments(&p.made, &p.report.op_lines, p.report.lines);
+                Some(Program {
+                    name,
+                    extension: profile.extension.clone(),
+                    post: profile.name.clone(),
+                    lines: usize::try_from(p.report.lines).unwrap_or(usize::MAX),
+                    moves,
+                    operations,
+                    text: p.text,
+                })
+            }
+            Err((k, e)) => {
+                let op = ran.result.operations.get(k).map_or("", |o| o.name.as_str());
+                refused.push(Finding {
+                    level: Level::Fail,
+                    code: "post".into(),
+                    text: format!("post {} {op}: {e}", profile.name),
+                    operation: Some(k),
+                    at_move: None,
+                });
+                None
+            }
+        }
+    };
+
     let stock = stock_box
         .map(|b| corners(&frame, b))
         .unwrap_or([[0.0; 3]; 8]);
@@ -363,6 +411,7 @@ pub(crate) fn execute(
         operations,
         material: material(&ran),
         playback: playback::playback(&job, &ran, &draws),
+        program,
         seconds: started.elapsed().as_secs_f64(),
         timing: cam_protocol::timing(draws.iter().map(|d| d.times.as_slice())),
     };
@@ -507,6 +556,34 @@ pub(crate) fn line_moves(made: &[usize], op_lines: &[u64], lines: u64) -> Vec<u3
         out.push(now);
     }
     out
+}
+
+/// For each of a setup's program's `lines`, the operation it is of and how
+/// many of that operation's moves are made once it has run: `made` says it
+/// of each instruction, and `op_lines` how many lines are written once each
+/// is. The header's lines are the first operation's, making none.
+pub(crate) fn line_moments(
+    made: &[(usize, usize)],
+    op_lines: &[u64],
+    lines: u64,
+) -> (Vec<u32>, Vec<u32>) {
+    let size = usize::try_from(lines).unwrap_or(0);
+    let (mut ops, mut moves) = (Vec::with_capacity(size), Vec::with_capacity(size));
+    let whole = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+    let mut now = made.first().map_or((0, 0), |&(k, _)| (whole(k), 0));
+    for (&(k, n), upto) in made.iter().zip(op_lines) {
+        now = (whole(k), whole(n));
+        while (ops.len() as u64) < *upto {
+            ops.push(now.0);
+            moves.push(now.1);
+        }
+    }
+    // The footer's.
+    while (ops.len() as u64) < lines {
+        ops.push(now.0);
+        moves.push(now.1);
+    }
+    (ops, moves)
 }
 
 /// Today's date, as `2026-11-03`, in UTC: what a program's `@date@` says.
