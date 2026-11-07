@@ -1235,3 +1235,97 @@ fn machine_travel_is_checked_where_the_work_offset_is() {
         note.text
     );
 }
+
+/// The sled base's M5 hole, picked by its rims, threaded with a thread mill:
+/// it passes, its thread a run of helixes, `G3` with a `Z`, climbing up the
+/// hole, in the setup's one program; and with the same diameter, the
+/// sled's other holes as wide are threaded too.
+#[test]
+fn a_thread_is_milled_in_every_hole_as_wide() {
+    let job = |same: bool| {
+        format!(
+            r#"
+version = 1
+tolerance = 0.1
+
+[tools.mill]
+kind = "thread-mill"
+diameter = 3.5
+number = 8
+rpm = 12000
+tip_length = 0.3
+pitch_range = [0.5, 1.0]
+
+[[model]]
+name = "sled"
+path = "sled"
+
+[[stock]]
+name = "block"
+kind = "around-models"
+margin = [2.0, 2.0, 2.0]
+
+[[setup]]
+name = "top"
+models = ["sled"]
+stocks = ["block"]
+post = "grbl"
+
+[[setup.operation]]
+name = "threads"
+strategy = "thread"
+pitch = 0.8
+diameter = 5.08
+tool = "mill"
+passes = {{ feed = 300.0 }}
+holes = {{ same_diameter = {same} }}
+selection = {{ edges = [
+    {{ model = "sled", index = 86, at = [228.11, 195.25, 40.894] }},
+    {{ model = "sled", index = 100, at = [228.11, 195.25, 1.016] }},
+] }}
+"#
+        )
+    };
+    let request = |job: String| Request {
+        version: VERSION,
+        job,
+        shapes: BTreeMap::from([(
+            "sled".to_string(),
+            Shape {
+                text: native("sled_base.step"),
+                placement: IDENTITY,
+            },
+        )]),
+        max_points: 0,
+        post: None,
+        read: None,
+    };
+    let helixes = |same: bool| {
+        let run = answer(&request(job(same))).unwrap();
+        for f in run.findings.iter().filter(|f| f.level == Level::Fail) {
+            eprintln!("{f:?}");
+        }
+        assert!(run.passed, "same diameter {same}");
+        // Posted as the setup's one program, as a setup is unless asked.
+        assert!(run.operations[0].program.is_none());
+        let program = run.program.as_ref().unwrap();
+        let up: Vec<&str> = program
+            .text
+            .lines()
+            .filter(|l| l.split_whitespace().any(|w| w == "G3") && l.contains('Z'))
+            .collect();
+        assert!(!up.is_empty(), "{}", program.text);
+        assert!(
+            !program
+                .text
+                .lines()
+                .any(|l| l.split_whitespace().any(|w| w == "G2")),
+            "climbing up, right-hand: {}",
+            program.text
+        );
+        up.len()
+    };
+    let one = helixes(false);
+    let all = helixes(true);
+    assert!(all > one, "{one} then {all}");
+}

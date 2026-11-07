@@ -3,8 +3,8 @@
 
 use cam_protocol::{Level, Run};
 use camcraft_core::job::{
-    Boundary, Containment, CutDirection, Depths, HeightRef, Leave, Outline, ProfileSide, Programs,
-    StrategySpec, ToolKind, ToolSpec,
+    Boundary, Containment, CutDirection, Depths, HeightRef, HoleOrder, Leave, Outline, ProfileSide,
+    Programs, StrategySpec, ToolKind, ToolSpec,
 };
 use camcraft_core::setup::frame::{Axis, Orientation};
 use camcraft_post::profile::Profile;
@@ -264,6 +264,7 @@ fn kind_label(kind: ToolKind) -> &'static str {
         ToolKind::Bullnose => "bull-nose",
         ToolKind::Cone => "V-bit",
         ToolKind::Drill => "drill",
+        ToolKind::ThreadMill => "thread mill",
     }
 }
 
@@ -1094,10 +1095,19 @@ fn conventional_mut(s: &mut StrategySpec) -> Option<&mut bool> {
     match s {
         StrategySpec::Profile { conventional, .. }
         | StrategySpec::Pocket { conventional }
-        | StrategySpec::PocketClearing { conventional, .. } => Some(conventional),
+        | StrategySpec::PocketClearing { conventional, .. }
+        | StrategySpec::Bore { conventional, .. }
+        | StrategySpec::Circular { conventional, .. }
+        | StrategySpec::Thread { conventional, .. } => Some(conventional),
         _ => None,
     }
 }
+
+const HOLE_ORDERS: [(HoleOrder, &str); 3] = [
+    (HoleOrder::Nearest, "Nearest first"),
+    (HoleOrder::XThenY, "By X, then Y, back and forth"),
+    (HoleOrder::AsPicked, "As picked"),
+];
 
 const DIRECTIONS: [(CutDirection, &str); 3] = [
     (CutDirection::Climb, "Climb"),
@@ -1660,7 +1670,11 @@ pub fn operation_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
         };
         geometry.push(Widget::Pick {
             id: "faces".into(),
-            label: "Faces".into(),
+            label: if uses.holes {
+                "Hole walls".into()
+            } else {
+                "Faces".into()
+            },
             value: Some(format!("{} picked", data.faces.len())),
             armed: armed(Slot::Faces),
         });
@@ -1685,6 +1699,29 @@ pub fn operation_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
             ButtonStyle::Small,
             !(data.faces.is_empty() && data.edges.is_empty() && data.sketches.is_empty()),
         ));
+        if uses.holes {
+            let holes = data.operation.holes;
+            geometry.push(Widget::Toggle {
+                id: "same_diameter".into(),
+                label: "Every hole as wide (same diameter)".into(),
+                on: holes.same_diameter,
+            });
+            geometry.push(choice(
+                "hole_order",
+                "Order",
+                HOLE_ORDERS.iter().map(|(_, l)| l.to_string()).collect(),
+                HOLE_ORDERS
+                    .iter()
+                    .position(|(x, _)| *x == holes.order)
+                    .unwrap_or(0),
+            ));
+            geometry.push(note(
+                NoteKind::Info,
+                "Pick a hole's wall, or its rim. With the same diameter, every hole of the \
+                 setup's bodies as wide as one picked, along the tool, is taken too; a \
+                 boss's, every boss as wide.",
+            ));
+        }
     }
     if !geometry.is_empty() {
         panel.push(group("Geometry", geometry));
@@ -1853,6 +1890,7 @@ pub fn operation_event(cam: &mut Cam, id: &str, event: PanelEvent) {
         PanelEvent::Toggle { id: t, on } => match t.as_str() {
             "enabled" => data.operation.enabled = on,
             "multiple_depths" => data.multiple_depths = on,
+            "same_diameter" => data.operation.holes.same_diameter = on,
             "conventional" => {
                 if let Some(c) = conventional_mut(&mut data.operation.strategy) {
                     *c = on;
@@ -1975,6 +2013,11 @@ pub fn operation_event(cam: &mut Cam, id: &str, event: PanelEvent) {
                     (HeightKey::Top, r) => heights.top_from = r,
                     (HeightKey::Bottom, r) => heights.bottom_from = r,
                     _ => return,
+                }
+            }
+            "hole_order" => {
+                if let Some((x, _)) = HOLE_ORDERS.get(index) {
+                    data.operation.holes.order = *x;
                 }
             }
             "outline" => {

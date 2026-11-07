@@ -12,7 +12,7 @@
 
 use glam::{DVec2, DVec3, dvec3};
 
-use crate::job::ThreadHand;
+use crate::job::{HoleOrder, ThreadHand};
 use crate::path::toolpath::{MoveRole, Toolpath};
 use crate::setup::features::Chain;
 use crate::strategy::nesting::nearest;
@@ -75,6 +75,28 @@ impl Tap {
     }
 }
 
+/// A round feature picked, or found by its diameter: a hole, or a round
+/// boss, which is milled from outside.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Round {
+    /// Where it is, its top and bottom, and its radius.
+    pub hole: Hole,
+    /// Whether it is a boss: the material inside its circle, not outside.
+    pub boss: bool,
+}
+
+/// A round edge: its circle, in the setup's frame, and whether the round
+/// face it bounds is a boss's.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rim {
+    /// Its centre.
+    pub centre: DVec3,
+    /// Its radius.
+    pub radius: f64,
+    /// Whether the material is inside it.
+    pub boss: bool,
+}
+
 /// Why picked edges are not holes.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum HoleError {
@@ -96,6 +118,23 @@ pub enum HoleError {
         model: String,
         /// Its number there.
         edge: u32,
+    },
+    /// A picked face is not a round hole's or boss's wall standing along the
+    /// tool.
+    #[error("face {face} of '{model}' is not the round wall of a hole or a boss along the tool")]
+    NotRoundFace {
+        /// The model.
+        model: String,
+        /// Its number there.
+        face: u32,
+    },
+    /// A boss was picked for what only holes have.
+    #[error("the round at ({x:.3}, {y:.3}) is a boss, not a hole")]
+    Boss {
+        /// Where.
+        x: f64,
+        /// Where.
+        y: f64,
     },
     /// A hole would be drilled upward, or not at all.
     #[error("the hole at ({x:.3}, {y:.3}) has its bottom at or above its top")]
@@ -120,13 +159,39 @@ pub fn holes(
     bottom: f64,
     tol: f64,
 ) -> Result<Vec<Hole>, HoleError> {
+    let rim = |c: &Chain| {
+        circle(c).map(|(centre, radius)| Rim {
+            centre,
+            radius,
+            boss: false,
+        })
+    };
+    Ok(rounds(chains, rim, bottom, tol)?
+        .into_iter()
+        .map(|r| r.hole)
+        .collect())
+}
+
+/// [`holes`], each a hole or a boss as `rim` says of its rims: a hole and a
+/// boss on one axis, a tube's, are two.
+pub fn rounds(
+    chains: &[Chain],
+    rim: impl Fn(&Chain) -> Option<Rim>,
+    bottom: f64,
+    tol: f64,
+) -> Result<Vec<Round>, HoleError> {
     if chains.is_empty() {
         return Err(HoleError::NothingPicked);
     }
     // Each axis, with the heights of its rims and the widest radius.
-    let mut axes: Vec<(DVec2, Vec<f64>, f64)> = Vec::new();
+    let mut axes: Vec<(DVec2, bool, Vec<f64>, f64)> = Vec::new();
     for chain in chains {
-        let Some((centre, radius)) = circle(chain) else {
+        let Some(Rim {
+            centre,
+            radius,
+            boss,
+        }) = rim(chain)
+        else {
             return Err(HoleError::NotRound {
                 model: chain.model.clone(),
                 edge: chain.edge,
@@ -143,16 +208,19 @@ pub fn holes(
             });
         }
         let at = centre.truncate();
-        match axes.iter_mut().find(|(a, _, _)| a.distance(at) <= tol) {
-            Some((_, zs, r)) => {
+        match axes
+            .iter_mut()
+            .find(|(a, b, _, _)| *b == boss && a.distance(at) <= tol)
+        {
+            Some((_, _, zs, r)) => {
                 zs.push(centre.z);
                 *r = r.max(radius);
             }
-            None => axes.push((at, vec![centre.z], radius)),
+            None => axes.push((at, boss, vec![centre.z], radius)),
         }
     }
     axes.into_iter()
-        .map(|(at, zs, radius)| {
+        .map(|(at, boss, zs, radius)| {
             let top = zs.iter().copied().fold(f64::MIN, f64::max);
             let low = zs.iter().copied().fold(f64::MAX, f64::min);
             let bottom = if top - low > tol.max(1e-6) {
@@ -163,31 +231,71 @@ pub fn holes(
             if bottom >= top {
                 return Err(HoleError::NoDepth { x: at.x, y: at.y });
             }
-            Ok(Hole {
-                at,
-                top,
-                bottom,
-                radius,
+            Ok(Round {
+                hole: Hole {
+                    at,
+                    top,
+                    bottom,
+                    radius,
+                },
+                boss,
             })
         })
         .collect()
 }
 
+/// The order to take holes at `points` in, as `order` says, by their
+/// places in it: two within `tol` of each other along X are in one column.
+pub fn hole_order(points: &[DVec2], order: HoleOrder, tol: f64) -> Vec<usize> {
+    let mut idx: Vec<usize> = (0..points.len()).collect();
+    let at = |i: usize| points.get(i).copied().unwrap_or_default();
+    match order {
+        HoleOrder::AsPicked => idx,
+        HoleOrder::Nearest => {
+            let mut out = Vec::with_capacity(idx.len());
+            let Some(&first) = idx.first() else {
+                return out;
+            };
+            let mut here = at(first);
+            while !idx.is_empty() {
+                let i = idx.remove(nearest(&idx, |&i| at(i).distance_squared(here)));
+                here = at(i);
+                out.push(i);
+            }
+            out
+        }
+        HoleOrder::XThenY => {
+            idx.sort_by(|&a, &b| at(a).x.total_cmp(&at(b).x).then(a.cmp(&b)));
+            // Columns: holes within the tolerance of the column's first along X.
+            let mut columns: Vec<Vec<usize>> = Vec::new();
+            for i in idx {
+                match columns.last_mut() {
+                    Some(c) if c.first().is_some_and(|&f| at(i).x - at(f).x <= tol) => c.push(i),
+                    _ => columns.push(vec![i]),
+                }
+            }
+            // Up the first column, down the next: no run back across.
+            let mut out = Vec::with_capacity(points.len());
+            for (k, mut c) in columns.into_iter().enumerate() {
+                c.sort_by(|&a, &b| at(a).y.total_cmp(&at(b).y).then(a.cmp(&b)));
+                if k % 2 == 1 {
+                    c.reverse();
+                }
+                out.extend(c);
+            }
+            out
+        }
+    }
+}
+
 /// `holes` in drilling order: the first, then always the nearest not yet drilled.
 /// Ties go to the earlier, so the order does not depend on anything but the holes.
 pub fn nearest_first(holes: &[Hole]) -> Vec<Hole> {
-    let mut left: Vec<Hole> = holes.to_vec();
-    let mut out = Vec::with_capacity(left.len());
-    let mut at = match left.first() {
-        Some(h) => h.at,
-        None => return out,
-    };
-    while !left.is_empty() {
-        let h = left.remove(nearest(&left, |h| h.at.distance_squared(at)));
-        at = h.at;
-        out.push(h);
-    }
-    out
+    let points: Vec<DVec2> = holes.iter().map(|h| h.at).collect();
+    hole_order(&points, HoleOrder::Nearest, 0.0)
+        .into_iter()
+        .filter_map(|i| holes.get(i).copied())
+        .collect()
 }
 
 /// What a drilling operation did, for a post that writes canned cycles.

@@ -57,6 +57,34 @@ pub enum Containment {
     Outside,
 }
 
+/// How a hole operation (drilling, boring, circular milling, threading)
+/// finds its holes beyond those picked, and the order it takes them in:
+/// Fusion's Select Same Diameter and its ordering.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HolePicking {
+    /// Every hole of the setup's models as wide as one picked, its axis
+    /// along the tool's, taken as well; a boss's, every boss as wide.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub same_diameter: bool,
+    /// The order they are cut in.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub order: HoleOrder,
+}
+
+/// The order a hole operation takes its holes in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HoleOrder {
+    /// The first picked, then always the nearest not yet cut.
+    #[default]
+    Nearest,
+    /// In columns along X, each column along Y, up one and down the next.
+    XThenY,
+    /// As picked, those found by their diameter after.
+    AsPicked,
+}
+
 /// Faces and edges picked on the models, and curves drawn beside them.
 ///
 /// What they mean is for the rest of the operation to say, which is why they live

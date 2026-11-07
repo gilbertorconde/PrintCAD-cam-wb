@@ -237,6 +237,7 @@ impl Row<'_> {
             "bull nose end mill" => ToolKind::Bullnose,
             "chamfer mill" | "spot drill" => ToolKind::Cone,
             "drill" => ToolKind::Drill,
+            "thread mill" => ToolKind::ThreadMill,
             "" => return Err("no tool type".into()),
             other => return Err(format!("'{other}' tools are not supported yet")),
         };
@@ -254,12 +255,20 @@ impl Row<'_> {
             angle: match kind_text.to_ascii_lowercase().as_str() {
                 "chamfer mill" => self.number("tool_taperAngle").map(|a| 2.0 * a),
                 "spot drill" | "drill" => self.number("tool_tipAngle"),
+                "thread mill" => self.number("tool_threadProfileAngle"),
                 _ => None,
             },
             tip_diameter: match kind {
                 ToolKind::Cone => self.scaled("tool_tipDiameter").unwrap_or(0.0),
                 _ => 0.0,
             },
+            tip_length: 0.0,
+            // Fusion's thread mill has the one pitch it cuts.
+            pitch_range: match kind {
+                ToolKind::ThreadMill => self.scaled("tool_threadPitch").map(|p| [p, p]),
+                _ => None,
+            },
+            teeth: None,
             number: self.whole("tool_number").unwrap_or(1),
             rpm,
             comment: self.text("tool_description").unwrap_or_default(),

@@ -12,6 +12,7 @@ use crate::setup::PrepareError;
 use crate::setup::features::FeatureError;
 use crate::strategy::StrategyError;
 use crate::strategy::drilling::HoleError;
+use crate::strategy::holes::MillError;
 use crate::strategy::reach::ReachError;
 
 /// A setup that could not be run.
@@ -63,6 +64,14 @@ pub enum RunError {
         /// Why.
         source: HoleError,
     },
+    /// A hole could not be bored, milled or threaded as asked.
+    #[error("operation '{op}': {source}")]
+    Milling {
+        /// Which operation.
+        op: String,
+        /// Why.
+        source: MillError,
+    },
     /// The stock could not be built.
     #[error("cannot build stock: {0}")]
     Stock(#[from] StockError),
@@ -111,6 +120,12 @@ impl OperationError for FeatureError {
 impl OperationError for HoleError {
     fn named(self, op: String) -> RunError {
         RunError::Holes { op, source: self }
+    }
+}
+
+impl OperationError for MillError {
+    fn named(self, op: String) -> RunError {
+        RunError::Milling { op, source: self }
     }
 }
 

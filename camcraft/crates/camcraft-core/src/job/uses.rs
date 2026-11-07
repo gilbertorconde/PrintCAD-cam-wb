@@ -185,6 +185,49 @@ impl StrategySpec {
                 top: None,
                 bottom: Some(HeightRef::ModelBottom),
             },
+            // Its picks are the holes, as a drill's: each bored down its own
+            // helix, to its own bottom, at the cutting feed, leaving stock on
+            // the wall, and finished there.
+            StrategySpec::Bore { .. } => Uses {
+                boundary: false,
+                holes: true,
+                stepover: false,
+                depths: Depths::None,
+                finishing: true,
+                links: Links::Own,
+                stay_down: false,
+                reach: Reach::Tools(0),
+                ramp: false,
+                top: None,
+                ..cuts_loops
+            },
+            // Its picks are the holes and bosses, as a drill's: each cleared
+            // in circles a stepover apart, level by level, each level entered
+            // down a helix at the ramp angle.
+            StrategySpec::Circular { .. } => Uses {
+                boundary: false,
+                holes: true,
+                links: Links::Own,
+                stay_down: false,
+                reach: Reach::Tools(0),
+                top: None,
+                ..cuts_loops
+            },
+            // Its picks are the holes and bosses, as a drill's: each threaded
+            // to its own bottom, the thread's depth its own.
+            StrategySpec::Thread { .. } => Uses {
+                boundary: false,
+                holes: true,
+                stepover: false,
+                stock_to_leave: Leave::None,
+                depths: Depths::None,
+                links: Links::Own,
+                stay_down: false,
+                reach: Reach::Tools(0),
+                ramp: false,
+                top: None,
+                ..cuts_loops
+            },
             // Its picks are what it follows, each ramped down along itself,
             // in its own order, from the part's top: where a sketch drawn on
             // it lies. It cuts to size.
@@ -275,8 +318,9 @@ pub struct Uses {
     pub boundary: bool,
     /// An outline it cuts round or clears: a 2D strategy's.
     pub outline: bool,
-    /// Holes: its picks are what it drills, not an area, and no height is
-    /// measured from them, since each hole goes to its own bottom.
+    /// Holes: its picks are the holes (or round bosses) it drills, bores,
+    /// mills or threads, not an area, and no height is measured from them,
+    /// since each hole goes to its own bottom.
     pub holes: bool,
     /// Curves: its picks, edges and curves, open or closed, are what the
     /// tool's centre follows.

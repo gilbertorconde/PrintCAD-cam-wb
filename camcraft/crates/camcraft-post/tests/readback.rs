@@ -18,7 +18,7 @@ use camcraft_post::readback::check;
 use camcraft_post::readback::check_setup;
 use camcraft_post::render::render;
 use camcraft_post::setup::{Joining, Section, lower_setup};
-use common::{chip_breaking, drilling, fixture, rigid_tapping, setup, spec, tapping};
+use common::{chip_breaking, drilling, fixture, milled_holes, rigid_tapping, setup, spec, tapping};
 use glam::{DVec3, dvec3};
 
 fn post(path: &Toolpath, spec: &ProgramSpec, profile: &Profile) -> String {
@@ -113,10 +113,15 @@ fn arcs() -> Toolpath {
     t
 }
 
-/// Every profile, set every way, in both units: the fixture and the arcs.
+/// Every profile, set every way, in both units: the fixture, the arcs, and
+/// holes bored, milled round and threaded, all helixes.
 #[test]
 fn every_post_reads_back_to_its_path() {
-    let paths = [("the fixture", fixture()), ("the arcs", arcs())];
+    let paths = [
+        ("the fixture", fixture()),
+        ("the arcs", arcs()),
+        ("the milled holes", milled_holes()),
+    ];
     for (name, profile) in profiles() {
         for units in [ProgramUnits::Mm, ProgramUnits::Inch] {
             let spec = ProgramSpec { units, ..spec() };
@@ -160,12 +165,23 @@ fn sections<'a>(ops: &'a [(Toolpath, ProgramSpec)], specs: &'a [ProgramSpec]) ->
 
 /// A setup of three operations on two tools as one program, every profile
 /// set every way, in both units, with optional stops and without, and
-/// holes drilled as cycles after them: each operation cut as it was posted,
+/// holes drilled as cycles after them, then bored, milled round and
+/// threaded with a tool of their own: each operation cut as it was posted,
 /// the tool going between them only up, across clear and down.
 #[test]
 fn every_post_reads_back_a_setup_as_one_program() {
     let mut ops = setup();
     ops.push((Toolpath::new(), drilling(Some(2.0), None)));
+    ops.push((
+        milled_holes(),
+        ProgramSpec {
+            op_name: "holes".into(),
+            strategy: "bore".into(),
+            tool: 5,
+            tool_comment: "6mm flat".into(),
+            ..spec()
+        },
+    ));
     for (name, profile) in profiles() {
         for units in [ProgramUnits::Mm, ProgramUnits::Inch] {
             for stop in [false, true] {

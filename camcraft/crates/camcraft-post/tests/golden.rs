@@ -32,7 +32,9 @@ use camcraft_post::profile::Profile;
 use camcraft_post::readback;
 use camcraft_post::render::{Title, render, render_dated, render_program};
 use camcraft_post::setup::{Joining, Section, lower_setup};
-use common::{chip_breaking, drilling, engraving, fixture, setup, slot, spec, tapping};
+use common::{
+    chip_breaking, drilling, engraving, fixture, milled_holes, setup, slot, spec, tapping,
+};
 use glam::dvec3;
 
 fn check(profile_name: &str) {
@@ -366,6 +368,48 @@ fn an_engraving_writes_its_arcs_as_arcs() {
         "{arcs:?}"
     );
     assert!(arcs.iter().any(|l| l.contains('Z')), "no helix: {arcs:?}");
+}
+
+/// Holes bored, a boss milled round and a thread milled, on two posts: each
+/// helix written as `G2` or `G3` with a `Z`, a half turn a line, round a
+/// hole counter-clockwise to climb, round a boss clockwise.
+#[test]
+fn milled_holes_write_their_helixes_as_arcs() {
+    let spec = ProgramSpec {
+        strategy: "bore".into(),
+        ..spec()
+    };
+    for (post, file) in [("grbl", "grbl-holes"), ("linuxcnc", "linuxcnc-holes")] {
+        let p = Profile::builtin(post).unwrap().unwrap();
+        check_against(&p, &milled_holes(), &spec, file);
+        let ops = lower(&milled_holes(), &spec).unwrap();
+        let (text, _) = render(&ops, &p, "golden");
+        let arcs: Vec<&str> = text
+            .lines()
+            .filter(|l| l.split_whitespace().any(|w| w == "G2" || w == "G3"))
+            .collect();
+        let helixes = arcs.iter().filter(|l| l.contains('Z')).count();
+        assert!(helixes > 10, "{post}: {helixes} helixes\n{text}");
+        assert!(arcs.iter().any(|l| l.contains("G2")) && arcs.iter().any(|l| l.contains("G3")));
+    }
+    let p = Profile::builtin("fanuc").unwrap().unwrap();
+    check_against(&p, &milled_holes(), &spec, "fanuc-holes");
+    // Klartext: each helix `CP` round its centre by an angle and down or up
+    // by `IZ`, its way `DR+` or `DR-`, and a level circle `C` about a `CC`.
+    let p = Profile::builtin("heidenhain").unwrap().unwrap();
+    check_against(&p, &milled_holes(), &spec, "heidenhain-holes");
+    let (text, _) = render(&lower(&milled_holes(), &spec).unwrap(), &p, "golden");
+    let helixes: Vec<&str> = text
+        .lines()
+        .filter(|l| l.split_whitespace().nth(1) == Some("CP"))
+        .collect();
+    assert!(helixes.len() > 10, "{text}");
+    assert!(
+        helixes
+            .iter()
+            .all(|l| l.contains("IPA") && l.contains("IZ"))
+    );
+    assert!(helixes.iter().any(|l| l.contains("DR+")) && helixes.iter().any(|l| l.contains("DR-")));
 }
 
 /// A slot along a line and a half turn, one way in two levels: the half

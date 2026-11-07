@@ -59,6 +59,7 @@ pub fn single_operation(spec: &FinishSpec, model: ModelDef) -> Job {
         ToolKind::Bullnose => "bullnose",
         ToolKind::Cone => "cone",
         ToolKind::Drill => "drill",
+        ToolKind::ThreadMill => "thread-mill",
     };
     let tool = ToolSpec {
         kind: spec.tool,
@@ -84,6 +85,7 @@ pub fn single_operation(spec: &FinishSpec, model: ModelDef) -> Job {
         tool: Some(TOOL.into()),
         preset: None,
         selection: Default::default(),
+        holes: Default::default(),
         boundary: Default::default(),
         outline: Default::default(),
         transform: Default::default(),

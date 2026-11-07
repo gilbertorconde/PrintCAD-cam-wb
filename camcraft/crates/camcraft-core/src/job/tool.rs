@@ -32,6 +32,20 @@ pub struct ToolSpec {
     /// Diameter of a cone's flat tip; zero comes to a point.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub tip_diameter: f64,
+    /// How far a thread mill's lowest tooth is above its end, in millimetres:
+    /// its tip, below the teeth. The tooth cuts the thread; the end is where
+    /// its path is.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub tip_length: f64,
+    /// The finest and coarsest pitch a thread mill's teeth cut, in
+    /// millimetres a turn; any when not given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pitch_range: Option<[f64; 2]>,
+    /// A thread mill's rows of teeth, a pitch apart: one for a single-form
+    /// mill, more for a multi-form one, which cuts that many turns of the
+    /// thread each time round. One when not given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub teeth: Option<u32>,
     /// Tool number in the program.
     #[serde(default = "one_u32")]
     pub number: u32,
@@ -140,6 +154,9 @@ impl Default for ToolSpec {
             corner: 0.0,
             angle: None,
             tip_diameter: 0.0,
+            tip_length: 0.0,
+            pitch_range: None,
+            teeth: None,
             number: one_u32(),
             rpm: default_rpm(),
             comment: String::new(),
@@ -254,6 +271,10 @@ pub enum ToolKind {
     Cone,
     /// A twist drill: its point is a cone, 118° unless its angle says otherwise.
     Drill,
+    /// A thread mill: teeth of the thread's form round a neck, `diameter`
+    /// across their points, cutting a thread as it goes round a helix. It
+    /// cuts only threads.
+    ThreadMill,
 }
 
 /// The point angle a drill has when none is given.
@@ -266,7 +287,7 @@ impl ToolSpec {
         match self.kind {
             ToolKind::Ball => self.diameter / 2.0,
             ToolKind::Bullnose => self.corner,
-            ToolKind::Flat | ToolKind::Cone | ToolKind::Drill => 0.0,
+            ToolKind::Flat | ToolKind::Cone | ToolKind::Drill | ToolKind::ThreadMill => 0.0,
         }
     }
 
@@ -283,6 +304,21 @@ impl ToolSpec {
             .as_ref()
             .map_or(0.0, |h| h.segments.iter().map(|s| s.length).sum());
         Some(out + holder)
+    }
+
+    /// How many turns of a thread a thread mill cuts each time round: its
+    /// rows of teeth, one unless given.
+    pub fn threads_per_turn(&self) -> u32 {
+        self.teeth.unwrap_or(1).max(1)
+    }
+
+    /// Why a thread mill cannot cut a thread of `pitch`, if it cannot: the
+    /// pitch is outside its range.
+    pub fn pitch_problem(&self, pitch: f64) -> Option<String> {
+        let [fine, coarse] = self.pitch_range?;
+        (pitch < fine - 1e-9 || pitch > coarse + 1e-9).then(|| {
+            format!("a {pitch} mm pitch is outside the thread mill's {fine} to {coarse} mm")
+        })
     }
 
     /// The preset called `name`.
@@ -319,6 +355,30 @@ impl ToolSpec {
         }
         if self.rpm == 0 {
             bad("rpm", "spindle speed must be greater than zero".into());
+        }
+        if self.kind == ToolKind::ThreadMill {
+            if self.teeth == Some(0) {
+                bad(
+                    "teeth",
+                    "a thread mill has at least one row of teeth".into(),
+                );
+            }
+            if let Some([fine, coarse]) = self.pitch_range
+                && !(is_positive(fine) && is_positive(coarse) && fine <= coarse)
+            {
+                bad(
+                    "pitch_range",
+                    format!(
+                        "the finest pitch, {fine}, must be more than 0 and no more than the coarsest, {coarse}"
+                    ),
+                );
+            }
+            if !(self.tip_length >= 0.0 && self.tip_length.is_finite()) {
+                bad(
+                    "tip_length",
+                    format!("must be 0 or more, got {}", self.tip_length),
+                );
+            }
         }
         if self.flutes == Some(0) {
             bad("flutes", "a cutter has at least one flute".into());
@@ -442,6 +502,11 @@ impl ToolSpec {
                 let angle = self.angle.unwrap_or(DRILL_POINT);
                 Cone::new(r, 0.0, (angle / 2.0).to_radians()).map(Cutter::from)
             }
+            // What the material sees, seen from above: a disc its teeth's
+            // width, swept round the thread. A height field has no undercut,
+            // so the groove the teeth cut in the wall is taken whole, as a
+            // flat end mill its size takes it.
+            ToolKind::ThreadMill => Flat::new(r).map(Cutter::from),
         }
     }
 }

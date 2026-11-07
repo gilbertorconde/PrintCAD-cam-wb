@@ -222,6 +222,67 @@ pub enum StrategySpec {
         #[serde(default, skip_serializing_if = "is_default")]
         hand: ThreadHand,
     },
+    /// Holes bored with an end mill: down a helix, `pitch` a turn, round
+    /// once at the bottom, then out to the wall in finishing passes there
+    /// ([`Operation::finishing`](super::Operation::finishing)), each in and
+    /// out along an arc. Climbing unless asked. Picked as a drill's holes
+    /// are. Fusion's Bore ([`crate::strategy::holes::bore`]).
+    Bore {
+        /// How far down each turn of the helix goes, in millimetres.
+        #[serde(default = "default_bore_pitch", skip_serializing_if = "is_bore_pitch")]
+        pitch: f64,
+        /// Cut conventional rather than climb.
+        #[serde(default, skip_serializing_if = "is_default")]
+        conventional: bool,
+    },
+    /// Holes and round bosses milled in circles, level by level a stepdown
+    /// apart: a hole from its middle out to its wall, a boss from `boss_width`
+    /// out from it in to it, a stepover apart, each level entered down a
+    /// helix at the ramp angle and its last circle left along an arc. Picked
+    /// as a drill's holes are. Fusion's Circular
+    /// ([`crate::strategy::holes::circular`]).
+    Circular {
+        /// Cut conventional rather than climb.
+        #[serde(default, skip_serializing_if = "is_default")]
+        conventional: bool,
+        /// How far out from a boss its material goes, in millimetres: what is
+        /// cleared in from. One circle round it when zero.
+        #[serde(default, skip_serializing_if = "is_default")]
+        boss_width: f64,
+    },
+    /// Threads milled with a thread mill, in holes or on bosses: round a helix
+    /// at the pitch, from the thread's bottom up or its top down as climbing
+    /// and the hand say, in and out along arcs, in radial passes each a part
+    /// of the thread's depth deeper, the last once more if asked. A
+    /// multi-form mill cuts as many turns of the thread as it has rows of
+    /// teeth each time round. Picked as a drill's holes are. Fusion's Thread
+    /// ([`crate::strategy::holes::thread`]).
+    Thread {
+        /// Millimetres a turn.
+        #[serde(
+            default = "default_thread_pitch",
+            skip_serializing_if = "is_thread_pitch"
+        )]
+        pitch: f64,
+        /// Which way it turns.
+        #[serde(default, skip_serializing_if = "is_default")]
+        hand: ThreadHand,
+        /// Its major diameter, in millimetres: a hole's, which is the hole
+        /// plus the thread's depth either side, or a boss's own, when not
+        /// given.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        diameter: Option<f64>,
+        /// How many radial passes the thread's depth is cut in. Not
+        /// `passes`, which every operation's own are called beside it.
+        #[serde(default = "one", skip_serializing_if = "is_one")]
+        radial_passes: u32,
+        /// The last pass cut twice, for a tool that springs from the wall.
+        #[serde(default, skip_serializing_if = "is_default")]
+        spring_pass: bool,
+        /// Cut conventional rather than climb.
+        #[serde(default, skip_serializing_if = "is_default")]
+        conventional: bool,
+    },
     /// The tool's centre run along curves and edges, open or closed, `depth`
     /// below the top: an engraving, a groove, a chamfer with a V-bit. Fusion's
     /// Trace and Engrave. Arcs are cut as arcs. Each curve ramps down along
@@ -321,6 +382,9 @@ impl StrategySpec {
             StrategySpec::Pocket { .. } => "pocket",
             StrategySpec::Face { .. } => "face",
             StrategySpec::Drill { .. } => "drill",
+            StrategySpec::Bore { .. } => "bore",
+            StrategySpec::Circular { .. } => "circular",
+            StrategySpec::Thread { .. } => "thread",
             StrategySpec::Engrave { .. } => "engrave",
             StrategySpec::VCarve { .. } => "v-carve",
             StrategySpec::Slot { .. } => "slot",
@@ -347,7 +411,10 @@ impl StrategySpec {
         match *self {
             StrategySpec::Profile { conventional, .. }
             | StrategySpec::Pocket { conventional }
-            | StrategySpec::PocketClearing { conventional, .. } => conventional,
+            | StrategySpec::PocketClearing { conventional, .. }
+            | StrategySpec::Bore { conventional, .. }
+            | StrategySpec::Circular { conventional, .. }
+            | StrategySpec::Thread { conventional, .. } => conventional,
             StrategySpec::Adaptive { direction, .. }
             | StrategySpec::Scallop { direction, .. }
             | StrategySpec::Contour { direction, .. }
@@ -479,7 +546,7 @@ pub enum ChamferSide {
     Flipped,
 }
 
-/// Which way a tapped thread turns.
+/// Which way a thread turns: a tapped one's, or a milled one's.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ThreadHand {
@@ -655,6 +722,38 @@ fn is_climb(d: &CutDirection) -> bool {
 #[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_ninety(v: &f64) -> bool {
     (*v - 90.0).abs() < f64::EPSILON
+}
+
+/// A millimetre a turn: Fusion's bore's pitch.
+fn default_bore_pitch() -> f64 {
+    1.0
+}
+
+// A signature serde's `skip_serializing_if` requires.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_bore_pitch(v: &f64) -> bool {
+    (*v - 1.0).abs() < f64::EPSILON
+}
+
+/// A millimetre a turn: an M6's coarse pitch.
+fn default_thread_pitch() -> f64 {
+    1.0
+}
+
+// A signature serde's `skip_serializing_if` requires.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_thread_pitch(v: &f64) -> bool {
+    (*v - 1.0).abs() < f64::EPSILON
+}
+
+fn one() -> u32 {
+    1
+}
+
+// A signature serde's `skip_serializing_if` requires.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_one(v: &u32) -> bool {
+    *v == 1
 }
 
 /// Half a millimetre: deep enough to read, shallow enough for a fine V-bit

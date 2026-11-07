@@ -14,6 +14,7 @@ use crate::strategy::adaptive::AdaptiveReport;
 use crate::strategy::drilling::DrillReport;
 use crate::strategy::engrave::EngraveReport;
 use crate::strategy::flat::FlatReport;
+use crate::strategy::holes::HoleReport;
 use crate::strategy::morph::MorphedSpiralReport;
 use crate::strategy::parallel::ParallelReport;
 use crate::strategy::planar::PlanarReport;
@@ -56,6 +57,8 @@ pub enum StrategyDetail {
     Face(PlanarReport),
     /// Drilling.
     Drill(DrillReport),
+    /// Boring, circular milling or threading.
+    Holes(HoleReport),
     /// Engraving along curves.
     Engrave(EngraveReport),
     /// V-carving down the middle of areas.

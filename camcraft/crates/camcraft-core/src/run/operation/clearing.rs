@@ -364,28 +364,3 @@ pub(super) fn level_circles(prepared: &Prepared, bodies: &Bodies<'_>) -> Vec<(DV
     }
     out
 }
-
-/// The holes a drilling operation's picked rims make, in the setup's frame, in the
-/// order they are drilled.
-pub(in crate::run) fn drill_holes(
-    job: &Job,
-    op: &Operation,
-    prepared: &Prepared,
-    bodies: &Bodies<'_>,
-    ctx: &HeightContext,
-) -> Result<Vec<Hole>, RunError> {
-    let chains =
-        picked_chains(&op.selection, prepared, bodies, job.tolerance).map_err(in_op(op))?;
-    let circle = |c: &Chain| {
-        let body = bodies.get(c.model.as_str())?;
-        match body.topology().edge(c.edge)?.kind {
-            EdgeKind::Circle(circle) => {
-                Some((prepared.frame.to_setup(circle.center), circle.radius))
-            }
-            _ => None,
-        }
-    };
-    let (_, bottom) = op.levels_3d(ctx);
-    let found = holes(&chains, circle, bottom, job.tolerance.max(0.01)).map_err(in_op(op))?;
-    Ok(nearest_first(&found))
-}
