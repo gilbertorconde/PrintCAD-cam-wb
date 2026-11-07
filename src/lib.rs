@@ -58,6 +58,8 @@ const NEW_OPERATION: &str = "new_operation";
 const GENERATE: &str = "generate";
 const EDIT: &str = "edit";
 const ADD_OPERATION: &str = "add_operation";
+const TURN_OFF: &str = "turn_off";
+const TURN_ON: &str = "turn_on";
 
 const SETUP: &str = "setup";
 const OPERATION: &str = "operation";
@@ -67,6 +69,7 @@ const ADD_POST: &str = "add_post";
 const RUN: &str = "run";
 const STATUS: &str = "status";
 const GCODE: &str = "gcode";
+const ENABLE: &str = "enable";
 
 /// The package's id for `suffix`.
 fn id(suffix: &str) -> String {
@@ -210,6 +213,34 @@ fn operations_of(setup: &str) -> Vec<(Node, OperationData)> {
             (data.setup.as_deref() == Some(setup)).then_some((n, data))
         })
         .collect()
+}
+
+/// Whether feature `id`, a setup or an operation, runs.
+fn runs(id: &str) -> Option<bool> {
+    setup_node(id)
+        .map(|(_, d)| d.enabled)
+        .or_else(|| operation_node(id).map(|(_, d)| d.operation.enabled))
+}
+
+/// Turn feature `id`, a setup or an operation, on or off. An operation off is
+/// left out of its setup's run, so what comes after it cuts as if it were
+/// not there; a setup off is not run at all. Either is hidden while off, so
+/// the tree greys it and nothing of it is drawn, and shown again when on.
+fn set_enabled(id: &str, on: bool) -> Result<(), String> {
+    if let Some((_, mut data)) = setup_node(id) {
+        data.enabled = on;
+        host::set_feature_data(id, data.to_value())?;
+    } else if let Some((_, mut data)) = operation_node(id) {
+        data.operation.enabled = on;
+        host::set_feature_data(id, data.to_value())?;
+    } else {
+        return Err("no setup or operation by that id".into());
+    }
+    host::call(
+        calls::SET_FEATURE_VISIBLE,
+        json!({ "id": id, "visible": on }),
+    )
+    .map(|_| ())
 }
 
 /// The request that runs setup `id`, or why it cannot run.
@@ -723,6 +754,12 @@ impl Cam {
             self.runs.forget(id);
             return;
         };
+        // Turned off, it has no run, and what it had is gone with it.
+        if !setup.enabled {
+            self.runs.forget(id);
+            host::redraw();
+            return;
+        }
         match request_for(&node, &setup) {
             Ok(request) => {
                 let operations = operations_of(id).into_iter().map(|(n, _)| n.id).collect();
@@ -741,6 +778,17 @@ impl Cam {
     /// cannot be looked up then: the run says which of its operations this
     /// is.
     fn status_of(&self, node: &Node) -> FeatureStatus {
+        let off = if node.kind == SETUP_KIND {
+            SetupData::from(&node.data).is_some_and(|d| !d.enabled)
+        } else {
+            OperationData::from(&node.data).is_some_and(|d| !d.operation.enabled)
+        };
+        if off {
+            return status(
+                FeatureState::NotRun,
+                "Turned off: not run, simulated, checked or posted",
+            );
+        }
         let (setup, op) = if node.kind == SETUP_KIND {
             (Some(node.id.clone()), None)
         } else {
@@ -910,13 +958,21 @@ impl Cam {
     /// one; or of setup `op`, posted as one; when the setup has run.
     fn program_of(&self, op: &str, force: bool) -> Result<cam_protocol::Program, String> {
         let (node, setup) = match operation_node(op) {
-            Some((node, data)) => (
-                Some(node),
-                data.setup.ok_or("The operation is in no setup.")?,
-            ),
+            Some((node, data)) => {
+                if !data.operation.enabled {
+                    return Err(format!("{} is turned off.", node.name));
+                }
+                (
+                    Some(node),
+                    data.setup.ok_or("The operation is in no setup.")?,
+                )
+            }
             None if setup_node(op).is_some() => (None, op.to_string()),
             None => return Err(format!("no operation or setup {op}")),
         };
+        if runs(&setup) == Some(false) {
+            return Err("The setup is turned off.".into());
+        }
         let computed = self.runs.get(&setup).ok_or("Its setup has not been run.")?;
         let run = match &computed.state {
             State::Ready(run) => run,
@@ -1263,6 +1319,12 @@ impl Bench for Cam {
                              placeholders filled",
                         ),
                         param("name", ParamKind::String, false, "the operation's name"),
+                        param(
+                            "enabled",
+                            ParamKind::Bool,
+                            false,
+                            "false makes it turned off (see enable)",
+                        ),
                     ],
                     returns: "{feature}".into(),
                     notes: vec![
@@ -1414,6 +1476,24 @@ impl Bench for Cam {
                     read_only: true,
                     ..Default::default()
                 },
+                Command {
+                    id: id(ENABLE),
+                    summary: "Turn a setup or an operation off, or on again".into(),
+                    params: vec![
+                        param("id", ParamKind::Id, true, "the setup or the operation"),
+                        param("enabled", ParamKind::Bool, true, "false to turn it off"),
+                    ],
+                    returns: "{feature, enabled}".into(),
+                    notes: vec![
+                        "An operation turned off stays in its setup, but is not run, \
+                         simulated, checked or posted: the operations after it cut the \
+                         material as if it were not there. A setup turned off is not run \
+                         at all. Either is hidden while off, and shown when turned on."
+                            .into(),
+                    ],
+                    see_also: vec![id(OPERATION), id(RUN)],
+                    ..Default::default()
+                },
             ],
             length_keys: [
                 "margin_side",
@@ -1448,18 +1528,22 @@ impl Bench for Cam {
     fn feature_info(&self, node: &Node) -> FeatureInfo {
         let status = Some(self.status_of(node));
         if node.kind == SETUP_KIND {
+            let on = SetupData::from(&node.data).is_none_or(|d| d.enabled);
             return FeatureInfo {
-                icon: "setup".into(),
+                icon: if on { "setup" } else { "setup-off" }.into(),
                 kind_label: "CAM setup".into(),
                 family_label: "CAM".into(),
                 status,
                 ..Default::default()
             };
         }
-        let label = OperationData::from(&node.data)
+        let data = OperationData::from(&node.data);
+        let label = data
+            .as_ref()
             .map_or("CAM operation", |d| data::strategy_label(&d.strategy()));
+        let on = data.is_none_or(|d| d.operation.enabled);
         FeatureInfo {
-            icon: "operation".into(),
+            icon: if on { "operation" } else { "operation-off" }.into(),
             kind_label: label.into(),
             family_label: "CAM".into(),
             status,
@@ -1877,6 +1961,9 @@ impl Bench for Cam {
                     }
                 }
                 host::set_feature_data(&id, data.to_value())?;
+                if args.get("enabled").and_then(Value::as_bool) == Some(false) {
+                    set_enabled(&id, false)?;
+                }
                 self.refresh(&setup, false);
                 Ok(json!({ "feature": id }))
             }
@@ -1919,6 +2006,16 @@ impl Bench for Cam {
                     .setup_of(&id)
                     .ok_or("no setup or operation by that id")?;
                 Ok(self.status(&setup))
+            }
+            ENABLE => {
+                let id = text("id").unwrap_or_default();
+                let on = args
+                    .get("enabled")
+                    .and_then(Value::as_bool)
+                    .ok_or("enabled: true or false")?;
+                set_enabled(&id, on)?;
+                self.refresh_for(&id, false);
+                Ok(json!({ "feature": id, "enabled": on }))
             }
             GCODE => {
                 let id = text("id").unwrap_or_default();
@@ -2222,15 +2319,30 @@ impl Bench for Cam {
             enabled: true,
             ..Default::default()
         };
+        // Off, it is turned on again; on, off.
+        let toggle = |f: &str, what: &str, icon: &str| match runs(f) {
+            Some(false) => MenuItem {
+                hint: Some(format!("Run the {what} again, and post it")),
+                ..item(TURN_ON, "Turn on", icon)
+            },
+            _ => MenuItem {
+                hint: Some(format!(
+                    "Keep the {what}, but leave it out: not run, simulated, checked or posted"
+                )),
+                ..item(TURN_OFF, "Turn off", &format!("{icon}-off"))
+            },
+        };
         match scope {
             MenuScope::TreeFeature(f) if setup_node(f).is_some() => vec![
                 item(EDIT, "Edit setup", "setup"),
                 item(ADD_OPERATION, "Add operation", "operation"),
                 item(GENERATE, "Generate", "generate"),
+                toggle(f, "setup", "setup"),
             ],
             MenuScope::TreeFeature(f) if operation_node(f).is_some() => vec![
                 item(EDIT, "Edit operation", "operation"),
                 item(GENERATE, "Generate its setup", "generate"),
+                toggle(f, "operation", "operation"),
             ],
             _ => Vec::new(),
         }
@@ -2243,6 +2355,18 @@ impl Bench for Cam {
         match suffix(command) {
             Some(EDIT) => self.open(feature, false),
             Some(GENERATE) => self.refresh_for(feature, true),
+            Some(s @ (TURN_OFF | TURN_ON)) => {
+                let on = s == TURN_ON;
+                match set_enabled(feature, on) {
+                    Ok(()) => {
+                        host::request(Request::JournalLabel {
+                            label: if on { "Turn on" } else { "Turn off" }.into(),
+                        });
+                        self.refresh_for(feature, false);
+                    }
+                    Err(e) => host::error(&e),
+                }
+            }
             Some(ADD_OPERATION) => {
                 let strategy = STRATEGIES
                     .get(self.new_strategy)
@@ -2291,6 +2415,9 @@ impl Cam {
     }
 
     fn status(&self, setup: &str) -> Value {
+        if runs(setup) == Some(false) {
+            return json!({"state": "off"});
+        }
         let Some(c) = self.runs.get(setup) else {
             return json!({"state": "none"});
         };

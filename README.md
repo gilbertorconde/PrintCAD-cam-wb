@@ -194,6 +194,14 @@ panels, the drawing and the helper that runs camcraft.
   depends on the machine it is opened on.
 - **Status in the tree.** Each setup and operation shows how its run went:
   running (with how far), done, warnings, failed, or out of date.
+- **Turned off.** An operation, or a whole setup, can be turned off without
+  deleting it: Turn off in its menu in the tree, Runs in its panel, or
+  `enable` by script. An operation off stays in its setup but is not run,
+  simulated, checked or posted, and the operations after it cut the
+  material as if it were not there; a setup off is not run at all. Its
+  icon is struck through, its badge says it is off, and turned off from the
+  tree it is hidden, so it shows greyed and nothing of it is drawn; Turn on
+  brings it back.
 - **Checked against the material.** Every setup is simulated: a gouge, a rapid
   through material and the other failures camcraft checks for are listed in
   the setup's and the operation's panels, and a setup that fails is not
