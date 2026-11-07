@@ -27,7 +27,8 @@
 //! region is exact polygons: the stock's box, less the exact sweep of the path
 //! itself. Nothing here reads the simulated stock. So an operation run after
 //! another cuts air where that one cleared: rest material from earlier operations
-//! is still to come.
+//! is still to come. [`AdaptiveLevels::clear`] takes the material from its
+//! caller, which a pattern's copies use to clear what stands where each is.
 //!
 //! # Getting in, and moving on
 //!
@@ -221,81 +222,163 @@ pub fn adaptive_rough(
     cutter: &Cutter,
     params: &AdaptiveParams,
 ) -> Result<(Toolpath, AdaptiveReport), StrategyError> {
-    check("stepdown", params.stepdown)?;
-    check("optimal load", params.optimal_load)?;
-    check("feed", params.feed)?;
-    check("tolerance", params.tolerance)?;
-    check_levels(params.top, params.bottom)?;
-    if !(params.helix_radius.is_finite() && params.helix_radius >= 0.0) {
-        return Err(StrategyError::BadParameter {
-            name: "helix radius",
-            value: params.helix_radius,
-        });
-    }
-    let radius = reach.cutter_radius();
-    check("tool radius", radius)?;
+    let arc = level_arc(params);
+    AdaptiveLevels::new(reach, area, params)?.clear(&|z| material(stocks, z, arc), cutter, params)
+}
 
-    // Levels from the top down, a stepdown apart, each flat level in the slab of
-    // the one just below it, cut after it from the bottom up.
-    let slabs = slabs(params.top, params.bottom, params.stepdown, &params.flats);
+/// What stands to be cleared at a level: where the material is above it,
+/// seen from above.
+pub type Uncut<'a> = dyn Fn(f64) -> Result<Region, StrategyError> + Sync + 'a;
 
-    // Where the tool may not be at every level, from the top: the shadows are
-    // cheapest asked for in descending order. What that leaves of the area,
-    // each level's own, in parallel.
-    let mut all: Vec<f64> = slabs
-        .iter()
-        .flat_map(|(z, flats)| std::iter::once(*z).chain(flats.iter().copied()))
-        .collect();
-    all.sort_by(|a, b| b.total_cmp(a));
-    let mut forbidden = Vec::with_capacity(all.len());
-    for &z in &all {
-        forbidden.push((z, reach.forbidden(z)?));
-    }
-    let allowed: Vec<(f64, Region)> = forbidden
-        .into_par_iter()
-        .map(|(z, forbidden)| Ok((z, area.difference(&forbidden)?)))
-        .collect::<Result<_, StrategyError>>()?;
-    let allowed_at = |z: f64| {
-        allowed
+/// Adaptive clearing worked out as far as the model takes it: its levels, and
+/// where the tool may be at each. The material is given after
+/// ([`AdaptiveLevels::clear`]), so one model's levels clear any material:
+/// a pattern's copies each the material where it is.
+#[derive(Debug, Clone)]
+pub struct AdaptiveLevels {
+    /// Each level from the top, with the flat levels in its slab.
+    slabs: Vec<(f64, Vec<f64>)>,
+    /// Where the tool's centre may be at each level, flat ones included.
+    allowed: Vec<(f64, Region)>,
+    /// The real tool's radius.
+    radius: f64,
+}
+
+impl AdaptiveLevels {
+    /// The levels `params` asks for, and where `reach` lets the tool be at
+    /// each, within `area`.
+    pub fn new(
+        reach: &mut LevelReach<'_>,
+        area: &Region,
+        params: &AdaptiveParams,
+    ) -> Result<Self, StrategyError> {
+        check("stepdown", params.stepdown)?;
+        check("optimal load", params.optimal_load)?;
+        check("feed", params.feed)?;
+        check("tolerance", params.tolerance)?;
+        check_levels(params.top, params.bottom)?;
+        if !(params.helix_radius.is_finite() && params.helix_radius >= 0.0) {
+            return Err(StrategyError::BadParameter {
+                name: "helix radius",
+                value: params.helix_radius,
+            });
+        }
+        let radius = reach.cutter_radius();
+        check("tool radius", radius)?;
+
+        // Levels from the top down, a stepdown apart, each flat level in the slab of
+        // the one just below it, cut after it from the bottom up.
+        let slabs = slabs(params.top, params.bottom, params.stepdown, &params.flats);
+
+        // Where the tool may not be at every level, from the top: the shadows are
+        // cheapest asked for in descending order. What that leaves of the area,
+        // each level's own, in parallel.
+        let mut all: Vec<f64> = slabs
             .iter()
-            .find(|(at, _)| (at - z).abs() < 1e-9)
-            .map(|(_, r)| r)
-    };
-
-    let level = LevelParams::new(params, radius);
-    // Slabs depend on nothing but their own regions, so they are worked in
-    // parallel and emitted in order: the result is the same on any number of
-    // cores.
-    let worked: Vec<Result<Vec<LevelCut>, StrategyError>> = slabs
-        .par_iter()
-        .map(|(z, flats)| {
-            let mut cuts = Vec::with_capacity(1 + flats.len());
-            let Some(region) = allowed_at(*z) else {
-                return Ok(cuts);
-            };
-            cuts.push(clear_level(
-                *z,
-                region,
-                &material(stocks, *z, level.arc)?,
-                &level,
-            )?);
-            // Each flat level over what the levels of the slab below it left.
-            for &f in flats {
-                let Some(region) = allowed_at(f) else {
-                    continue;
-                };
-                let cut = clear_flat(f, region, stocks, &cuts, cutter, &level)?;
-                cuts.push(cut);
-            }
-            Ok(cuts)
+            .flat_map(|(z, flats)| std::iter::once(*z).chain(flats.iter().copied()))
+            .collect();
+        all.sort_by(|a, b| b.total_cmp(a));
+        let mut forbidden = Vec::with_capacity(all.len());
+        for &z in &all {
+            forbidden.push((z, reach.forbidden(z)?));
+        }
+        let allowed: Vec<(f64, Region)> = forbidden
+            .into_par_iter()
+            .map(|(z, forbidden)| Ok((z, area.difference(&forbidden)?)))
+            .collect::<Result<_, StrategyError>>()?;
+        Ok(Self {
+            slabs,
+            allowed,
+            radius,
         })
-        .collect();
+    }
 
+    /// Every level the material is asked for at, flat ones included.
+    pub fn heights(&self) -> Vec<f64> {
+        self.allowed.iter().map(|(z, _)| *z).collect()
+    }
+
+    /// Clear `material` at these levels: `params` as the levels were found
+    /// with, but for which way the passes cut. `cutter` is the real tool,
+    /// whose width at each height says how much of a terrace a level below
+    /// cleared.
+    pub fn clear(
+        &self,
+        material: &Uncut<'_>,
+        cutter: &Cutter,
+        params: &AdaptiveParams,
+    ) -> Result<(Toolpath, AdaptiveReport), StrategyError> {
+        let (slabs, allowed) = (&self.slabs, &self.allowed);
+        let allowed_at = |z: f64| {
+            allowed
+                .iter()
+                .find(|(at, _)| (at - z).abs() < 1e-9)
+                .map(|(_, r)| r)
+        };
+
+        let level = LevelParams::new(params, self.radius);
+        // Slabs depend on nothing but their own regions, so they are worked in
+        // parallel and emitted in order: the result is the same on any number of
+        // cores.
+        let worked: Vec<Result<Vec<LevelCut>, StrategyError>> = slabs
+            .par_iter()
+            .map(|(z, flats)| {
+                let mut cuts = Vec::with_capacity(1 + flats.len());
+                let Some(region) = allowed_at(*z) else {
+                    return Ok(cuts);
+                };
+                cuts.push(clear_level(*z, region, &material(*z)?, &level)?);
+                // Each flat level over what the levels of the slab below it left.
+                for &f in flats {
+                    let Some(region) = allowed_at(f) else {
+                        continue;
+                    };
+                    let cut = clear_flat(f, region, &material(f)?, &cuts, cutter, &level)?;
+                    cuts.push(cut);
+                }
+                Ok(cuts)
+            })
+            .collect();
+        emit(worked, slabs, params, &level)
+    }
+}
+
+impl AdaptiveReport {
+    /// What two clearings did together.
+    #[must_use]
+    pub fn and(self, other: Self) -> Self {
+        Self {
+            levels: self.levels + other.levels,
+            flat_levels: self.flat_levels + other.flat_levels,
+            passes: self.passes + other.passes,
+            stayed_down: self.stayed_down + other.stayed_down,
+            entries: self.entries + other.entries,
+            helixes: self.helixes + other.helixes,
+            no_room: self.no_room + other.no_room,
+            left_mm2: self.left_mm2 + other.left_mm2,
+            overloads: self.overloads + other.overloads,
+        }
+    }
+}
+
+/// The arc tolerance a level's regions from the model are drawn to, and so
+/// round stock's edge.
+pub fn level_arc(params: &AdaptiveParams) -> f64 {
+    params.tolerance * 0.1
+}
+
+/// The levels' passes, `worked` for `slabs`, made a path, each level in turn.
+fn emit(
+    worked: Vec<Result<Vec<LevelCut>, StrategyError>>,
+    slabs: &[(f64, Vec<f64>)],
+    params: &AdaptiveParams,
+    level: &LevelParams,
+) -> Result<(Toolpath, AdaptiveReport), StrategyError> {
     let mut path = Toolpath::new();
     let mut report = AdaptiveReport::default();
     // The material stands up to the level above, or the top.
     let mut above = params.top;
-    for (slab, (z, _)) in worked.into_iter().zip(&slabs) {
+    for (slab, (z, _)) in worked.into_iter().zip(slabs) {
         // A slab's first level is its own; the rest are on flats.
         for (k, cut) in slab?.into_iter().enumerate() {
             report.left_mm2 += cut.left;
@@ -349,18 +432,18 @@ pub fn adaptive_rough(
     Ok((path, report))
 }
 
-/// Clear flat level `f` of a slab over what the levels of the slab `below` it
-/// left: the real tool, `cutter`, as wide at each as it is that far above its
+/// Clear flat level `f` of a slab, `material` there, over what the levels of
+/// the slab `below` it left: the real tool, `cutter`, as wide at each as it is that far above its
 /// tip.
 fn clear_flat(
     f: f64,
     allowed: &Region,
-    stocks: &[Block],
+    material: &Region,
     below: &[LevelCut],
     cutter: &Cutter,
     p: &LevelParams,
 ) -> Result<LevelCut, StrategyError> {
-    let mut uncut = Tiles::new(&material(stocks, f, p.arc)?, 16.0 * p.radius)?;
+    let mut uncut = Tiles::new(material, 16.0 * p.radius)?;
     for cut in below {
         // The real tool's width that far above its tip.
         let wide = cutter.radius_at(f - cut.z);
@@ -447,7 +530,7 @@ fn helix(
 
 /// The material at level `z`: where each block stands above it, a round one's
 /// edge taken at most `tolerance` outside it.
-fn material(stocks: &[Block], z: f64, tolerance: f64) -> Result<Region, StrategyError> {
+pub fn material(stocks: &[Block], z: f64, tolerance: f64) -> Result<Region, StrategyError> {
     let rings: Vec<Contour> = stocks
         .iter()
         .filter_map(|b| b.above(z + MATERIAL_THICKNESS, tolerance))
@@ -528,7 +611,7 @@ impl LevelParams {
             longest: (radius * 0.2).max(p.tolerance),
             shortest: (radius * 0.02).max(p.tolerance * 0.2).min(radius * 0.2),
             sliver: p.tolerance,
-            arc: p.tolerance * 0.1,
+            arc: level_arc(p),
             swept_arc: p.tolerance * 0.5,
             coarse: (p.tolerance * 0.5).max(radius * 0.005),
             side,
