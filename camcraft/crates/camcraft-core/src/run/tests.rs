@@ -2526,3 +2526,104 @@ fn a_square_hole_has_its_corners_relieved() {
     assert!(blunt.operations[0].reliefs.is_empty());
     assert_eq!(blunt.operations[0].path, without.operations[0].path);
 }
+
+/// The plate profiled out of its sheet from the top, through, and then turned
+/// over for a second setup that carries on from the first, profiling round it
+/// again with a 4 mm flat: the first, run, and the second laid out on what it
+/// left, and laid out on a fresh sheet as it would be without.
+fn second_side() -> (Job, Body, SetupResult) {
+    use crate::job::ProfileSide;
+    let mut job = sheet_job(StrategySpec::Profile {
+        side: ProfileSide::Outside,
+        conventional: false,
+    });
+    job.tools.insert("small".into(), flat(4.0));
+    let mut bottom = job.setups[0].clone();
+    bottom.name = "bottom".into();
+    bottom.orientation = crate::setup::frame::Orientation::default().flipped();
+    bottom.operations[0].tool = Some("small".into());
+    job.setups.push(bottom);
+    let body = Body::derived(synthetic::plate_with_hole(20.0, 5.0, 4.0, 48));
+    let bodies: Bodies<'_> = [("dome", &body)].into_iter().collect();
+    let top = run_setup(&job, 0, &bodies).unwrap();
+    assert!(top.is_clean(), "{:?}", top.warnings());
+    (job, body, top)
+}
+
+/// The second setup starts from what the first left, turned over: the same
+/// box, the slot the profile cut through the sheet and the hole empty, the
+/// sheet round them and the plate whole, and as much material. Profiling
+/// round the plate again where the slot already is cuts next to nothing,
+/// where from a fresh sheet it cuts the slot.
+#[test]
+fn a_setup_carries_on_from_what_the_one_before_left() {
+    let (job, body, top) = second_side();
+    let bodies: Bodies<'_> = [("dome", &body)].into_iter().collect();
+    let left = top.left().unwrap();
+    let carried = crate::setup::prepare_from(&job, 1, &bodies, Some(&left)).unwrap();
+    let fresh = crate::setup::prepare(&job, 1, &bodies).unwrap();
+    let (a, b) = (carried.stock_bounds(), fresh.stock_bounds());
+    assert!(
+        a.min.distance(b.min) < 1e-6 && a.max.distance(b.max) < 1e-6,
+        "{a:?} {b:?}"
+    );
+    let run = |laid: &crate::setup::Prepared, plans: &[Plan]| {
+        run_prepared_planned(&job, 1, laid, &bodies, plans, &mut |_| {}).unwrap()
+    };
+    let over = run(&carried, &[]);
+    let start = over.keyframes[0].unpack().unwrap();
+    assert!(start.under().is_some());
+    let at = |x: f64, y: f64| {
+        let p = carried.frame.to_setup(glam::dvec3(x, y, 0.0));
+        start.height_at(p.x, p.y).unwrap()
+    };
+    let floor = start.floor();
+    assert!((at(23.0, 0.0) - floor).abs() < 1e-6, "the slot is through");
+    assert!((at(0.0, 0.0) - floor).abs() < 1e-6, "so is the hole");
+    let side = carried.frame.to_setup(glam::dvec3(0.0, 0.0, 0.0)).z;
+    assert!(
+        (at(10.0, 0.0) - side).abs() < 1e-6,
+        "the plate, its bottom up"
+    );
+    assert!((at(28.0, 5.0) - side).abs() < 1e-6, "the sheet round it");
+    let (was, is) = (left.stock.volume(), start.volume());
+    assert!((was - is).abs() < 0.02 * was, "{was} {is}");
+
+    let again = &over.operations[0];
+    let anew = &run(&fresh, &[]).operations[0];
+    assert!(again.sim.is_clean() && anew.sim.is_clean());
+    assert!(
+        again.sim.removed_mm3 < 0.05 * anew.sim.removed_mm3,
+        "{} {}",
+        again.sim.removed_mm3,
+        anew.sim.removed_mm3
+    );
+}
+
+/// A rapid of the second setup down into the slot the first cut through, and
+/// along it half way through the sheet, passes through air: from what the
+/// first left it is clean, from a fresh sheet it ploughs through.
+#[test]
+fn a_rapid_through_air_the_setup_before_cut_is_clean() {
+    use crate::path::toolpath::Toolpath;
+    let (job, body, top) = second_side();
+    let bodies: Bodies<'_> = [("dome", &body)].into_iter().collect();
+    let left = top.left().unwrap();
+    let rapids = |laid: &crate::setup::Prepared| {
+        let mut path = Toolpath::new();
+        for (y, z) in [(-10.0, -10.0), (-10.0, 2.0), (10.0, 2.0), (10.0, -10.0)] {
+            path.rapid_to(laid.frame.to_setup(glam::dvec3(23.0, y, z)))
+                .unwrap();
+        }
+        let mut kept = top.operations[0].clone();
+        kept.path = path;
+        let plans = [Plan::Keep(Box::new(kept))];
+        let ran = run_prepared_planned(&job, 1, laid, &bodies, &plans, &mut |_| {}).unwrap();
+        ran.operations[0].sim
+    };
+    let carried = crate::setup::prepare_from(&job, 1, &bodies, Some(&left)).unwrap();
+    let over = rapids(&carried);
+    assert_eq!(over.rapid_contacts, 0, "{over:?}");
+    let fresh = rapids(&crate::setup::prepare(&job, 1, &bodies).unwrap());
+    assert!(fresh.rapid_contacts > 0, "{fresh:?}");
+}

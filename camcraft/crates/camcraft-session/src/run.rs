@@ -2,7 +2,7 @@
 
 use camcraft_core::job::{Job, JobError};
 use camcraft_core::run::{Made, Plan, SetupResult, Stage, run_prepared_planned};
-use camcraft_core::setup::{Bodies, prepare};
+use camcraft_core::setup::{Bodies, Carried, prepare_from};
 use camcraft_geom::mesh::TriMesh;
 
 use crate::checks::{self, Checks};
@@ -55,6 +55,20 @@ pub fn run_setup_planned(
     plans: &[Plan],
     progress: &mut dyn FnMut(Stage),
 ) -> Result<Ran, SessionError> {
+    run_setup_from(job, index, models, plans, None, progress)
+}
+
+/// As [`run_setup_planned`], its stock what an earlier setup left when
+/// `carried` is given ([`camcraft_core::setup::prepare_from`]); that setup's
+/// [`SetupResult::left`] says what that is.
+pub fn run_setup_from(
+    job: &Job,
+    index: usize,
+    models: &Models<'_>,
+    plans: &[Plan],
+    carried: Option<&Carried>,
+    progress: &mut dyn FnMut(Stage),
+) -> Result<Ran, SessionError> {
     // Validation happens before anything is computed, so a bad job fails on its own
     // terms rather than part-way through an operation.
     check_runnable(job, index, &|i| !matches!(plans.get(i), Some(Plan::Skip)))?;
@@ -67,7 +81,7 @@ pub fn run_setup_planned(
     )];
     let bodies: Bodies<'_> = models.iter().map(|(n, m)| (*n, &m.body)).collect();
     progress(Stage::Preparing);
-    let prepared = prepare(job, index, &bodies)?;
+    let prepared = prepare_from(job, index, &bodies, carried)?;
     let result = run_prepared_planned(job, index, &prepared, &bodies, plans, progress)?;
     notes.extend(summary(&result));
 

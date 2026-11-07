@@ -128,6 +128,16 @@ impl Block {
         })
     }
 
+    /// The lowest its underside comes within `grow` of column `p`, or `None`
+    /// where it stands nowhere that near: as [`Block::top_near`], from below.
+    pub fn bottom_near(&self, p: DVec2, grow: f64) -> Option<f64> {
+        let top = self.top_near(p, grow)?;
+        Some(match self {
+            Block::Bar(bar) if bar.axis != Axis::Z => 2.0 * bar.centre.z - top,
+            _ => self.bounds().min.z,
+        })
+    }
+
     /// Where it stands above height `z`, seen from above, as a ring of points
     /// counter-clockwise: a polygon around all of it, its corners at most
     /// `tolerance` outside a round edge. `None` where it is all at or below `z`.

@@ -15,19 +15,24 @@
 //!
 //! What every operation of the setup reads from the part alone is worked out
 //! once, when first asked for, and kept with it: its shadow from above.
+//!
+//! A setup may carry on from an earlier one ([`Carried`]), as Fusion's take
+//! their stock from the setup before: its stock is then what that one left,
+//! the same material turned the way this one sees it, and its box the box
+//! round that.
 
 pub mod features;
 pub mod frame;
 
 use std::collections::BTreeMap;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use camcraft_geom::contour::RegionError;
 use camcraft_geom::mesh::{Aabb, MeshError, TriMesh};
 use camcraft_geom::shadow::{Shadow, shadow_above};
 use camcraft_geom::topology::Body;
-use camcraft_sim::stock::{Axis as FrameAxis, Bar, Block};
-use glam::DVec3;
+use camcraft_sim::stock::{Axis as FrameAxis, Bar, Block, Carry, Stock};
+use glam::{DAffine3, DMat3, DVec3};
 
 use crate::job::{BoxOf, HeightContext, Job, JobError, Origin, Setup, StockSpec};
 use features::FeatureError;
@@ -57,6 +62,30 @@ pub enum PrepareError {
     /// The work zero was picked on something that is no longer there.
     #[error("work zero: {0}")]
     Feature(#[from] FeatureError),
+    /// The setup it carries on from left no material.
+    #[error("the setup it carries on from left no material")]
+    NothingCarried,
+}
+
+/// The material an earlier setup left, for a setup that carries on from it.
+#[derive(Debug, Clone)]
+pub struct Carried {
+    /// What it left, in its own frame, with an underside
+    /// ([`Stock::with_bottoms`]): the material the other way up is its bottom.
+    pub stock: Arc<Stock>,
+    /// Its stock's box, in its own frame.
+    pub within: Aabb,
+    /// From its frame to model coordinates.
+    pub to_model: DAffine3,
+}
+
+/// `f`, a turn and a move, as an affine map.
+pub fn affine_of(f: impl Fn(DVec3) -> DVec3) -> DAffine3 {
+    let o = f(DVec3::ZERO);
+    DAffine3 {
+        matrix3: DMat3::from_cols(f(DVec3::X) - o, f(DVec3::Y) - o, f(DVec3::Z) - o),
+        translation: o,
+    }
 }
 
 /// One of the models merged into the part.
@@ -82,6 +111,9 @@ pub struct Prepared {
     pub stocks: Vec<Block>,
     /// How model coordinates became these.
     pub frame: Frame,
+    /// The material it starts from, when it carries on from an earlier setup:
+    /// that one's, and how to carry it into this frame.
+    pub carried: Option<(Arc<Stock>, Carry)>,
     /// The part's shadow, once cast ([`Prepared::shadow`]).
     shadow: OnceLock<Shadow>,
 }
@@ -323,6 +355,18 @@ pub fn stock_in_frame(
 
 /// Where setup `index`'s part and stock are, in its own frame.
 pub fn prepare(job: &Job, index: usize, bodies: &Bodies<'_>) -> Result<Prepared, PrepareError> {
+    prepare_from(job, index, bodies, None)
+}
+
+/// [`prepare`], the stock what `carried` left when it is given, in place of
+/// the setup's own: its one block the box round that material, as this setup
+/// sees it, which a work zero on the stock is placed on.
+pub fn prepare_from(
+    job: &Job,
+    index: usize,
+    bodies: &Bodies<'_>,
+    carried: Option<&Carried>,
+) -> Result<Prepared, PrepareError> {
     let setup: &Setup = job.setups.get(index).ok_or(JobError::NoSetups)?;
     if setup.models.is_empty() {
         return Err(JobError::NoModels(setup.name.clone()).into());
@@ -340,7 +384,20 @@ pub fn prepare(job: &Job, index: usize, bodies: &Bodies<'_>) -> Result<Prepared,
         })
         .collect::<Result<Vec<_>, _>>()?;
     let o = setup.orientation.resolve(bodies, job.tolerance)?;
-    let turned_blocks = blocks_of(job, setup, bodies, &o)?;
+    // From the earlier setup's frame to this one's, turned but before its
+    // work zero.
+    let carry = carried.map(|c| Carry {
+        to: affine_of(|p| o.apply(p)) * c.to_model,
+        within: c.within,
+    });
+    let turned_blocks = match (carried, &carry) {
+        (Some(c), Some(carry)) => vec![Block::Box(
+            c.stock
+                .carried_bounds(carry)
+                .ok_or(PrepareError::NothingCarried)?,
+        )],
+        _ => blocks_of(job, setup, bodies, &o)?,
+    };
     let turned_model = if o.square().is_some() {
         turn(&o, &Block::Box(bounds_of(&setup.models, bodies, None)?)).bounds()
     } else {
@@ -374,6 +431,13 @@ pub fn prepare(job: &Job, index: usize, bodies: &Bodies<'_>) -> Result<Prepared,
             .map(|b| b.translated(-origin))
             .collect(),
         frame,
+        carried: carried.zip(carry).map(|(c, carry)| {
+            let carry = Carry {
+                to: DAffine3::from_translation(-origin) * carry.to,
+                ..carry
+            };
+            (Arc::clone(&c.stock), carry)
+        }),
         shadow: OnceLock::new(),
     })
 }

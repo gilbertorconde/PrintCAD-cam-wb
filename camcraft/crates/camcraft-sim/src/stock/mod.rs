@@ -33,6 +33,7 @@
 //! the simulator a geometry service that cannot quietly grow CAM opinions.
 
 mod block;
+mod carry;
 mod packed;
 mod part;
 mod reach;
@@ -42,12 +43,15 @@ mod sweep;
 #[allow(clippy::unwrap_used, clippy::float_cmp, clippy::panic)]
 mod tests;
 
+use std::sync::Arc as Shared;
+
 use camcraft_geom::arc::Arc;
 use camcraft_geom::heightmap::{HeightMap, HeightMapError, cell_index};
 use glam::{DVec2, DVec3};
 use rayon::prelude::*;
 
 pub use block::{Axis, Bar, Block};
+pub use carry::Carry;
 pub use packed::PackedStock;
 pub use part::PartSurface;
 pub use reach::{Body, Contact, Reach, Ring, Tops, Watch};
@@ -114,10 +118,20 @@ impl SimMove {
 }
 
 /// A block of material, as a height field.
+///
+/// A column's material stands from its bottom up to its height. Its bottom is
+/// the floor, unless the stock has an underside ([`Stock::under`]): material
+/// carried from a setup that cut it from another side, which a column may
+/// stand clear of the floor on. A tool coming down a column takes it from the
+/// top, and once it takes it down to the bottom the column is empty, held at
+/// the floor.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Stock {
     field: HeightMap,
     floor: f64,
+    /// Each column's bottom, cell for cell, when it is not the floor. It
+    /// never changes as material is cut, so copies of the stock share it.
+    under: Option<Shared<[f32]>>,
 }
 
 /// Stock that could not be created.
@@ -129,6 +143,9 @@ pub enum StockError {
     /// There were no blocks to make stock from.
     #[error("there is no stock")]
     NoBlocks,
+    /// Kept stock that does not read back ([`PackedStock::from_bytes`]).
+    #[error("the kept stock does not read: {0}")]
+    Unreadable(&'static str),
     /// The block had no height.
     #[error("stock top {top} is not above its floor {floor}")]
     Inverted {
@@ -321,6 +338,11 @@ fn raise_box(field: &mut HeightMap, lo: DVec2, hi: DVec2, top: f64) {
     }
 }
 
+/// Material on an underside thinner than this, in millimetres, is none: far
+/// below any tolerance, far above the error of a height kept as an `f32`, so
+/// a cut to a column's bottom, worked out in another frame, empties it.
+const THIN: f64 = 1.0e-3;
+
 /// Cells added up as one part of a volume: fixed, so the parts, and the order
 /// they are added in, do not depend on how many threads there are.
 const VOLUME_CELLS: usize = 1 << 14;
@@ -340,6 +362,7 @@ impl Stock {
         Ok(Self {
             field: HeightMap::covering(min, max, pitch, top)?,
             floor,
+            under: None,
         })
     }
 
@@ -358,7 +381,11 @@ impl Stock {
         for &(lo, hi, top) in boxes {
             raise_box(&mut field, lo, hi, top);
         }
-        Ok(Self { field, floor })
+        Ok(Self {
+            field,
+            floor,
+            under: None,
+        })
     }
 
     /// Several blocks, boxes or round bars, as one stock.
@@ -398,7 +425,11 @@ impl Stock {
                 }
             }
         }
-        Ok(Self { field, floor })
+        Ok(Self {
+            field,
+            floor,
+            under: None,
+        })
     }
 
     /// A field over every one of `boxes`, `(min, max, top)`, all at `floor`:
@@ -430,6 +461,12 @@ impl Stock {
     /// The bottom of the block.
     pub fn floor(&self) -> f64 {
         self.floor
+    }
+
+    /// Each column's bottom, row by row as the field's cells, when the stock
+    /// has an underside; `None` when every column stands on the floor.
+    pub fn under(&self) -> Option<&[f32]> {
+        self.under.as_deref()
     }
 
     /// Height of material at a column, or `None` outside the block.
@@ -471,24 +508,32 @@ impl Stock {
     pub fn volume(&self) -> f64 {
         let cell = self.field.pitch() * self.field.pitch();
         let floor = self.floor;
-        let parts: Vec<f64> = self
-            .field
-            .data()
-            .par_chunks(VOLUME_CELLS)
-            .map(|cells| {
-                cells
-                    .iter()
-                    .map(|v| {
-                        let h = f64::from(*v);
-                        if h.is_finite() {
-                            (h - floor).max(0.0)
-                        } else {
-                            0.0
-                        }
-                    })
-                    .sum::<f64>()
-            })
-            .collect();
+        let column = |v: f32, bottom: f64| {
+            let h = f64::from(v);
+            if h.is_finite() {
+                (h - bottom).max(0.0)
+            } else {
+                0.0
+            }
+        };
+        let data = self.field.data();
+        let parts: Vec<f64> = match self.under.as_deref() {
+            None => data
+                .par_chunks(VOLUME_CELLS)
+                .map(|cells| cells.iter().map(|v| column(*v, floor)).sum::<f64>())
+                .collect(),
+            Some(under) => data
+                .par_chunks(VOLUME_CELLS)
+                .zip(under.par_chunks(VOLUME_CELLS))
+                .map(|(cells, under)| {
+                    cells
+                        .iter()
+                        .zip(under)
+                        .map(|(v, b)| column(*v, f64::from(*b).max(floor)))
+                        .sum::<f64>()
+                })
+                .collect(),
+        };
         parts.iter().sum::<f64>() * cell
     }
 
