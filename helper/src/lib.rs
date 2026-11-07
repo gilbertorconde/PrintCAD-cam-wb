@@ -619,13 +619,7 @@ fn tool_uses(
                     flute_length: tool.flute_length,
                     stickout: tool.stickout,
                     overall_length: tool.overall_length,
-                    holder: tool.holder.as_ref().map(|h| {
-                        if h.name.is_empty() {
-                            format!("{} segment(s)", h.segments.len())
-                        } else {
-                            h.name.clone()
-                        }
-                    }),
+                    holder: tool.holder.as_ref().map(holder_words),
                     comment: tool.comment.clone(),
                     ..ToolUse::default()
                 });
@@ -724,6 +718,35 @@ fn marks(
     out.sort_by_key(|m| (m.moves, !m.fail));
     out.dedup_by_key(|m| m.moves);
     out
+}
+
+/// A holder as the setup sheet lists it: its name, and its segments from
+/// the tool up, each its diameter (foot to top, for a cone) by its length,
+/// as the shank and holder checks take it.
+fn holder_words(h: &camcraft_core::job::Holder) -> String {
+    let mm = |v: f64| {
+        let s = format!("{v:.2}");
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    };
+    let segments: Vec<String> = h
+        .segments
+        .iter()
+        .map(|s| {
+            if (s.top() - s.diameter).abs() > 1e-9 {
+                format!("Ø{}–{} × {}", mm(s.diameter), mm(s.top()), mm(s.length))
+            } else {
+                format!("Ø{} × {}", mm(s.diameter), mm(s.length))
+            }
+        })
+        .collect();
+    let shape = format!("{} mm", segments.join(", "));
+    if h.name.is_empty() {
+        shape
+    } else if segments.is_empty() {
+        h.name.clone()
+    } else {
+        format!("{}: {shape}", h.name)
+    }
 }
 
 /// The checks' findings, failures first, then warnings, notes and passes.

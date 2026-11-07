@@ -189,7 +189,11 @@ panels, the drawing and the helper that runs camcraft.
 - **Tools.** Preferences › CAM holds the tool library, which starts as
   camcraft's twenty common router bits, each with presets for the materials
   it suits. The chosen tool's kind, dimensions and presets can be edited,
-  and a Fusion tool library exported as CSV imports into it. A setup takes a
+  and its holder: none, one of a dozen common ones (ER collet nuts, and ER
+  collet chucks and side-lock holders on BT30, CAT40, BT40 and HSK63A, at
+  typical sizes), or its own, a stack of segments each with its diameter at
+  its foot and top and its length. A Fusion tool library exported as CSV or
+  JSON imports into it, the JSON bringing each tool's holder. A setup takes a
   copy of a tool when an operation first cuts with it, so a document never
   depends on the machine it is opened on.
 - **Status in the tree.** Each setup and operation shows how its run went:
@@ -206,6 +210,21 @@ panels, the drawing and the helper that runs camcraft.
   through material and the other failures camcraft checks for are listed in
   the setup's and the operation's panels, and a setup that fails is not
   posted (Save anyway exists, and says what it is).
+- **Shank and holder.** What stands above a tool's flutes is checked as each
+  move is simulated, cutting moves and rapids alike, against the material as
+  it then stands: the cutter past its flute length, its shank from its
+  shoulder up to its stickout, and each segment of its holder above that.
+  Each that meets material is a failed check on the operation, marked on the
+  timeline at the first move it does, saying how many moves, how far in,
+  whether it is the part or stock left above it, and for the holder the
+  stickout that would clear it ("holder segment 1 (Ø32.00) meets the part on
+  12 move(s) from move 40, 8.30 mm into it: needs 38.3 mm stickout"). What
+  the tool's lengths do not say is not checked, and a note says so. A 3D
+  finish (parallel, scallop, contour, flat, spiral, radial, morphed spiral)
+  can be asked to Use shank and holder, as Fusion's: it leaves out the cuts
+  where they would meet the part, and links round what it left out; the
+  check still runs, for the stock an earlier operation left. Other
+  operations are only checked.
 - **Playback,** as camcraft's: while a setup or one of its operations is
   open, a transport under the view plays its run back. A timeline has a span
   per operation as long as it takes to run, with failed checks marked filled
@@ -259,7 +278,8 @@ panels, the drawing and the helper that runs camcraft.
   the machine when the setup says; the tool axis, and what a tilt asks of
   whoever sets the part up; the post, the program's name and number; each
   tool with its number, kind (a thread mill with its pitches), diameter, flutes, flute length, stickout and
-  length, holder, the operations that use it, the lowest it goes and the
+  length, holder (its name and segments, `ER20: Ø28 × 19, Ø42 × 15 mm`),
+  the operations that use it, the lowest it goes and the
   fastest it is fed and turned; each operation with its strategy, tool,
   speed and feeds, stepover, stepdown, stock to leave, the lowest and
   highest it goes, its time, and its own settings (a bore's helix, a

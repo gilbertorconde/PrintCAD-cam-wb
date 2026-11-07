@@ -1514,7 +1514,7 @@ passes = { stepover = 1.0, feed = 900.0 }
     let ball = &run.tools[1];
     assert_eq!((ball.number, ball.kind.as_str()), (2, "ball"));
     assert_eq!((ball.flutes, ball.stickout), (Some(2), Some(20.0)));
-    assert_eq!(ball.holder.as_deref(), Some("ER11 collet"));
+    assert_eq!(ball.holder.as_deref(), Some("ER11 collet: Ø16 × 20 mm"));
     assert_eq!(ball.operations, [1]);
     assert_eq!(ball.fastest_rpm, 18000);
     assert!((ball.seconds - run.operations[1].seconds).abs() < 1e-9);
@@ -1612,4 +1612,65 @@ fn an_operations_own_settings_are_noted() {
     );
     let plain = Operation::new("plain", StrategySpec::named("parallel").unwrap());
     assert!(crate::strategy_notes(&plain).is_empty());
+}
+
+/// A tool out of its holder too little for the part's depth: the holder
+/// meeting the part is a failed check on the operation, naming the holder's
+/// segment and the stickout that would clear it, at the move it first
+/// does, which the timeline marks; out far enough, the check passes.
+#[test]
+fn a_holder_that_meets_the_part_is_a_failed_check() {
+    let request = |stickout: f64| {
+        Request {
+        version: VERSION,
+        job: JOB.replacen(
+            "rpm = 16000\n",
+            &format!(
+                "rpm = 16000\nstickout = {stickout}\n\
+                 holder = {{ name = \"ER20\", segments = [{{ diameter = 32.0, length = 20.0 }}] }}\n"
+            ),
+            1,
+        ),
+        shapes: BTreeMap::from([(
+            "part".to_string(),
+            Shape {
+                text: native("hinge_jig.step"),
+                placement: IDENTITY,
+            },
+        )]),
+        max_points: 0,
+        ..Request::default()
+    }
+    };
+    let short = answer(&request(1.0)).unwrap();
+    assert!(!short.passed);
+    let f = short.findings.iter().find(|f| f.code == "CC111").unwrap();
+    assert_eq!((f.level, f.operation), (Level::Fail, Some(0)), "{f:?}");
+    assert!(
+        f.text
+            .starts_with("CC111 1. rough: holder segment 1 (Ø32.00) meets the ")
+            && f.text.contains("mm stickout"),
+        "{}",
+        f.text
+    );
+    let at = f.at_move.unwrap();
+    assert!(
+        short.operations[0]
+            .marks
+            .iter()
+            .any(|m| m.fail && m.moves == at),
+        "{:?}",
+        short.operations[0].marks
+    );
+    let needs: f64 = f
+        .text
+        .split("needs ")
+        .nth(1)
+        .and_then(|t| t.split(' ').next())
+        .unwrap()
+        .parse()
+        .unwrap();
+    let long = answer(&request(needs + 0.5)).unwrap();
+    let f = long.findings.iter().find(|f| f.code == "CC111").unwrap();
+    assert_eq!(f.level, Level::Pass, "{f:?}");
 }

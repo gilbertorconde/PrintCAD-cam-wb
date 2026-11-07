@@ -3,9 +3,9 @@
 
 use std::collections::BTreeMap;
 
-use camcraft_core::job::{Preset, ToolKind, ToolSpec};
+use camcraft_core::job::{Holder, HolderSegment, Preset, ToolKind, ToolSpec};
 use camcraft_post::profile::Profile;
-use camcraft_session::library::fusion_csv;
+use camcraft_session::library::{fusion_csv, fusion_json, system};
 use printcad_bench_sdk::api::*;
 
 use crate::panel::{button, choice, group};
@@ -20,8 +20,8 @@ pub fn open_tools() -> Request {
     Request::OpenFile {
         id: OPEN_TOOLS.into(),
         kinds: vec![FileKind {
-            label: "Fusion tool library (CSV)".into(),
-            extensions: vec!["csv".into()],
+            label: "Fusion tool library (CSV or JSON)".into(),
+            extensions: vec!["csv".into(), "json".into()],
         }],
         multiple: true,
     }
@@ -80,9 +80,14 @@ fn free_name(base: &str, taken: impl Fn(&str) -> bool) -> String {
 }
 
 /// A Fusion tool library's tools added to `tools`, each under a name of its
-/// own; what to say of it.
+/// own; what to say of it. A library exported as JSON brings each tool's
+/// holder with it; one exported as CSV has none.
 pub fn import_tools(tools: &mut BTreeMap<String, ToolSpec>, text: &str) -> Result<String, String> {
-    let imported = fusion_csv::import(text).map_err(|e| e.to_string())?;
+    let imported = if text.trim_start().starts_with('{') {
+        fusion_json::import(text).map_err(|e| e.to_string())?
+    } else {
+        fusion_csv::import(text).map_err(|e| e.to_string())?
+    };
     let count = imported.tools.len();
     for (name, tool) in imported.tools {
         let name = free_name(&name, |n| tools.contains_key(n));
@@ -138,6 +143,7 @@ fn field(t: &ToolSpec, id: &str) -> Option<f64> {
         "teeth" => f64::from(t.teeth.unwrap_or(0)),
         "flutes" => f64::from(t.flutes.unwrap_or(0)),
         "flute_length" => opt(t.flute_length),
+        "shoulder_length" => opt(t.shoulder_length),
         "shank_diameter" => opt(t.shank_diameter),
         "overall_length" => opt(t.overall_length),
         "stickout" => opt(t.stickout),
@@ -178,6 +184,7 @@ fn set_field(t: &mut ToolSpec, id: &str, v: f64) -> bool {
         "teeth" => t.teeth = (whole > 1).then_some(whole),
         "flutes" => t.flutes = (whole > 0).then_some(whole),
         "flute_length" => t.flute_length = opt,
+        "shoulder_length" => t.shoulder_length = opt,
         "shank_diameter" => t.shank_diameter = opt,
         "overall_length" => t.overall_length = opt,
         "stickout" => t.stickout = opt,
@@ -214,6 +221,12 @@ fn fields(kind: ToolKind) -> Vec<(&'static str, &'static str, Dim, usize)> {
         (
             "flute_length",
             "Flute length (0: not given)",
+            Dim::Length,
+            2,
+        ),
+        (
+            "shoulder_length",
+            "Shoulder length (0: not given)",
             Dim::Length,
             2,
         ),
@@ -278,6 +291,7 @@ pub fn tool_editor(name: &str, t: &ToolSpec, chosen_preset: Option<usize>) -> Wi
             decimals,
         ));
     }
+    rows.extend(holder_rows(t));
     rows.push(Widget::TextField {
         id: "tool/comment".into(),
         label: "Comment".into(),
@@ -321,6 +335,137 @@ pub fn tool_editor(name: &str, t: &ToolSpec, chosen_preset: Option<usize>) -> Wi
     group("The chosen tool", rows)
 }
 
+/// Which of the holder choices `t` has: none, a built-in one, or its own.
+fn holder_choice(t: &ToolSpec, builtin: &[Holder]) -> usize {
+    match &t.holder {
+        None => 0,
+        Some(h) => builtin
+            .iter()
+            .position(|b| b == h)
+            .map_or(builtin.len() + 1, |i| i + 1),
+    }
+}
+
+/// The holder's rows: which, and its segments from the tool up, each
+/// editable, so a holder of its own is typed in as Fusion's is.
+fn holder_rows(t: &ToolSpec) -> Vec<Widget> {
+    let builtin = system::holders();
+    let mut options = vec!["None".to_string()];
+    options.extend(builtin.iter().map(|h| h.name.clone()));
+    options.push(match &t.holder {
+        Some(h) if !h.name.is_empty() && !builtin.contains(h) => format!("Its own: {}", h.name),
+        _ => "Its own".into(),
+    });
+    let mut rows = vec![
+        choice("tool/holder", "Holder", options, holder_choice(t, &builtin)),
+        Widget::Text {
+            text: "The stickout is how far the tool comes out of the holder. With it, the \
+                   flute length and the shank, the simulator checks that nothing above the \
+                   flutes meets the material."
+                .into(),
+            mono: false,
+        },
+    ];
+    let Some(h) = &t.holder else {
+        return rows;
+    };
+    rows.push(Widget::Table {
+        id: "holder_segments".into(),
+        columns: ["Foot Ø", "Top Ø", "Length"].map(String::from).to_vec(),
+        rows: h
+            .segments
+            .iter()
+            .map(|s| {
+                vec![
+                    format!("{}", s.diameter),
+                    format!("{}", s.top()),
+                    format!("{}", s.length),
+                ]
+            })
+            .collect(),
+        selected: None,
+        editable: vec![true; 3],
+    });
+    rows.push(Widget::Row {
+        children: vec![
+            button("add_segment", "Add a segment", ButtonStyle::Secondary, true),
+            button(
+                "remove_segment",
+                "Remove the top segment",
+                ButtonStyle::Small,
+                !h.segments.is_empty(),
+            ),
+        ],
+    });
+    rows
+}
+
+/// What a widget of the holder's rows did to `tool`; whether it was one.
+fn holder_event(tool: &mut ToolSpec, event: &PanelEvent) -> bool {
+    match event {
+        PanelEvent::Choice { id, index } if id == "tool/holder" => {
+            let builtin = system::holders();
+            match index.checked_sub(1) {
+                None => tool.holder = None,
+                Some(i) => {
+                    if let Some(h) = builtin.get(i) {
+                        tool.holder = Some(h.clone());
+                    }
+                }
+            }
+        }
+        PanelEvent::Cell {
+            id,
+            row,
+            column,
+            value,
+        } if id == "holder_segments" => {
+            let Some(s) = tool.holder.as_mut().and_then(|h| h.segments.get_mut(*row)) else {
+                return true;
+            };
+            let Some(v) = value
+                .trim()
+                .replace(',', ".")
+                .parse::<f64>()
+                .ok()
+                .filter(|v| v.is_finite() && *v > 0.0)
+            else {
+                return true;
+            };
+            match column {
+                0 => s.diameter = v,
+                1 => s.top_diameter = ((v - s.diameter).abs() > 1e-9).then_some(v),
+                2 => s.length = v,
+                _ => {}
+            }
+        }
+        PanelEvent::Button { id } if id == "add_segment" => {
+            let h = tool.holder.get_or_insert_with(|| Holder {
+                name: String::new(),
+                segments: Vec::new(),
+            });
+            // Wider up the holder, as most are.
+            let next = h
+                .segments
+                .last()
+                .map_or(HolderSegment::cylinder(30.0, 20.0), |s| {
+                    HolderSegment::cylinder(s.top(), s.length)
+                });
+            h.segments.push(next);
+        }
+        PanelEvent::Button { id } if id == "remove_segment" => {
+            if let Some(h) = &mut tool.holder {
+                h.segments.pop();
+                if h.segments.is_empty() {
+                    tool.holder = None;
+                }
+            }
+        }
+        _ => return false,
+    }
+    true
+}
+
 /// What a widget of the tool editor did to the library. Whether it was one.
 pub fn tool_event(
     tools: &mut BTreeMap<String, ToolSpec>,
@@ -334,6 +479,9 @@ pub fn tool_event(
     let Some(tool) = tools.get_mut(&name) else {
         return false;
     };
+    if holder_event(tool, event) {
+        return true;
+    }
     match event {
         PanelEvent::Number { id, value } => match id.strip_prefix("tool/") {
             Some(f) => {
@@ -431,7 +579,8 @@ pub fn files_groups(posts: &BTreeMap<String, String>, chosen_post: Option<usize>
         vec![
             Widget::Text {
                 text: "In Fusion's Tool Library, right-click a library and Export it as \
-                       CSV, then import that file here."
+                       CSV or JSON, then import that file here. JSON brings each tool's \
+                       holder too."
                     .into(),
                 mono: false,
             },
@@ -586,6 +735,90 @@ mod tests {
         );
         let t = &tools["Flat 6"];
         assert_eq!((t.tip_length, t.pitch_range, t.teeth), (0.0, None, None));
+    }
+
+    #[test]
+    fn a_tool_is_given_a_holder_and_it_is_edited() {
+        let mut tools = library();
+        let send = |tools: &mut BTreeMap<String, ToolSpec>, e: PanelEvent| {
+            let (mut chosen, mut preset) = (Some(0), None);
+            assert!(tool_event(tools, &mut chosen, &mut preset, &e), "{e:?}");
+        };
+        send(
+            &mut tools,
+            PanelEvent::Number {
+                id: "tool/shoulder_length".into(),
+                value: 20.0,
+            },
+        );
+        // The first built-in holder, then its foot made wider and its top a cone.
+        send(
+            &mut tools,
+            PanelEvent::Choice {
+                id: "tool/holder".into(),
+                index: 1,
+            },
+        );
+        let first = system::holders().remove(0);
+        assert_eq!(tools["Flat 6"].holder.as_ref(), Some(&first));
+        send(
+            &mut tools,
+            PanelEvent::Cell {
+                id: "holder_segments".into(),
+                row: 0,
+                column: 1,
+                value: "24".into(),
+            },
+        );
+        send(
+            &mut tools,
+            PanelEvent::Cell {
+                id: "holder_segments".into(),
+                row: 0,
+                column: 2,
+                value: "nope".into(),
+            },
+        );
+        send(
+            &mut tools,
+            PanelEvent::Button {
+                id: "add_segment".into(),
+            },
+        );
+        let t = &tools["Flat 6"];
+        assert_eq!(t.shoulder_length, Some(20.0));
+        let h = t.holder.as_ref().unwrap();
+        assert_eq!(h.segments[0].top_diameter, Some(24.0));
+        assert_eq!(h.segments[0].length, first.segments[0].length);
+        assert_eq!(h.segments.len(), first.segments.len() + 1);
+        // Changed, it is the tool's own, and the editor says so.
+        assert_eq!(
+            holder_choice(t, &system::holders()),
+            system::holders().len() + 1
+        );
+        for _ in 0..h.segments.len() {
+            send(
+                &mut tools,
+                PanelEvent::Button {
+                    id: "remove_segment".into(),
+                },
+            );
+        }
+        assert_eq!(tools["Flat 6"].holder, None);
+    }
+
+    #[test]
+    fn a_fusion_json_library_brings_its_holders() {
+        let mut tools = library();
+        let json = r#"{"data": [{"type": "flat end mill", "description": "Flat 4",
+            "geometry": {"DC": 4, "LCF": 12, "LB": 25},
+            "holder": {"description": "ER11", "segments": [
+                {"height": 11, "lower-diameter": 16, "upper-diameter": 16}]}}]}"#;
+        let said = import_tools(&mut tools, json).unwrap();
+        assert!(said.starts_with("Added 1 tool(s)"), "{said}");
+        let t = &tools["Flat 4"];
+        assert_eq!(t.holder.as_ref().unwrap().segments[0].diameter, 16.0);
+        assert_eq!(t.stickout, Some(25.0));
     }
 
     #[test]
