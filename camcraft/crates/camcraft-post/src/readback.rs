@@ -3,7 +3,8 @@
 //!
 //! The renderer's tests say what it means to write; this says what the text does.
 //! [`read`] interprets the words a program holds — units, distance mode, planes,
-//! arcs by centre or by radius, helices, drilling cycles, `G28` and `G53`,
+//! arcs by centre or by radius, helices, drilling cycles, rigid tapping
+//! (`G33.1`), `G28` and `G53`,
 //! the work offsets `G54` to `G59`, `G59.1` to `G59.3` (60 to 62), and
 //! Fanuc's `G54.1 P1` and Haas's `G154 P1` on (60 on),
 //! length offsets, tool changes, rotaries positioned at rapid (`G0 A.. B..`,
@@ -48,7 +49,7 @@ use glam::{DVec2, DVec3, dvec3};
 
 use crate::custom::{Concern, concern};
 use crate::op::{DrillCycles, ProgramSpec};
-use crate::profile::{Dialect, Profile, ProgramUnits};
+use crate::profile::{Dialect, Profile, ProgramUnits, TapStyle};
 use crate::render::{custom_end, custom_mark};
 
 /// Millimetres in an inch.
@@ -143,6 +144,9 @@ pub enum Action {
     LengthOffset(Option<u32>),
     /// A pause, in seconds (`G4`).
     Dwell(f64),
+    /// Rigid tapping mode (`M29 S..`) at a speed, rev/min, for the tapping
+    /// cycles after it, until `G80`.
+    RigidMode(u32),
     /// Rotaries turned (`G0 A.. B..`), each by its word, in degrees.
     Rotary(Vec<(char, f64)>),
     /// The end of the program (`M2`, `M30`).
@@ -411,11 +415,14 @@ impl Block {
                 'G' => {
                     // The standard's three work offsets past G59, G59.1 to
                     // G59.3, as 591 to 593.
-                    // Fanuc's G54.1 (with a P), as 541.
+                    // Fanuc's G54.1 (with a P), as 541. LinuxCNC's rigid tapping,
+                    // G33.1, as 331.
                     let tenths = (v * 10.0).round();
                     let exact = (v * 10.0 - tenths).abs() < 1e-9;
                     if exact
-                        && ((591.0..=593.0).contains(&tenths) || (540.5..541.5).contains(&tenths))
+                        && ((591.0..=593.0).contains(&tenths)
+                            || (540.5..541.5).contains(&tenths)
+                            || (330.5..331.5).contains(&tenths))
                     {
                         b.g.push(whole('G', tenths)?);
                     } else {
@@ -466,6 +473,9 @@ impl Block {
 /// The drilling cycles understood: `G73`, `G74`, `G81` to `G84`.
 const CYCLES: [u32; 6] = [73, 74, 81, 82, 83, 84];
 
+/// `G33.1`, rigid tapping, as a G code is kept here: a whole number.
+const RIGID_TAP: u32 = 331;
+
 /// How far `G73` backs off between pecks, in millimetres. The standard says
 /// only "a small distance", and a controller backs off as far as it is set to;
 /// what is checked holds however far that is.
@@ -506,6 +516,12 @@ struct Reader {
     cycle: Cycle,
     /// Which way the spindle turns, if it does.
     spin: Option<SpindleDirection>,
+    /// The speed the spindle was started at, rev/min.
+    spun_at: Option<f64>,
+    /// In rigid tapping mode (`M29`), until `G80`.
+    rigid: bool,
+    /// Rigid tapping mode set, and no tapping cycle since: nothing may move.
+    armed: bool,
     /// Seconds in a unit of a pause's `P` word.
     dwell: f64,
 }
@@ -527,6 +543,9 @@ impl Default for Reader {
             to_initial: true,
             cycle: Cycle::default(),
             spin: None,
+            spun_at: None,
+            rigid: false,
+            armed: false,
             dwell: 1.0,
         }
     }
@@ -553,18 +572,20 @@ impl Reader {
         let b = Block::gather(words)?;
         let motions =
             b.g.iter()
-                .filter(|g| matches!(g, 0..=3 | 80) || CYCLES.contains(*g))
+                .filter(|&&g| matches!(g, 0..=3 | 80 | RIGID_TAP) || CYCLES.contains(&g))
                 .count();
         if motions > 1 {
             return Err("two motions in one block".into());
         }
         for &g in &b.g {
             match g {
-                0..=3 => self.motion = Some(g),
+                0..=3 | RIGID_TAP => self.motion = Some(g),
                 g if CYCLES.contains(&g) => self.motion = Some(g),
                 80 => {
                     self.motion = None;
                     self.cycle = Cycle::default();
+                    self.rigid = false;
+                    self.armed = false;
                 }
                 17..=19 => self.plane = g,
                 20 => self.inches = Some(true),
@@ -619,10 +640,22 @@ impl Reader {
                     };
                     self.push(Action::SpindleOn { rpm, dir });
                     self.spin = Some(dir);
+                    self.spun_at = Some(s);
                 }
                 5 => {
                     self.push(Action::SpindleOff);
                     self.spin = None;
+                }
+                29 => {
+                    // Fanuc's rigid tapping: the spindle under position
+                    // control at S for the tapping cycles that follow.
+                    let s = b.s.ok_or("M29 with no S")?;
+                    if self.spin.is_none() || self.spun_at != Some(s) {
+                        return Err(format!("M29 S{s} at another speed than the spindle turns"));
+                    }
+                    self.push(Action::RigidMode(whole('S', s.round())?));
+                    self.rigid = true;
+                    self.armed = true;
                 }
                 7 => self.push(Action::Coolant(Coolant::Mist)),
                 8 => self.push(Action::Coolant(Coolant::Flood)),
@@ -698,6 +731,17 @@ impl Reader {
                 .collect();
             self.push(Action::Rotary(at));
         }
+        let moves = b.has_g(28) || b.has_g(53) || has_axes || (b.r.is_some() && cycling);
+        let taps = cycling && matches!(self.motion, Some(74 | 84));
+        if moves && self.armed && !taps {
+            return Err("a move between M29 and its tapping cycle".into());
+        }
+        if moves && self.rigid && cycling && !taps {
+            return Err("a drilling cycle that does not tap in rigid tapping mode (M29)".into());
+        }
+        if taps && moves {
+            self.armed = false;
+        }
         if b.has_g(28) {
             self.home(&b)?;
         } else if b.has_g(53) {
@@ -710,6 +754,7 @@ impl Reader {
                     self.line_to(&b, Some(f))?;
                 }
                 Some(g @ (2 | 3)) => self.arc_to(&b, g == 3)?,
+                Some(RIGID_TAP) => self.rigid_tap(&b)?,
                 Some(g) if cycling => self.drill(&b, g)?,
                 _ => return Err("axis words with no motion in force".into()),
             }
@@ -874,6 +919,38 @@ impl Reader {
             sweep,
         };
         self.go(to, Some(feed), Some(turn));
+        Ok(())
+    }
+
+    /// `G33.1`, rigid tapping: from where the tool is down to the Z given,
+    /// synchronized with the spindle at `K` a turn, so fed at that times its
+    /// speed, the spindle reversed at the bottom; then back up to where it
+    /// started at the same feed, and the spindle reversed again. Only
+    /// straight along Z, as LinuxCNC asks it to be written, and back at the
+    /// same speed: `I`, a faster way back, is not understood.
+    fn rigid_tap(&mut self, b: &Block) -> Result<(), String> {
+        if self.spin.is_none() {
+            return Err("G33.1 without the spindle turning".into());
+        }
+        let speed = self.speed.ok_or("G33.1 with no spindle speed")?;
+        let pitch = b.ijk[2]
+            .filter(|k| *k > 0.0)
+            .ok_or("G33.1 with no pitch (K)")?;
+        if b.ijk[0].is_some() || b.ijk[1].is_some() {
+            return Err("G33.1 with I or J is not understood".into());
+        }
+        if b.axes[0].is_some() || b.axes[1].is_some() {
+            return Err("G33.1 along X or Y is not understood: only straight down Z".into());
+        }
+        if self.absolute != Some(true) {
+            return Err("G33.1 in incremental mode is not understood".into());
+        }
+        let from = self.at;
+        known(&from).ok_or("G33.1 from where is not known")?;
+        let to = self.target(&b.axes)?;
+        let feed = pitch * self.scale()? * speed;
+        self.go(to, Some(feed), None);
+        self.go(from, Some(feed), None);
         Ok(())
     }
 
@@ -1117,6 +1194,8 @@ struct Checker<'a> {
     ended: bool,
     /// Where each rotary was last sent, by its word.
     rotary: Vec<(char, f64)>,
+    /// Whether rigid tapping mode (`M29`) is in force.
+    rigid: bool,
 }
 
 impl<'a> Checker<'a> {
@@ -1140,6 +1219,7 @@ impl<'a> Checker<'a> {
             ended: false,
             rotary: Vec::new(),
             wcs_word: offset_word(spec.wcs),
+            rigid: false,
         }
     }
 
@@ -1281,6 +1361,15 @@ impl<'a> Checker<'a> {
                 self.at[2] = None;
             }
             Action::Dwell(s) => self.dwells.push(*s),
+            Action::RigidMode(rpm) => {
+                if *rpm != self.spec.rpm {
+                    return Err(Problem::at(
+                        line,
+                        format!("rigid tapping at {rpm} rev/min, not {}", self.spec.rpm),
+                    ));
+                }
+                self.rigid = true;
+            }
             Action::Rotary(at) => {
                 if cutting {
                     return refuse("turns a rotary");
@@ -1666,6 +1755,12 @@ impl<'a> Checker<'a> {
                     }
                     Some(f) => {
                         self.cutting(line)?;
+                        if d.tap.is_some() && d.tap_style == TapStyle::M29 && !self.rigid {
+                            return Err(Problem::at(
+                                line,
+                                format!("taps hole {n} without rigid tapping mode (M29 S..)"),
+                            ));
+                        }
                         if (f - d.feed).abs() > self.tol.feed {
                             return Err(Problem::at(
                                 line,

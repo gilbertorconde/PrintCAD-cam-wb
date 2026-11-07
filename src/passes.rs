@@ -501,8 +501,8 @@ const FACE_DIRECTIONS: [(FaceDirection, &str); 3] = [
     (FaceDirection::Conventional, "Conventional"),
 ];
 const HANDS: [(ThreadHand, &str); 2] = [
-    (ThreadHand::Right, "Right-hand: G84"),
-    (ThreadHand::Left, "Left-hand: G74"),
+    (ThreadHand::Right, "Right-hand"),
+    (ThreadHand::Left, "Left-hand"),
 ];
 const TRACE_DIRECTIONS: [(TraceDirection, &str); 3] = [
     (TraceDirection::Climb, "Climb"),
@@ -864,7 +864,8 @@ fn drill_rows(
         rows.push(Widget::Text {
             text: format!(
                 "Fed in at the pitch a turn, {feed}, and back out with the spindle \
-                 reversed. Only a post with drill cycles can write it."
+                 reversed. Only a machine that taps can write it: LinuxCNC, Fanuc, \
+                 Haas, Centroid CNC12 and Heidenhain do; Masso, GRBL and Mach cannot."
             ),
             mono: false,
         });

@@ -245,11 +245,24 @@ panels, the drawing and the helper that runs camcraft.
   that takes canned cycles (`drill_cycles = true`) writes each hole as one:
   G81, G82 with a dwell, G83 pecking, G73 breaking the chip (backing off as
   far as the controller is set to), and G84, or G74 left-hand, tapping at the
-  pitch times the spindle's speed. The built-in posts have them off, until
-  they are dry-run on each machine: holes go as plain moves, and tapping is
-  refused, as a failed check, since no plain move keeps the feed to the
-  spindle as it reverses at the bottom. A tap is kept in the tool library as
-  a flat end mill its size, and turns the way its thread does.
+  pitch times the spindle's speed; without them holes go as plain moves. The
+  LinuxCNC, Centroid CNC12 and Masso posts write them (Masso's G82 pause in
+  milliseconds, `dwell_milliseconds = true`, as Fanuc's); the others write
+  plain moves, GRBL having no cycles. A tap goes only as the controller
+  taps, since no plain move keeps the feed to the spindle as it reverses at
+  the bottom, and `tap` says how, whether or not the other cycles are on:
+  `"g84"` (G84 and G74, the default with cycles; in Klartext, cycle 207,
+  which `"cycle"` also names), `"m29"` (G84 and G74 after `M29 S..`, Fanuc's
+  rigid tapping), `"g33.1"` (rigid tapping a hole at a time, the spindle
+  reversing itself: `G33.1 Z.. K` with the pitch) or `"none"`. LinuxCNC taps
+  with G33.1, which needs a spindle encoder; Fanuc in rigid mode after
+  `M29`; Haas with G84 and G74, which it taps rigidly by itself; Heidenhain
+  with cycle 207; CNC12 with G84 and G74, which needs its rigid tapping (an
+  encoder and the Pro licence on an Acorn) or a floating tap holder. Masso,
+  GRBL and Mach cannot (Mach4's G84 is for a floating holder, not kept to
+  the spindle): a tapping operation posted for them is a failed check that
+  says so, and names the machines that can. A tap is kept in the tool
+  library as a flat end mill its size, and turns the way its thread does.
   A profile can name its rotary axes, for 3+2 machining:
 
   ```toml

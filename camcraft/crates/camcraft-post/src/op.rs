@@ -23,7 +23,7 @@ use camcraft_core::path::toolpath::{Arc, MoveKind, MoveRole, Toolpath, principal
 use camcraft_core::strategy::drilling::{Hole, Tap};
 use glam::{DVec2, DVec3, dvec3};
 
-use crate::profile::ProgramUnits;
+use crate::profile::{ProgramUnits, TapStyle};
 use crate::rotary::{RotaryAt, RotaryError, angles, short};
 
 /// A canned drilling cycle.
@@ -140,6 +140,21 @@ pub enum Op {
         /// Feed in mm/min.
         feed: f64,
     },
+    /// Rigid tapping (`G33.1`) from where the tool is, over the hole at its
+    /// R plane: down to `depth` along Z synchronized with the spindle, which
+    /// reverses at the bottom, and back up to where it started.
+    RigidTap {
+        /// The bottom of the thread.
+        depth: f64,
+        /// How far the tap goes a turn, in millimetres.
+        pitch: f64,
+    },
+    /// Rigid tapping mode for the run of tapping cycles that follows, at
+    /// `rpm`, the spindle's speed: `M29 S..`, as Fanuc taps rigidly.
+    RigidMode {
+        /// The spindle's speed, rev/min.
+        rpm: u32,
+    },
     /// Start of a run of canned cycles, each returning to the height it
     /// started from (`G98`).
     CycleStart,
@@ -255,6 +270,11 @@ pub struct DrillCycles {
     pub dwell: Option<f64>,
     /// The thread, if it taps (`G84`, `G74` left-hand); then it does not peck.
     pub tap: Option<Tap>,
+    /// How a tap is written: as `G84` or `G74`; as those after `M29 S..`
+    /// ([`Op::RigidMode`]); or by rigid tapping, `G33.1` with its pitch, a
+    /// hole at a time ([`Op::RigidTap`]). Never [`TapStyle::Cannot`] with a
+    /// tap: such a machine has no cycles for it.
+    pub tap_style: TapStyle,
     /// Feed down into each hole, in mm/min: a tap's, its pitch a turn.
     pub feed: f64,
     /// The height the tool crosses between holes at, and returns to (`G98`).
@@ -309,11 +329,25 @@ pub enum LowerError {
     /// the only way to keep the feed to the spindle as it reverses at the
     /// bottom ([`ProgramSpec::taps`]).
     #[error(
-        "tapping is posted only as the controller's tapping cycle (G84, G74), which keeps \
+        "tapping is posted only as the controller taps (G84, G74 or G33.1), which keeps \
          the feed to the spindle as it reverses: as plain moves the tap would strip its \
-         thread or snap. Post it with a profile that has drill_cycles = true"
+         thread or snap. Post it with a profile that taps: tap = \"g84\" or \"g33.1\", \
+         or drill_cycles = true"
     )]
     TapsAsMoves,
+    /// A path that taps, for a machine whose controller cannot.
+    #[error(
+        "{machine} cannot tap: its controller has no way to keep the feed to the spindle as \
+         it reverses at the bottom, and as plain moves the tap would strip its thread or \
+         snap. Post the setup for a machine that taps ({can}), or, if this one has a \
+         tapping cycle, give its profile tap = \"g84\" or tap = \"g33.1\""
+    )]
+    CannotTap {
+        /// The machine's name.
+        machine: String,
+        /// The built-in machines that tap, named.
+        can: String,
+    },
     /// A tap whose spindle turns against its thread.
     #[error("a {0:?}-hand tap goes in with the spindle turning the other way")]
     TapTurnsAgainstThread(ThreadHand),
@@ -416,7 +450,11 @@ pub fn lower_counted(
     let mut made = vec![0; out.len()];
 
     if let Some(d) = &spec.drill {
-        cycles(d, path, &mut out, &mut made);
+        if d.tap_style == TapStyle::G331 && d.tap.is_some() {
+            rigid_taps(d, path, &mut out, &mut made);
+        } else {
+            cycles(d, spec.rpm, path, &mut out, &mut made);
+        }
     } else {
         moves(path, &mut out, &mut made);
     }
@@ -472,7 +510,7 @@ fn tilt_notes(spec: &ProgramSpec) -> Vec<String> {
 /// then each cycle returning there (`G98`) before the next, and `G80` after.
 /// `made` gets, for each, how many of `path`'s moves it stands for: those
 /// down to its hole and back out, found in order.
-fn cycles(d: &DrillCycles, path: &Toolpath, out: &mut Vec<Op>, made: &mut Vec<usize>) {
+fn cycles(d: &DrillCycles, rpm: u32, path: &Toolpath, out: &mut Vec<Op>, made: &mut Vec<usize>) {
     let Some(first) = d.holes.first() else {
         return;
     };
@@ -480,6 +518,10 @@ fn cycles(d: &DrillCycles, path: &Toolpath, out: &mut Vec<Op>, made: &mut Vec<us
         to: dvec3(first.at.x, first.at.y, d.clearance),
     });
     out.push(Op::CycleStart);
+    // Rigid mode just before the taps, with nothing moving between.
+    if d.tap.is_some() && d.tap_style == TapStyle::M29 {
+        out.push(Op::RigidMode { rpm });
+    }
     let mut count = made.last().copied().unwrap_or(0);
     made.resize(out.len(), count);
     let kind = match (d.tap, d.peck, d.chip_break, d.dwell) {
@@ -492,22 +534,8 @@ fn cycles(d: &DrillCycles, path: &Toolpath, out: &mut Vec<Op>, made: &mut Vec<us
         (None, None, _, Some(_)) => CycleKind::DrillDwell,
         (None, None, _, None) => CycleKind::Drill,
     };
-    let moves = path.moves();
-    let over = |i: usize, at: DVec2| {
-        moves
-            .get(i)
-            .is_some_and(|m| m.to.truncate().distance(at) < 1e-6)
-    };
     for h in &d.holes {
-        // The first move over the hole after the last hole's, then on while
-        // the moves stay over it.
-        if let Some(i) = (count..moves.len()).find(|&i| over(i, h.at)) {
-            let mut end = i;
-            while over(end + 1, h.at) {
-                end += 1;
-            }
-            count = end + 1;
-        }
+        count = hole_end(path, count, h.at);
         out.push(Op::Cycle {
             kind,
             at: h.at,
@@ -529,6 +557,51 @@ fn cycles(d: &DrillCycles, path: &Toolpath, out: &mut Vec<Op>, made: &mut Vec<us
     }
     out.push(Op::CycleEnd);
     made.push(count);
+}
+
+/// How many of `path`'s moves are made once the hole at `at` is: the first
+/// move over it from the `from`-th on, then on while the moves stay over it.
+/// `from` where none is.
+fn hole_end(path: &Toolpath, from: usize, at: DVec2) -> usize {
+    let moves = path.moves();
+    let over = |i: usize| {
+        moves
+            .get(i)
+            .is_some_and(|m| m.to.truncate().distance(at) < 1e-6)
+    };
+    let Some(mut end) = (from..moves.len()).find(|&i| over(i)) else {
+        return from;
+    };
+    while over(end + 1) {
+        end += 1;
+    }
+    end + 1
+}
+
+/// Each tapped hole by rigid tapping, a hole at a time: across to it at the
+/// clearance height, down to its R plane, tapped (`G33.1`, which comes back
+/// up to R by itself, fed both ways), and back up to the clearance height,
+/// as a `G84` with `G98` goes. `made` as for [`cycles`].
+fn rigid_taps(d: &DrillCycles, path: &Toolpath, out: &mut Vec<Op>, made: &mut Vec<usize>) {
+    let Some(tap) = d.tap else {
+        return;
+    };
+    let mut count = made.last().copied().unwrap_or(0);
+    for h in &d.holes {
+        let up = dvec3(h.at.x, h.at.y, d.clearance);
+        out.push(Op::Rapid { to: up });
+        out.push(Op::Rapid {
+            to: dvec3(h.at.x, h.at.y, h.retract()),
+        });
+        made.resize(out.len(), count);
+        count = hole_end(path, count, h.at);
+        out.push(Op::RigidTap {
+            depth: h.bottom,
+            pitch: tap.pitch,
+        });
+        out.push(Op::Rapid { to: up });
+        made.resize(out.len(), count);
+    }
 }
 
 /// The lowest and highest the tool's tip goes along `path`, an arc's bulge
@@ -708,6 +781,7 @@ mod tests {
                 chip_break: None,
                 dwell: None,
                 tap: None,
+                tap_style: TapStyle::Cycle,
                 feed: 100.0,
                 clearance: 5.0,
             }),
@@ -763,6 +837,7 @@ mod tests {
                 chip_break,
                 dwell: None,
                 tap,
+                tap_style: TapStyle::Cycle,
                 feed: 150.0,
                 clearance: 15.0,
             }),
@@ -846,6 +921,68 @@ mod tests {
             lower(&path, &backwards),
             Err(LowerError::TapTurnsAgainstThread(ThreadHand::Left))
         );
+    }
+
+    /// Rigid tapping goes a hole at a time, with no canned cycle: across at
+    /// the clearance height, down to the R plane, the tap, back up; and each
+    /// hole's tap counts the moves down it and back out.
+    #[test]
+    fn rigid_taps_go_a_hole_at_a_time() {
+        let tap = Tap {
+            pitch: 1.25,
+            hand: ThreadHand::Right,
+        };
+        let (path, mut spec) = drilled(None, None, Some(tap));
+        if let Some(d) = &mut spec.drill {
+            d.tap_style = TapStyle::G331;
+        }
+        let (ops, made) = lower_counted(&path, &spec).unwrap();
+        assert!(
+            !ops.iter()
+                .any(|o| matches!(o, Op::Cycle { .. } | Op::CycleStart | Op::CycleEnd)),
+            "{ops:?}"
+        );
+        let start = ops
+            .iter()
+            .position(|o| matches!(o, Op::SpindleOn { .. }))
+            .unwrap();
+        let hole = &ops[start + 1..start + 5];
+        assert_eq!(
+            hole,
+            &[
+                Op::Rapid {
+                    to: dvec3(0.0, 0.0, 15.0)
+                },
+                Op::Rapid {
+                    to: dvec3(0.0, 0.0, 2.0)
+                },
+                Op::RigidTap {
+                    depth: -7.0,
+                    pitch: 1.25
+                },
+                Op::Rapid {
+                    to: dvec3(0.0, 0.0, 15.0)
+                },
+            ]
+        );
+        let taps: Vec<usize> = ops
+            .iter()
+            .zip(&made)
+            .filter(|(o, _)| matches!(o, Op::RigidTap { .. }))
+            .map(|(_, n)| *n)
+            .collect();
+        let (_, cycles) = drilled(None, None, Some(tap));
+        let (cycle_ops, cycle_made) = lower_counted(&path, &cycles).unwrap();
+        let want: Vec<usize> = cycle_ops
+            .iter()
+            .zip(&cycle_made)
+            .filter(|(o, _)| matches!(o, Op::Cycle { .. }))
+            .map(|(_, n)| *n)
+            .collect();
+        assert_eq!(taps, want, "as its cycles count");
+        assert_eq!(made.len(), ops.len());
+        assert!(made.windows(2).all(|w| w[0] <= w[1]));
+        assert_eq!(made.last(), Some(&path.len()));
     }
 
     /// A path's extents take in an arc's bulge, not only its ends.

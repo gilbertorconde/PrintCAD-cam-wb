@@ -11,6 +11,9 @@ comment   = ["(", ")"]
 
 arc_style   = "ij"
 tool_change = "pause"
+# GRBL has no canned cycles and nothing that keeps the feed to the spindle, so
+# it cannot tap: a tapping operation is a failed check.
+tap = "none"
 
 header = [
   "({name})",

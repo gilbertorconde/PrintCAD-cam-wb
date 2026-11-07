@@ -14,7 +14,7 @@ use camcraft_core::run::{Made, OperationResult, SetupResult, StrategyDetail};
 use camcraft_core::setup::bounds_all;
 use camcraft_core::setup::frame::Frame;
 use camcraft_post::op::{CustomGcode, DrillCycles, LowerError, ProgramSpec, extents, lower};
-use camcraft_post::profile::{Placement, Profile, TravelCheck};
+use camcraft_post::profile::{Placement, Profile, TapStyle, TravelCheck};
 use camcraft_post::render::{RenderReport, render};
 use glam::DVec3;
 
@@ -79,7 +79,9 @@ pub fn program_name(setup: &str, index: usize, op_name: &str) -> String {
 
 /// Everything one operation's program needs besides its path, for `profile`,
 /// in a setup whose frame is `frame`: tilted, where the machine's rotaries go
-/// to stand its tool axis up the spindle, which they may not reach.
+/// to stand its tool axis up the spindle, which they may not reach. A tap
+/// for a machine that cannot tap is refused, saying which built-in machines
+/// can.
 pub fn program_spec(
     op: &OperationResult,
     wcs: u8,
@@ -87,6 +89,17 @@ pub fn program_spec(
     profile: &Profile,
 ) -> Result<ProgramSpec, LowerError> {
     let [x, _, z] = frame.turn.axes();
+    let tap = match &op.detail {
+        StrategyDetail::Drill(r) => r.tap,
+        _ => None,
+    };
+    let tapping = profile.tapping();
+    if tap.is_some() && tapping == TapStyle::Cannot {
+        return Err(LowerError::CannotTap {
+            machine: profile.name.clone(),
+            can: Profile::builtin_tapping().join(", "),
+        });
+    }
     let rotary = match &profile.rotary {
         Some(r) => r.position(z, x)?,
         None => Vec::new(),
@@ -102,19 +115,24 @@ pub fn program_spec(
         spin: op.spindle,
         coolant: op.coolant,
         units: profile.units,
+        // Holes as cycles where the machine takes them; a tap however it
+        // taps, cycles or not.
         drill: match &op.detail {
-            StrategyDetail::Drill(r) if profile.drill_cycles => Some(DrillCycles {
-                holes: r.holes.clone(),
-                peck: r.peck,
-                chip_break: r.chip_break,
-                dwell: r.dwell,
-                tap: r.tap,
-                feed: r.feed,
-                clearance: op.clearance_z,
-            }),
+            StrategyDetail::Drill(r) if profile.drill_cycles || r.tap.is_some() => {
+                Some(DrillCycles {
+                    holes: r.holes.clone(),
+                    peck: r.peck,
+                    chip_break: r.chip_break,
+                    dwell: r.dwell,
+                    tap: r.tap,
+                    tap_style: tapping,
+                    feed: r.feed,
+                    clearance: op.clearance_z,
+                })
+            }
             _ => None,
         },
-        taps: matches!(&op.detail, StrategyDetail::Drill(r) if r.tap.is_some()),
+        taps: tap.is_some(),
         // Said in the header when the part is tilted, or turned by the
         // rotaries; a part turned square by hand is written as it always was.
         tilt: (z != glam::DVec3::Z && (frame.turn.square().is_none() || !rotary.is_empty()))

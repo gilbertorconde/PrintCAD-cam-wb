@@ -300,6 +300,38 @@ fn cycles_render() {
     );
 }
 
+/// Rigid tapping is `G33.1` down Z with the pitch as `K`, finer than an
+/// axis word, in the program's units; the move after it says its own
+/// motion, since `G33.1` is a motion mode of its own.
+#[test]
+fn rigid_tapping_renders_its_pitch() {
+    let ops = |units| {
+        vec![
+            Op::Units(units),
+            Op::Rapid {
+                to: dvec3(1.0, 2.0, 7.0),
+            },
+            Op::Rapid {
+                to: dvec3(1.0, 2.0, 2.0),
+            },
+            Op::RigidTap {
+                depth: -5.0,
+                pitch: 0.7,
+            },
+            Op::Rapid {
+                to: dvec3(1.0, 2.0, 7.0),
+            },
+        ]
+    };
+    let p = Profile::builtin("linuxcnc").unwrap().unwrap();
+    let (g, _) = render(&ops(ProgramUnits::Mm), &p, "t");
+    assert!(g.contains("\nZ2\nG33.1 Z-5 K0.7\nG0 Z7\n"), "{g}");
+    // 20 threads an inch, to seven places.
+    let (g, _) = render(&ops(ProgramUnits::Inch), &p, "t");
+    let tap = g.lines().find(|l| l.starts_with("G33.1")).unwrap();
+    assert_eq!(tap, "G33.1 Z-0.1969 K0.0275591", "{g}");
+}
+
 /// A dwell is written in seconds to the millisecond, as Fusion's posts write
 /// it, not to the feed's places: a quarter second is not a fifth.
 #[test]
@@ -319,10 +351,13 @@ fn a_dwell_is_to_the_millisecond() {
             feed: 200.0,
         },
     ];
-    let mut p = Profile::builtin("masso").unwrap().unwrap();
-    p.drill_cycles = true;
+    let p = Profile::builtin("linuxcnc").unwrap().unwrap();
     let (g, _) = render(&ops, &p, "t");
-    assert!(g.contains(" P0.25 F200."), "{g}");
+    assert!(g.contains(" P0.25 F200"), "{g}");
+    // Masso's G82 reads milliseconds.
+    let masso = Profile::builtin("masso").unwrap().unwrap();
+    let (g, _) = render(&ops, &masso, "t");
+    assert!(g.contains(" P250 F200."), "{g}");
 }
 
 /// After a rapid to `from`, each arc, or a straight feed where there is none,

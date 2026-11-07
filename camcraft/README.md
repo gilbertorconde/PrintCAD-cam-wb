@@ -56,6 +56,38 @@ which is the hole it leaves. In `camcraft-post`, the cycles are `G73`,
 `readback` reads the three cycles and checks a tap is fed at its pitch a
 turn, both ways, with the spindle turning its way.
 
+And a machine taps as its controller does. In `camcraft-post`, a profile's
+`tap` (`TapStyle`) names how: `"g84"` (`G84` and `G74`, as before, the
+default for a profile with `drill_cycles`; in Klartext cycle 207, which
+`"cycle"` also names), `"m29"` (those after `M29 S..`, Fanuc's rigid
+tapping, `Op::RigidMode`), `"g33.1"` (rigid tapping, as LinuxCNC has it)
+or `"none"`; `Profile::tapping` says which, and a Heidenhain profile may
+ask only for its cycle or none. `DrillCycles::tap_style` carries it to
+lowering. With `"g33.1"` each tapped hole is written on its own: across at
+the clearance height, down to its R plane, `Op::RigidTap` (`G33.1 Z..
+K<pitch>`, the pitch to three more places than an axis word,
+`Profile::pitch`) and back up, no canned cycle round it. `readback` reads
+`G33.1`, down Z only, fed at `K` times the spindle's speed both ways and
+back to where it began, refusing it with the spindle stopped, with no `K`,
+or with an `I`, and checks it as it checks a `G84`; and `M29 S..`
+(`Action::RigidMode`), which must be at the speed the spindle turns, with
+nothing moving before its tapping cycle and no other cycle after it until
+`G80`, and without which a Fanuc's tap is refused. The LinuxCNC profiles
+take the cycles and tap with `G33.1` (LinuxCNC's `G84` is for a floating
+holder, not synchronized); the Centroid ones take the cycles and tap with
+`G84`; Masso's take the cycles, `dwell_milliseconds` for its `G82`, and do
+not tap; Fanuc's tap with `"m29"`, Haas's with `"g84"` and Heidenhain's
+with cycle 207, their other cycles still off; GRBL's and Mach's say
+`"none"`. In `camcraft-session`, `program_spec` posts a tap however the
+machine taps, cycles or not, and refuses one for a machine that cannot
+(`LowerError::CannotTap`), naming the built-in machines that can
+(`Profile::builtin_tapping`). Golden programs: `linuxcnc-tap.nc`,
+`linuxcnc-inch-tap-left.nc`, `linuxcnc-chip-break.nc`,
+`centroid-avid-tap.nc`, `centroid-avid-inch-tap-left.nc`, `fanuc-tap.nc`,
+`fanuc-inch-tap-left.nc`, `haas-tap.nc` and `haas-inch-tap-left.nc`;
+`masso-tap.nc` and `masso-tap-left.nc` are gone, as Masso cannot tap, and
+`masso-dwell.nc` pauses in milliseconds.
+
 And stock can be a round bar. In `camcraft-core`, `StockSpec` has
 `CylinderAroundModels` (along a model axis through the middle of the
 models' box, its radius a margin past the farthest of them from it, and

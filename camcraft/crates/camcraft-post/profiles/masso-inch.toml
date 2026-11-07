@@ -12,11 +12,14 @@ comment   = ["(", ")"]
 
 arc_style   = "ij"
 tool_change = "m6"
-# Masso documents G81, G82, G83 and G80. Off until they have been dry-run on the
-# machine; off, a drilling operation is posted as plain moves instead.
-# On, chip breaking is G73 and tapping G84 (G74 left-hand); off, tapping is
-# refused, as no plain move keeps the feed to the spindle as it reverses.
-drill_cycles = false
+# Masso documents G73 (backing off a fixed 1 mm), G81, G82, G83 and G80,
+# returning with G98.
+drill_cycles = true
+# G82's P is in milliseconds.
+dwell_milliseconds = true
+# Masso documents no tapping cycle (no G84, G74 or G33.1; rigid tapping is
+# promised for a later version), so a tapping operation is a failed check.
+tap = "none"
 
 units = "inch"
 

@@ -13,10 +13,10 @@ use std::f64::consts::{FRAC_PI_2, PI, TAU};
 use camcraft_core::job::ThreadHand;
 use camcraft_core::path::toolpath::{Arc, MoveRole, Toolpath};
 use camcraft_post::op::{ProgramSpec, lower};
-use camcraft_post::profile::{ArcStyle, Profile, ProgramUnits, ToolChangeStyle};
+use camcraft_post::profile::{ArcStyle, Dialect, Profile, ProgramUnits, TapStyle, ToolChangeStyle};
 use camcraft_post::readback::check;
 use camcraft_post::render::render;
-use common::{chip_breaking, drilling, fixture, spec, tapping};
+use common::{chip_breaking, drilling, fixture, rigid_tapping, spec, tapping};
 use glam::{DVec3, dvec3};
 
 fn post(path: &Toolpath, spec: &ProgramSpec, profile: &Profile) -> String {
@@ -145,8 +145,17 @@ fn drilling_cycles_read_back_to_their_holes() {
                 ("chip breaking", chip_breaking()),
                 ("tapped", tapping(ThreadHand::Right)),
                 ("tapped left-hand", tapping(ThreadHand::Left)),
+                ("tapped by G33.1", rigid_tapping(ThreadHand::Right)),
+                ("tapped by G33.1 left-hand", rigid_tapping(ThreadHand::Left)),
+                ("tapped after M29", m29(tapping(ThreadHand::Right))),
+                ("tapped after M29 left-hand", m29(tapping(ThreadHand::Left))),
             ];
             for (what, spec) in specs {
+                // Klartext taps only with cycle 207.
+                let style = spec.drill.as_ref().map(|d| d.tap_style);
+                if profile.dialect == Dialect::Heidenhain && style != Some(TapStyle::Cycle) {
+                    continue;
+                }
                 let spec = ProgramSpec { units, ..spec };
                 reads_back(
                     &Toolpath::new(),
@@ -155,6 +164,139 @@ fn drilling_cycles_read_back_to_their_holes() {
                     &format!("holes {what} for {name} in {units:?}"),
                 );
             }
+        }
+    }
+}
+
+/// `spec`'s taps in rigid mode, `M29 S..` before them.
+fn m29(mut spec: ProgramSpec) -> ProgramSpec {
+    if let Some(d) = &mut spec.drill {
+        d.tap_style = TapStyle::M29;
+    }
+    spec
+}
+
+/// Each built-in machine that taps writes a tap as it says it taps, and the
+/// program reads back to the holes, either hand, in either units.
+#[test]
+fn every_builtin_that_taps_reads_back_its_taps() {
+    let mut tapped = Vec::new();
+    for name in Profile::builtin_names() {
+        let profile = Profile::builtin(name).unwrap().unwrap();
+        let style = profile.tapping();
+        if style == TapStyle::Cannot {
+            continue;
+        }
+        tapped.push(name);
+        for hand in [ThreadHand::Right, ThreadHand::Left] {
+            let mut spec = ProgramSpec {
+                units: profile.units,
+                ..tapping(hand)
+            };
+            if let Some(d) = &mut spec.drill {
+                d.tap_style = style;
+            }
+            let text = post(&Toolpath::new(), &spec, &profile);
+            let cycle = match hand {
+                ThreadHand::Right => "G84 X",
+                ThreadHand::Left => "G74 X",
+            };
+            let word = match (style, profile.dialect) {
+                (_, Dialect::Heidenhain) => "CYCL DEF 207",
+                (TapStyle::G331, _) => "G33.1 Z",
+                (TapStyle::M29, _) => "M29 S500",
+                _ => cycle,
+            };
+            assert!(text.contains(word), "{name}:\n{text}");
+            if style == TapStyle::M29 {
+                assert!(text.contains(cycle), "{name}:\n{text}");
+            }
+            reads_back(
+                &Toolpath::new(),
+                &spec,
+                &profile,
+                &format!("{hand:?}-hand taps for {name}"),
+            );
+        }
+    }
+    assert_eq!(
+        tapped,
+        [
+            "centroid-avid",
+            "centroid-avid-inch",
+            "linuxcnc",
+            "linuxcnc-inch",
+            "fanuc",
+            "fanuc-inch",
+            "haas",
+            "haas-inch",
+            "heidenhain",
+            "heidenhain-inch"
+        ]
+    );
+}
+
+/// Faults in Fanuc's rigid tapping: no M29, M29 at another speed than the
+/// spindle's, a move between M29 and the tapping cycle, a drilling cycle
+/// in rigid mode.
+#[test]
+fn m29_faults_are_caught() {
+    let profile = Profile::builtin("fanuc").unwrap().unwrap();
+    let spec = m29(tapping(ThreadHand::Right));
+    let text = post(&Toolpath::new(), &spec, &profile);
+    assert_eq!(text.matches("M29 S500\n").count(), 1, "{text}");
+    check(&text, &Toolpath::new(), &spec, &profile).unwrap();
+    let faults: &[(&str, &str, &str)] = &[
+        ("M29 S500\n", "", "without rigid tapping mode"),
+        ("M29 S500\n", "M29 S400\n", "another speed"),
+        ("M29 S500\n", "M29\n", "M29 with no S"),
+        ("M29 S500\n", "M29 S500\nG0 X10.\n", "a move between M29"),
+        (
+            "G84 X30. Y10.",
+            "G81 X30. Y10.",
+            "does not tap in rigid tapping mode",
+        ),
+    ];
+    for (from, to, said) in faults {
+        let broken = text.replacen(from, to, 1);
+        match check(&broken, &Toolpath::new(), &spec, &profile) {
+            Ok(()) => panic!("{from:?} made {to:?} was not caught:\n{broken}"),
+            Err(p) => assert!(p.to_string().contains(said), "{p}\n{broken}"),
+        }
+    }
+}
+
+/// Faults in rigid tapping: a pitch that is not the tap's, a hole fed down
+/// without the tap, a faster way back, a tap with the spindle stopped, one
+/// along X.
+#[test]
+fn rigid_tapping_faults_are_caught() {
+    let profile = Profile::builtin("linuxcnc").unwrap().unwrap();
+    let spec = rigid_tapping(ThreadHand::Right);
+    let text = post(&Toolpath::new(), &spec, &profile);
+    assert_eq!(text.matches("G33.1 Z-1.5 K1.25\n").count(), 3, "{text}");
+    check(&text, &Toolpath::new(), &spec, &profile).unwrap();
+    let faults: &[(&str, &str, &str)] = &[
+        ("G33.1 Z-1.5 K1.25", "G33.1 Z-1.5 K1.5", "drills at 750.000"),
+        (
+            "G33.1 Z-1.5 K1.25",
+            "G1 Z-1.5 F625",
+            "rapids out of tapped hole 1",
+        ),
+        ("G33.1 Z-1.5 K1.25", "G33.1 Z-1.5 K1.25 I2", "I or J"),
+        (
+            "G33.1 Z-1.5 K1.25",
+            "M5\nG33.1 Z-1.5 K1.25",
+            "without the spindle",
+        ),
+        ("G33.1 Z-1.5 K1.25", "G33.1 X10 Z-1.5 K1.25", "along X or Y"),
+        ("G33.1 Z-1.5 K1.25", "G33.1 Z-1.5", "no pitch"),
+    ];
+    for (from, to, said) in faults {
+        let broken = text.replacen(from, to, 1);
+        match check(&broken, &Toolpath::new(), &spec, &profile) {
+            Ok(()) => panic!("{from:?} made {to:?} was not caught:\n{broken}"),
+            Err(p) => assert!(p.to_string().contains(said), "{p}\n{broken}"),
         }
     }
 }
