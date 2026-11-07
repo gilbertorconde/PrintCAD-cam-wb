@@ -22,7 +22,12 @@
 //! passes by the material ahead of them, adaptive clearing, is never turned
 //! round: run backwards, a pass would meet what it was steered round all at
 //! once. Nor is a drill's.
+//!
+//! A run repeats adaptive clearing and pocket clearing no way here: it
+//! works each copy out again where it is, mirrored ones the other way
+//! round, and joins them with [`push_copy`].
 
+use camcraft_geom::contour::{Contour, Region};
 use glam::{DMat2, DVec2, DVec3};
 
 use crate::job::{MirrorAxis, Pattern};
@@ -57,6 +62,42 @@ impl Copy {
     /// Where a direction goes.
     fn direction(&self, v: DVec3) -> DVec3 {
         (self.turn * v.truncate()).extend(v.z)
+    }
+
+    /// The copy that undoes this one: where a point of this copy came from.
+    pub fn inverse(&self) -> Copy {
+        let turn = self.turn.inverse();
+        Copy {
+            turn,
+            shift: -(turn * self.shift),
+        }
+    }
+
+    /// Where `region` goes, seen from above. Turned over, its rings wind the
+    /// other way, which a region read even-odd does not mind.
+    pub fn region(&self, region: &Region) -> Region {
+        if *self == Self::SAME {
+            return region.clone();
+        }
+        let rings = region
+            .rings()
+            .iter()
+            .filter_map(|r| {
+                Contour::new(
+                    r.points()
+                        .iter()
+                        .map(|&p| self.turn * p + self.shift)
+                        .collect(),
+                )
+            })
+            .collect();
+        Region::new(rings)
+    }
+
+    /// `moves` where this copy puts them: an arc's centre and axis with them,
+    /// and turned over, its sweep the other way. Nothing is turned round.
+    pub fn moves(&self, moves: &[Move]) -> Vec<Move> {
+        moved(moves, self)
     }
 
     /// `self` after `first`.
@@ -161,22 +202,28 @@ pub fn repeat(
             }
             moves
         };
-        // Each copy goes to its start by a link, which the linker makes.
-        if let Some(first) = moves.first()
-            && first.role != MoveRole::Link
-        {
-            out.path.push(Move {
-                to: first.to,
-                kind: MoveKind::Linear,
-                role: MoveRole::Link,
-                feed: first.feed.or(moves.iter().find_map(|m| m.feed)),
-            })?;
-        }
-        for m in moves {
-            out.path.push(m)?;
-        }
+        push_copy(&mut out.path, moves)?;
     }
     Ok(out)
+}
+
+/// `moves`, one copy, after what `path` has: it goes to its start by a link,
+/// which the linker makes.
+pub fn push_copy(path: &mut Toolpath, moves: Vec<Move>) -> Result<(), ToolpathError> {
+    if let Some(first) = moves.first()
+        && first.role != MoveRole::Link
+    {
+        path.push(Move {
+            to: first.to,
+            kind: MoveKind::Linear,
+            role: MoveRole::Link,
+            feed: first.feed.or(moves.iter().find_map(|m| m.feed)),
+        })?;
+    }
+    for m in moves {
+        path.push(m)?;
+    }
+    Ok(())
 }
 
 /// `moves` where copy `c` puts them: an arc's centre and axis with them, and

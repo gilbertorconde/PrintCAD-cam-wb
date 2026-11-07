@@ -14,26 +14,91 @@ pub(super) fn pocket_clearing_paths(
     stock: &Stock,
     warnings: &mut Vec<String>,
 ) -> Result<Paths, RunError> {
-    let (job, op) = (work.job, work.op);
-    let mut reach =
-        LevelReach::new(&work.prepared.part, work.tool, job.tolerance).map_err(in_op(op))?;
-    let (top, bottom) = op.levels_3d(work.heights);
-    let params = ClearingParams {
-        // Checked with the job: it always has one.
-        stepdown: op.stepdown().unwrap_or(f64::NAN),
-        stepover: op.passes.stepover,
-        feed: op.passes.feed,
-        top,
-        bottom,
+    let planned = Clearing::new(
+        work,
         min_ring_length,
-        kept_on_right: work.kept_on_right(),
-        flats: work.flat_levels(flat_areas),
-    };
-    let (sweep_lo, sweep_hi) = work.sweep();
-    let sweep = Region::rectangle(sweep_lo, sweep_hi);
-    let base = *work.tool.base();
-    let (path, report) = pocket_clearing(&mut reach, &sweep, limit, stock.field(), &base, &params)
-        .map_err(in_op(op))?;
+        flat_areas,
+        limit,
+        stock.field().pitch(),
+    )?;
+    let field = stock.field();
+    let (path, report) = planned.clear(work.op, &|h| contour_above(field, h), false)?;
+    clearing_said(&report, warnings);
+    Ok((path, report.rings, StrategyDetail::PocketClearing(report)))
+}
+
+/// Pocket clearing worked out as far as the model takes it, for any material.
+pub(super) struct Clearing {
+    pub(super) levels: ClearingLevels,
+    pub(super) params: ClearingParams,
+    /// The real tool.
+    pub(super) base: Cutter,
+    /// Where the tool's centre may go, seen from above, at most.
+    pub(super) area: (DVec2, DVec2),
+}
+
+impl Clearing {
+    /// `work`'s pocket clearing, for material traced from a grid `pitch`
+    /// apart.
+    pub(super) fn new(
+        work: &Work<'_>,
+        min_ring_length: f64,
+        flat_areas: bool,
+        limit: Option<&Region>,
+        pitch: f64,
+    ) -> Result<Self, RunError> {
+        let (job, op) = (work.job, work.op);
+        let mut reach =
+            LevelReach::new(&work.prepared.part, work.tool, job.tolerance).map_err(in_op(op))?;
+        let (top, bottom) = op.levels_3d(work.heights);
+        let params = ClearingParams {
+            // Checked with the job: it always has one.
+            stepdown: op.stepdown().unwrap_or(f64::NAN),
+            stepover: op.passes.stepover,
+            feed: op.passes.feed,
+            top,
+            bottom,
+            min_ring_length,
+            kept_on_right: work.kept_on_right(),
+            flats: work.flat_levels(flat_areas),
+        };
+        let (sweep_lo, sweep_hi) = work.sweep();
+        let sweep = Region::rectangle(sweep_lo, sweep_hi);
+        let levels =
+            ClearingLevels::new(&mut reach, &sweep, limit, pitch, &params).map_err(in_op(op))?;
+        let area = limit
+            .and_then(Region::bounds)
+            .map_or((sweep_lo, sweep_hi), |(lo, hi)| {
+                (lo.max(sweep_lo), hi.min(sweep_hi))
+            });
+        Ok(Self {
+            levels,
+            params,
+            base: *work.tool.base(),
+            area,
+        })
+    }
+
+    /// The material `standing` gives cleared, every ring the other way round
+    /// if `turned`, for `op`.
+    pub(super) fn clear(
+        &self,
+        op: &Operation,
+        standing: &Standing<'_>,
+        turned: bool,
+    ) -> Result<(Toolpath, ClearingReport), RunError> {
+        let params = ClearingParams {
+            kept_on_right: self.params.kept_on_right != turned,
+            ..self.params.clone()
+        };
+        self.levels
+            .clear(standing, &self.base, &params)
+            .map_err(in_op(op))
+    }
+}
+
+/// What a pocket clearing's report says is worth a warning.
+pub(super) fn clearing_said(report: &ClearingReport, warnings: &mut Vec<String>) {
     if report.rings == 0 {
         warnings.push(
             "found nothing to clear: the stock may already be below this \
@@ -41,7 +106,6 @@ pub(super) fn pocket_clearing_paths(
                 .into(),
         );
     }
-    Ok((path, report.rings, StrategyDetail::PocketClearing(report)))
 }
 
 /// Adaptive clearing of the stock's blocks, a level each stepdown and one on
@@ -53,50 +117,103 @@ pub(super) fn adaptive_paths(
     limit: Option<&Region>,
     warnings: &mut Vec<String>,
 ) -> Result<Paths, RunError> {
-    let (job, op) = (work.job, work.op);
-    let mut reach =
-        LevelReach::new(&work.prepared.part, work.tool, job.tolerance).map_err(in_op(op))?;
-    let diameter = work.spec.diameter;
-    let (top, bottom) = op.levels_3d(work.heights);
-    let flats = work.flat_levels(flat_areas);
-    // Into a closed area it goes down a helix, or straight: it offers no ramp.
-    let helix_radius = match op.entry() {
-        Some(Entry::Plunge) => 0.0,
-        _ => op.helix_diameter(diameter, work.spec.corner_radius()) / 2.0,
-    };
-    let params = AdaptiveParams {
-        // Checked with the job: it always has one.
-        stepdown: op.stepdown().unwrap_or(f64::NAN),
-        optimal_load: op.passes.stepover,
-        feed: op.passes.feed,
-        top,
-        bottom,
-        tolerance: job.tolerance,
-        climb_right: work.clockwise(),
-        direction: direction.engine(),
-        helix_radius,
-        stay_down: op.stay_down(diameter),
-        ramp_angle: op.linking.ramp_angle.to_radians(),
-        ramp_feed: op.ramp_feed(),
-        ramp_stepdown: Some(op.ramp_stepdown(diameter)),
-        safe_distance: op.linking.safe_distance,
-        flats,
-    };
-    // Room past the stock's sides for the whole tool, so a pass can start
-    // beside the block rather than going down into it.
-    let (lo, hi) = work.bounds;
-    let room = work.tool.max_radius()
-        + work.tool.cutter_radius()
-        + op.boundary.margin.max(0.0)
-        + job.tolerance;
-    let sweep = Region::rectangle(lo - DVec2::splat(room), hi + DVec2::splat(room));
-    let area = match limit {
-        Some(l) => sweep.intersection(l).map_err(in_op(op))?,
-        None => sweep,
-    };
-    let base = *work.tool.base();
-    let (path, report) =
-        adaptive_rough(&mut reach, &area, work.blocks, &base, &params).map_err(in_op(op))?;
+    let planned = Adaptive::new(work, direction, flat_areas, limit)?;
+    let arc = level_arc(&planned.params);
+    let blocks = work.blocks;
+    let (path, report) = planned.clear(work.op, &|z| material(blocks, z, arc), false)?;
+    adaptive_said(&report, warnings);
+    Ok((path, report.passes, StrategyDetail::Adaptive(report)))
+}
+
+/// Adaptive clearing worked out as far as the model takes it, for any
+/// material.
+pub(super) struct Adaptive {
+    pub(super) levels: AdaptiveLevels,
+    pub(super) params: AdaptiveParams,
+    /// The real tool.
+    pub(super) base: Cutter,
+    /// Where the tool's centre may go, seen from above, at most.
+    pub(super) area: (DVec2, DVec2),
+}
+
+impl Adaptive {
+    /// `work`'s adaptive clearing.
+    pub(super) fn new(
+        work: &Work<'_>,
+        direction: CutDirection,
+        flat_areas: bool,
+        limit: Option<&Region>,
+    ) -> Result<Self, RunError> {
+        let (job, op) = (work.job, work.op);
+        let mut reach =
+            LevelReach::new(&work.prepared.part, work.tool, job.tolerance).map_err(in_op(op))?;
+        let diameter = work.spec.diameter;
+        let (top, bottom) = op.levels_3d(work.heights);
+        let flats = work.flat_levels(flat_areas);
+        // Into a closed area it goes down a helix, or straight: it offers no ramp.
+        let helix_radius = match op.entry() {
+            Some(Entry::Plunge) => 0.0,
+            _ => op.helix_diameter(diameter, work.spec.corner_radius()) / 2.0,
+        };
+        let params = AdaptiveParams {
+            // Checked with the job: it always has one.
+            stepdown: op.stepdown().unwrap_or(f64::NAN),
+            optimal_load: op.passes.stepover,
+            feed: op.passes.feed,
+            top,
+            bottom,
+            tolerance: job.tolerance,
+            climb_right: work.clockwise(),
+            direction: direction.engine(),
+            helix_radius,
+            stay_down: op.stay_down(diameter),
+            ramp_angle: op.linking.ramp_angle.to_radians(),
+            ramp_feed: op.ramp_feed(),
+            ramp_stepdown: Some(op.ramp_stepdown(diameter)),
+            safe_distance: op.linking.safe_distance,
+            flats,
+        };
+        // Room past the stock's sides for the whole tool, so a pass can start
+        // beside the block rather than going down into it.
+        let (lo, hi) = work.bounds;
+        let room = work.tool.max_radius()
+            + work.tool.cutter_radius()
+            + op.boundary.margin.max(0.0)
+            + job.tolerance;
+        let sweep = Region::rectangle(lo - DVec2::splat(room), hi + DVec2::splat(room));
+        let area = match limit {
+            Some(l) => sweep.intersection(l).map_err(in_op(op))?,
+            None => sweep,
+        };
+        let levels = AdaptiveLevels::new(&mut reach, &area, &params).map_err(in_op(op))?;
+        Ok(Self {
+            levels,
+            params,
+            base: *work.tool.base(),
+            area: area.bounds().unwrap_or((lo, lo)),
+        })
+    }
+
+    /// `material` cleared, every pass cutting the other way round if
+    /// `turned`, for `op`.
+    pub(super) fn clear(
+        &self,
+        op: &Operation,
+        material: &Uncut<'_>,
+        turned: bool,
+    ) -> Result<(Toolpath, AdaptiveReport), RunError> {
+        let params = AdaptiveParams {
+            climb_right: self.params.climb_right != turned,
+            ..self.params.clone()
+        };
+        self.levels
+            .clear(material, &self.base, &params)
+            .map_err(in_op(op))
+    }
+}
+
+/// What an adaptive clearing's report says is worth a warning.
+pub(super) fn adaptive_said(report: &AdaptiveReport, warnings: &mut Vec<String>) {
     if report.passes == 0 {
         warnings.push(
             "found nothing to clear: the stock may already be below this \
@@ -116,7 +233,6 @@ pub(super) fn adaptive_paths(
             report.left_mm2
         ));
     }
-    Ok((path, report.passes, StrategyDetail::Adaptive(report)))
 }
 
 /// A 2D profile or pocket of `areas`.

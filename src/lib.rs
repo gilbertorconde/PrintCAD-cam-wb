@@ -1274,8 +1274,9 @@ impl Bench for Cam {
                         "A transform (its Pattern group) repeats the operation's toolpath before it is linked: in \
                          rows, then each round a centre, then all mirrored with the originals \
                          kept; a mirrored copy's rings are turned round so it still climbs. \
-                         Every copy is simulated and checked, and one outside the stock is a \
-                         warning."
+                         Adaptive and pocket clearing are worked out again for each copy, \
+                         against the material where it is. Every copy is simulated and \
+                         checked, and one outside the stock is a warning."
                             .into(),
                         "A library tool's first preset sets its feeds and speeds.".into(),
                         "Custom G-code (strategy custom-gcode) has no tool and no toolpath: its \

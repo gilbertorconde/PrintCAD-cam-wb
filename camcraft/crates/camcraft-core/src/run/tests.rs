@@ -1947,3 +1947,330 @@ fn a_pattern_cuts_every_copy_and_a_mirror_keeps_the_direction() {
     let refused = job.check_setup(0).unwrap_err().to_string();
     assert!(refused.contains("x_count"), "{refused}");
 }
+
+/// A plate 80 by 30 and 1 thick, under a block 5 deeper, and a clearing of
+/// `strategy` with the 6 mm flat for each of `ops`: kept to the 14 mm
+/// square about `x` on the plate's middle line, with its pattern.
+fn squares_in_a_block(ops: &[(f64, crate::job::Pattern)], strategy: StrategySpec) -> SetupResult {
+    use crate::job::{Curve, Segment, StockSpec};
+    let body = Body::derived(synthetic::cuboid(
+        DVec3::new(-40.0, -15.0, 0.0),
+        DVec3::new(40.0, 15.0, 1.0),
+    ));
+    let mut job: Job = toml::from_str(JOB).unwrap();
+    job.setups[0].operations.retain(|op| op.name == "rough");
+    job.stocks[0].spec = StockSpec::AroundModels {
+        models: vec![],
+        margin: [0.0, 0.0, 5.0],
+        below: 0.0,
+    };
+    let rough = job.setups[0].operations.remove(0);
+    for (x, pattern) in ops {
+        let mut op = rough.clone();
+        op.strategy = strategy;
+        op.passes.stepover = if op.strategy.uses().load { 0.6 } else { 2.0 };
+        op.passes.stock_to_leave = Default::default();
+        op.boundary.kind = Boundary::Selection;
+        // Down to the plate: past its edge the tool would go on down, and
+        // a copy over the plate with it.
+        op.heights.bottom = Some(Height {
+            reference: HeightRef::ModelTop,
+            offset: 0.0,
+        });
+        let corner = |dx: f64, dy: f64| [x + dx, dy, 6.0];
+        op.selection.curves = vec![Curve {
+            start: corner(-7.0, -7.0),
+            segments: [(7.0, -7.0), (7.0, 7.0), (-7.0, 7.0), (-7.0, -7.0)]
+                .into_iter()
+                .map(|(dx, dy)| Segment::Line { to: corner(dx, dy) })
+                .collect(),
+        }];
+        op.transform = *pattern;
+        job.setups[0].operations.push(op);
+    }
+    let bodies: Bodies<'_> = [("dome", &body)].into_iter().collect();
+    let result = run_setup(&job, 0, &bodies).unwrap();
+    let tool = cutting_tool(&job, &job.setups[0].operations[0]).unwrap();
+    assert!((tool.cutter_radius() - 3.0).abs() < 1e-12);
+    result
+}
+
+/// How the 6 mm flat's edge meets the material along `path`, from `stock`,
+/// cut as the path goes.
+struct Engaged {
+    /// The most of it in material at any step fed along at a level, cutting
+    /// or between cuts, as an angle.
+    widest: f64,
+    /// How much of what it met, all steps together, was on its right, as a
+    /// clockwise spindle climbs, and how much on its left.
+    right: usize,
+    left: usize,
+}
+
+fn engagement(
+    mut stock: camcraft_sim::stock::Stock,
+    path: &[crate::path::toolpath::Move],
+) -> Engaged {
+    use crate::cutter::allowance::{Allowance, EffectiveTool};
+    use crate::path::simadapt::sim_moves_of;
+    use crate::path::toolpath::{MoveKind, MoveRole};
+    use camcraft_sim::stock::{MoveClass, SimMove};
+    use std::f64::consts::PI;
+    let base = flat(6.0).build().unwrap();
+    let tool = EffectiveTool::of(&base, Allowance::new(0.0, 0.0).unwrap()).unwrap();
+    let from = |p: DVec3| SimMove {
+        to: p,
+        class: MoveClass::Rapid,
+        arc: None,
+    };
+    let samples = 90;
+    let mut out = Engaged {
+        widest: 0.0,
+        right: 0,
+        left: 0,
+    };
+    let Some(mut at) = path.first().map(|m| m.to) else {
+        return out;
+    };
+    for m in path {
+        let level = (m.to.z - at.z).abs() < 1e-9;
+        if m.role != MoveRole::Rapid && level && m.kind == MoveKind::Linear {
+            let steps = camcraft_geom::steps::bounded_count((at.distance(m.to) / 0.1).ceil());
+            let mut a = at;
+            for i in 1..=steps {
+                let b = at.lerp(m.to, f64::from(i) / f64::from(steps));
+                // The front half of the tool's edge, just past it, from its
+                // right to its left: what of it is in material it takes, a
+                // slot all of it.
+                let ahead = (b - a).truncate().normalize_or_zero();
+                let inside: Vec<i32> = (0..=samples)
+                    .filter(|k| {
+                        let t = PI * (f64::from(*k) / f64::from(samples) - 0.5);
+                        let p = b.truncate() + DVec2::from_angle(t).rotate(ahead) * 3.05;
+                        stock.height_at(p.x, p.y).is_some_and(|h| h > b.z + 0.05)
+                    })
+                    .map(|k| k - samples / 2)
+                    .collect();
+                let e =
+                    PI * f64::from(u32::try_from(inside.len()).unwrap()) / f64::from(samples + 1);
+                out.widest = out.widest.max(e);
+                out.right += inside.iter().filter(|k| **k < 0).count();
+                out.left += inside.iter().filter(|k| **k > 0).count();
+                let mut step = sim_moves_of(&[crate::path::toolpath::Move { to: b, ..*m }]);
+                step.insert(0, from(a));
+                stock.sweep(&step, &tool);
+                a = b;
+            }
+        } else {
+            let mut step = sim_moves_of(std::slice::from_ref(m));
+            step.insert(0, from(at));
+            stock.sweep(&step, &tool);
+        }
+        at = m.to;
+    }
+    out
+}
+
+fn adaptive() -> StrategySpec {
+    StrategySpec::Adaptive {
+        direction: crate::job::CutDirection::Climb,
+        flat_areas: true,
+    }
+}
+
+/// Three adaptive pockets in a row 26 apart, the first over the block's
+/// edge, the last where an operation before already cleared: each copy is
+/// worked out against the material where it is. The middle one, all in the
+/// block, goes down a helix where the first came in from the side, so is no
+/// copy of it and never takes the tool's whole width; the last finds nothing
+/// to clear, where a copy of the first would cut air.
+#[test]
+fn a_pattern_of_adaptive_clearing_clears_the_material_where_each_copy_is() {
+    use crate::job::{Linear, Pattern};
+    use crate::path::toolpath::{Move, MoveRole, Toolpath};
+    let rows = Pattern {
+        linear: Some(Linear {
+            x_count: 3,
+            x_spacing: 26.0,
+            y_count: 1,
+            y_spacing: 0.0,
+        }),
+        ..Pattern::default()
+    };
+    let earlier = (12.0, Pattern::default());
+    let patterned = squares_in_a_block(&[earlier, (-40.0, rows)], adaptive());
+    let alone = squares_in_a_block(&[earlier, (-40.0, Pattern::default())], adaptive());
+    let before = patterned.keyframes[1].unpack().unwrap();
+    let op = &patterned.operations[1];
+    assert!(result_is_clean(&patterned), "{:?}", patterned.warnings());
+
+    // The first copy is the original, worked out alone.
+    let original = &alone.operations[1].path;
+    let near = |m: &&Move, x: f64| m.role == MoveRole::Cut && (m.to.x - x).abs() < 10.5;
+    let cuts_near = |path: &crate::path::toolpath::Toolpath, x: f64| -> Vec<DVec3> {
+        path.moves()
+            .iter()
+            .filter(|m| near(m, x))
+            .map(|m| m.to)
+            .collect()
+    };
+    assert_eq!(cuts_near(&op.path, -40.0), cuts_near(original, -40.0));
+    assert!(!cuts_near(original, -40.0).is_empty());
+
+    // The middle one is no copy of it.
+    let moved: Vec<DVec3> = cuts_near(original, -40.0)
+        .iter()
+        .map(|p| *p + DVec3::new(26.0, 0.0, 0.0))
+        .collect();
+    let middle = cuts_near(&op.path, -14.0);
+    assert!(!middle.is_empty());
+    assert_ne!(middle, moved);
+    assert!(
+        op.links.helixes > alone.operations[1].links.helixes,
+        "{:?}",
+        op.links
+    );
+
+    // Held to its load: never more of the tool's edge in material than the
+    // original takes at its own place, where it goes round the square's
+    // corners against the block left outside it, and far from the whole
+    // front of it, a slot, which a copy of the original takes.
+    let own = engagement(before.clone(), original.moves()).widest;
+    let widest = engagement(before.clone(), op.path.moves()).widest;
+    assert!(own < 1.7, "the original engaged {own} rad");
+    assert!(
+        widest < own + 0.25,
+        "engaged {widest} rad, the original {own}"
+    );
+    let mut rigid = Toolpath::new();
+    for m in original.moves() {
+        rigid
+            .push(Move {
+                to: m.to + DVec3::new(26.0, 0.0, 0.0),
+                kind: match m.kind {
+                    crate::path::toolpath::MoveKind::Arc(mut a) => {
+                        a.centre += DVec3::new(26.0, 0.0, 0.0);
+                        crate::path::toolpath::MoveKind::Arc(a)
+                    }
+                    k => k,
+                },
+                ..*m
+            })
+            .unwrap();
+    }
+    let slotting = engagement(before, rigid.moves()).widest;
+    assert!(slotting > 2.5, "a copy engaged only {slotting} rad");
+
+    // The last was cleared before: nothing there to cut, and said.
+    assert!(cuts_near(&op.path, 12.0).is_empty());
+    assert!(
+        op.warnings
+            .iter()
+            .any(|w| w.contains("1 of the pattern's 3 copies found nothing to clear")),
+        "{:?}",
+        op.warnings
+    );
+}
+
+fn result_is_clean(result: &SetupResult) -> bool {
+    result.verify.gouged == 0
+        && result
+            .operations
+            .iter()
+            .all(|op| op.sim.rapid_contacts == 0 && !op.path.has_unplanned_links())
+}
+
+/// Mirrored, an adaptive clearing is worked out mirrored, so the copy climbs
+/// as the original does: the material it meets is on its right, as a
+/// clockwise spindle's climbing cut has it. The original's passes turned
+/// over would have it on the left.
+#[test]
+fn a_mirrored_adaptive_clearing_climbs() {
+    use crate::job::{Mirror, MirrorAxis, Pattern};
+    use crate::path::toolpath::MoveRole;
+    let mirror = Pattern {
+        mirror: Some(Mirror {
+            axis: MirrorAxis::Y,
+            through: [0.0, 0.0],
+        }),
+        ..Pattern::default()
+    };
+    let result = squares_in_a_block(&[(-14.0, mirror)], adaptive());
+    let op = &result.operations[0];
+    assert!(result_is_clean(&result), "{:?}", result.warnings());
+    assert!(
+        !op.warnings.iter().any(|w| w.contains("turned round")),
+        "{:?}",
+        op.warnings
+    );
+    let before = result.keyframes[0].unpack().unwrap();
+    // The copy alone, on the right, from where the original left it.
+    let start = op
+        .path
+        .moves()
+        .iter()
+        .position(|m| m.role == MoveRole::Cut && m.to.x > 0.0)
+        .unwrap();
+    let original = engagement(before.clone(), op.path.moves().get(..start).unwrap());
+    let both = engagement(before, op.path.moves());
+    let copy = Engaged {
+        widest: both.widest,
+        right: both.right - original.right,
+        left: both.left - original.left,
+    };
+    assert!(
+        original.right > 10 * original.left.max(1),
+        "{} {}",
+        original.right,
+        original.left
+    );
+    assert!(
+        copy.right > 10 * copy.left.max(1),
+        "{} {}",
+        copy.right,
+        copy.left
+    );
+    assert!(copy.widest < 1.7, "{}", copy.widest);
+}
+
+/// Pocket clearing patterned over a square an operation before cleared:
+/// that copy has next to nothing to cut, the ring along the walls it
+/// touches, where a copy of the original would clear it all again.
+#[test]
+fn a_pattern_of_pocket_clearing_skips_what_is_cleared() {
+    use crate::job::{Linear, Pattern};
+    use crate::path::toolpath::MoveRole;
+    let rows = Pattern {
+        linear: Some(Linear {
+            x_count: 3,
+            x_spacing: 26.0,
+            y_count: 1,
+            y_spacing: 0.0,
+        }),
+        ..Pattern::default()
+    };
+    let clearing = StrategySpec::PocketClearing {
+        min_ring_length: 2.0,
+        conventional: false,
+        flat_areas: false,
+    };
+    let result = squares_in_a_block(&[(14.0, Pattern::default()), (-38.0, rows)], clearing);
+    let op = &result.operations[1];
+    assert!(result_is_clean(&result), "{:?}", result.warnings());
+    // How far it cuts about `x`.
+    let near = |x: f64| -> f64 {
+        op.path
+            .moves()
+            .windows(2)
+            .filter(|w| w[1].role == MoveRole::Cut && (w[1].to.x - x).abs() < 10.0)
+            .map(|w| w[0].to.distance(w[1].to))
+            .sum()
+    };
+    assert!(near(-38.0) > 0.0 && near(-12.0) > 0.0);
+    assert!(
+        near(14.0) * 2.0 < near(-12.0),
+        "{} {}",
+        near(14.0),
+        near(-12.0)
+    );
+}

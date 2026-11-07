@@ -193,10 +193,32 @@ ordered, tabbed and linked (`run/operation.rs`), so the linker links every
 copy into the material and the simulation, the checks and the program see
 them all. A mirrored copy's passes are turned round where that is safe:
 one all at one level after its link backwards whole, else each stretch
-of cutting that closes on itself backwards in place; adaptive clearing
-and drilling never are, and passes left cutting the other way are a
-warning, as is a copy further outside the stock than the original. In
-`camcraft-session`, the finishing job's operation has no pattern.
+of cutting that closes on itself backwards in place; drilling's never
+are, and passes left cutting the other way are a warning, as is a copy
+further outside the stock than the original. In `camcraft-session`, the
+finishing job's operation has no pattern.
+
+And a pattern of a strategy the material steers, adaptive clearing and
+pocket clearing, is worked out copy by copy (`run/operation/copies.rs`),
+not moved whole: the material where each copy is, brought to the
+original's place through the copy undone (`pattern::Copy::inverse` and
+`Copy::region`), is cleared from the original's levels, and the passes
+moved out again (`Copy::moves`, `pattern::push_copy`); a mirrored copy is
+cleared the other way round, so it climbs as the original does. Each
+copy's passes are cut into a copy of the material before a copy whose
+footprint (its area, the tool and a helix round it) overlaps them is
+worked out; copies that overlap none not yet cut are worked out together,
+in parallel, with the same result on any number of cores. To work out
+many from one, `strategy::adaptive` has `AdaptiveLevels` (the levels and
+where the tool may be at each, from the part, once; `clear` takes the
+material at each level as an `Uncut` closure, the blocks' for
+`adaptive_rough` as before) and `strategy::pocket_clearing` has
+`ClearingLevels` (likewise, its material a `Standing` closure, the
+stock's grid for `pocket_clearing` as before), and each report has `and`.
+Patterned, an adaptive clearing's material is the blocks less where the
+grid stands lower than it did at the start, taken the tolerance wider,
+so it reads what the operations before it cut, which alone it does not;
+a copy that finds nothing is a warning.
 
 And a machine's own blocks, its travel, and Custom G-code. In
 `camcraft-post`, `placeholder` fills `@name@` placeholders (the program,

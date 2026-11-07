@@ -112,9 +112,17 @@ panels, the drawing and the helper that runs camcraft.
   the material, simulated and checked, and drawn. A mirrored copy would
   cut conventional where the original climbs, so each of its rings, and
   each pass all at one level, is run the other way round; what cannot be
-  (a ramp, an adaptive pass, steered by the material ahead of it) is said.
-  A copy that goes further outside the stock than the original is a
-  warning.
+  (a ramp) is said. Adaptive clearing and pocket clearing, which the
+  material steers, are worked out again for each copy, against the
+  material where it is, as the operations and the copies before it left
+  it: a copy where an earlier cut took the material cuts no air there, and
+  one where more stands than at the original goes down a helix rather than
+  taking the tool's whole width; a mirrored one is worked out mirrored, so
+  it climbs too. Patterned, an adaptive clearing reads what the operations
+  before it cut, as pocket clearing always does; alone, it clears the
+  stock's blocks. Copies apart are worked out at once, on every core. A
+  copy that goes further outside the stock than the original is a
+  warning, and copies that find nothing to clear are said.
 - **Picking in the view,** as camcraft's: a pick row in the panel arms it,
   and while it is armed, hovering shows what a click takes. An operation
   takes faces, and edges by the loop they go round at their height (an edge

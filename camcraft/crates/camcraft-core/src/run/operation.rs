@@ -3,7 +3,7 @@
 
 use std::cell::OnceCell;
 
-use camcraft_geom::contour::Region;
+use camcraft_geom::contour::{Region, contour_above};
 use camcraft_geom::topology::EdgeKind;
 use camcraft_sim::stock::{Block, SimReport, Stock};
 use glam::{DVec2, DVec3, dvec2};
@@ -12,7 +12,7 @@ use super::error::in_op;
 use super::{Made, OperationResult, PLUNGE_RATIO, RunError, StrategyDetail};
 use crate::cutter::allowance::{Allowance, EffectiveTool};
 use crate::cutter::dropcutter::DropCutter;
-use crate::cutter::tool::{Flat, ToolProfile};
+use crate::cutter::tool::{Cutter, Flat, ToolProfile};
 use crate::job::{
     ChamferSide, ContourOrder, CutDirection, Depths, Entry, FaceDirection, HeightContext, Job,
     Links, Operation, PassOrder, Picks, RadialDirection, Retraction, SlotPattern, SpindleDirection,
@@ -30,7 +30,9 @@ use crate::path::toolpath::{Move, Toolpath};
 use crate::setup::features::{Chain, FeatureError, Picking, picked_chains};
 use crate::setup::{Bodies, Prepared};
 use crate::strategy::StrategyError;
-use crate::strategy::adaptive::{AdaptiveParams, adaptive_rough, flat_heights};
+use crate::strategy::adaptive::{
+    AdaptiveLevels, AdaptiveParams, AdaptiveReport, Uncut, flat_heights, level_arc, material,
+};
 use crate::strategy::chamfer::{Centres, Place, centres, material_side};
 use crate::strategy::drilling::{DrillParams, DrillReport, Hole, Round, Tap, drill};
 use crate::strategy::engrave::{EngraveParams, EngraveReport, Levels, Trace, engrave, in_order};
@@ -43,7 +45,7 @@ use crate::strategy::planar::{
     Area, LeadArc, PlanarParams, PlanarReport, Spiral, WallFinish, areas, centre_offset, pocket,
     profile,
 };
-use crate::strategy::pocket_clearing::{ClearingParams, pocket_clearing};
+use crate::strategy::pocket_clearing::{ClearingLevels, ClearingParams, ClearingReport, Standing};
 use crate::strategy::projected::{Curve, ProjectParams, ProjectReport, project};
 use crate::strategy::reach::LevelReach;
 use crate::strategy::scallop::{ScallopParams, contact_region, scallop_finish};
@@ -52,14 +54,19 @@ use crate::strategy::waterline::{WaterlineParams, waterline};
 
 mod carving;
 mod clearing;
+mod copies;
 mod finishing;
 mod holes;
 mod link;
 
 pub(super) use carving::chamfer_curves;
 use carving::{chamfer_paths, engrave_paths, slot_paths, vcarve_paths};
-use clearing::{adaptive_paths, drill_paths, face_paths, planar_paths, pocket_clearing_paths};
+use clearing::{
+    Adaptive, Clearing, adaptive_paths, adaptive_said, clearing_said, drill_paths, face_paths,
+    planar_paths, pocket_clearing_paths,
+};
 pub(super) use clearing::{heights_of, planar_areas};
+use copies::each_copy;
 use finishing::{
     contour_paths, flat_paths, morphed_spiral_paths, parallel_paths, radial_paths, scallop_paths,
     spiral_paths,
@@ -185,121 +192,135 @@ pub(super) fn run_operation(
         Target::Traces(t) => traces = t.as_slice(),
         Target::Carve(area) => carved = Some(area),
     }
-    let (raw, passes, detail) = match op.strategy {
-        StrategySpec::Parallel { angle } => parallel_paths(work, angle, limit, &mut warnings)?,
-        StrategySpec::Scallop {
-            direction, order, ..
-        } => scallop_paths(work, (direction, order), limit, &mut warnings)?,
-        StrategySpec::Contour {
-            direction, order, ..
-        } => contour_paths(work, (direction, order), limit, &mut warnings)?,
-        StrategySpec::Flat { order, .. } => flat_paths(work, order, limit, &mut warnings)?,
-        StrategySpec::Spiral {
-            centre,
-            inner_radius,
-            outer_radius,
-            order,
-            ..
-        } => spiral_paths(
-            work,
-            (centre, inner_radius, outer_radius),
-            order,
-            limit,
-            &mut warnings,
-        )?,
-        StrategySpec::Radial {
-            centre,
-            inner_radius,
-            outer_radius,
-            angle_from,
-            angle_to,
-            direction,
-            ..
-        } => radial_paths(
-            work,
-            (centre, inner_radius, outer_radius),
-            (angle_from, angle_to, direction),
-            limit,
-            &mut warnings,
-        )?,
-        StrategySpec::MorphedSpiral { centre, order, .. } => {
-            morphed_spiral_paths(work, centre, order, limit, &mut warnings)?
+    // A pattern of a strategy the material steers is worked out copy by
+    // copy, each against the material where it is.
+    let copied = if op.transform.repeats() {
+        each_copy(work, limit, stock, &mut warnings)?
+    } else {
+        None
+    };
+    let each = copied.is_some();
+    let (raw, passes, detail) = if let Some(paths) = copied {
+        paths
+    } else {
+        match op.strategy {
+            StrategySpec::Parallel { angle } => parallel_paths(work, angle, limit, &mut warnings)?,
+            StrategySpec::Scallop {
+                direction, order, ..
+            } => scallop_paths(work, (direction, order), limit, &mut warnings)?,
+            StrategySpec::Contour {
+                direction, order, ..
+            } => contour_paths(work, (direction, order), limit, &mut warnings)?,
+            StrategySpec::Flat { order, .. } => flat_paths(work, order, limit, &mut warnings)?,
+            StrategySpec::Spiral {
+                centre,
+                inner_radius,
+                outer_radius,
+                order,
+                ..
+            } => spiral_paths(
+                work,
+                (centre, inner_radius, outer_radius),
+                order,
+                limit,
+                &mut warnings,
+            )?,
+            StrategySpec::Radial {
+                centre,
+                inner_radius,
+                outer_radius,
+                angle_from,
+                angle_to,
+                direction,
+                ..
+            } => radial_paths(
+                work,
+                (centre, inner_radius, outer_radius),
+                (angle_from, angle_to, direction),
+                limit,
+                &mut warnings,
+            )?,
+            StrategySpec::MorphedSpiral { centre, order, .. } => {
+                morphed_spiral_paths(work, centre, order, limit, &mut warnings)?
+            }
+            StrategySpec::PocketClearing {
+                min_ring_length,
+                flat_areas,
+                ..
+            } => pocket_clearing_paths(
+                work,
+                min_ring_length,
+                flat_areas,
+                limit,
+                stock,
+                &mut warnings,
+            )?,
+            StrategySpec::Adaptive {
+                direction,
+                flat_areas,
+            } => adaptive_paths(work, direction, flat_areas, limit, &mut warnings)?,
+            StrategySpec::Profile { .. } | StrategySpec::Pocket { .. } => {
+                planar_paths(work, found, &mut warnings)?
+            }
+            StrategySpec::Face {
+                angle,
+                direction,
+                pass_extension,
+                stock_offset,
+            } => face_paths(
+                work,
+                (angle, direction),
+                (pass_extension, stock_offset),
+                &mut warnings,
+            )?,
+            StrategySpec::Drill {
+                peck,
+                dwell,
+                chip_break,
+                ..
+            } => drill_paths(
+                work,
+                (peck, chip_break, dwell),
+                op.strategy.tap(),
+                &holes.iter().map(|r| r.hole).collect::<Vec<Hole>>(),
+                &mut warnings,
+            )?,
+            StrategySpec::Bore { .. }
+            | StrategySpec::Circular { .. }
+            | StrategySpec::Thread { .. } => milled_paths(work, holes, &mut warnings)?,
+            StrategySpec::Engrave {
+                depth,
+                direction,
+                reverse,
+            } => engrave_paths(
+                work,
+                (depth, direction, reverse),
+                Levels::Ramped,
+                traces,
+                &mut warnings,
+            )?,
+            StrategySpec::Slot {
+                depth,
+                pattern,
+                reverse,
+            } => slot_paths(work, (depth, pattern, reverse), traces, &mut warnings)?,
+            StrategySpec::Chamfer { .. } => chamfer_paths(work, traces, &mut warnings)?,
+            StrategySpec::VCarve { max_depth } => match carved {
+                Some(area) => vcarve_paths(work, max_depth, area, &mut warnings)?,
+                None => return Err(in_op(op)(FeatureError::NothingToCarve)),
+            },
+            // Never run as a cutting operation (`run_prepared_planned` leaves it
+            // out); were it, it has nothing to cut.
+            StrategySpec::CustomGcode {} => (Toolpath::new(), 0, StrategyDetail::CustomGcode),
         }
-        StrategySpec::PocketClearing {
-            min_ring_length,
-            flat_areas,
-            ..
-        } => pocket_clearing_paths(
-            work,
-            min_ring_length,
-            flat_areas,
-            limit,
-            stock,
-            &mut warnings,
-        )?,
-        StrategySpec::Adaptive {
-            direction,
-            flat_areas,
-        } => adaptive_paths(work, direction, flat_areas, limit, &mut warnings)?,
-        StrategySpec::Profile { .. } | StrategySpec::Pocket { .. } => {
-            planar_paths(work, found, &mut warnings)?
-        }
-        StrategySpec::Face {
-            angle,
-            direction,
-            pass_extension,
-            stock_offset,
-        } => face_paths(
-            work,
-            (angle, direction),
-            (pass_extension, stock_offset),
-            &mut warnings,
-        )?,
-        StrategySpec::Drill {
-            peck,
-            dwell,
-            chip_break,
-            ..
-        } => drill_paths(
-            work,
-            (peck, chip_break, dwell),
-            op.strategy.tap(),
-            &holes.iter().map(|r| r.hole).collect::<Vec<Hole>>(),
-            &mut warnings,
-        )?,
-        StrategySpec::Bore { .. } | StrategySpec::Circular { .. } | StrategySpec::Thread { .. } => {
-            milled_paths(work, holes, &mut warnings)?
-        }
-        StrategySpec::Engrave {
-            depth,
-            direction,
-            reverse,
-        } => engrave_paths(
-            work,
-            (depth, direction, reverse),
-            Levels::Ramped,
-            traces,
-            &mut warnings,
-        )?,
-        StrategySpec::Slot {
-            depth,
-            pattern,
-            reverse,
-        } => slot_paths(work, (depth, pattern, reverse), traces, &mut warnings)?,
-        StrategySpec::Chamfer { .. } => chamfer_paths(work, traces, &mut warnings)?,
-        StrategySpec::VCarve { max_depth } => match carved {
-            Some(area) => vcarve_paths(work, max_depth, area, &mut warnings)?,
-            None => return Err(in_op(op)(FeatureError::NothingToCarve)),
-        },
-        // Never run as a cutting operation (`run_prepared_planned` leaves it
-        // out); were it, it has nothing to cut.
-        StrategySpec::CustomGcode {} => (Toolpath::new(), 0, StrategyDetail::CustomGcode),
     };
 
     // A pattern repeats the strategy's path before anything else is done to
     // it, so each copy is ordered, tabbed, linked into the material and
     // simulated as the original is.
-    let (raw, passes) = if op.transform.repeats() {
+    let (raw, passes) = if each {
+        (raw, passes)
+    } else if op.transform.repeats() {
         let (path, copies) = patterned(work, &raw, &mut warnings)?;
         (path, passes.saturating_mul(u64::from(copies)))
     } else {
@@ -441,24 +462,7 @@ fn patterned(
 ) -> Result<(Toolpath, u32), RunError> {
     let op = work.op;
     let pattern = &op.transform;
-    let (lo, hi) = work.bounds;
-    let tolerance = work.job.tolerance;
-    let own = overhang(raw.moves(), lo, hi);
-    let copies = each(raw, pattern);
-    let outside: Vec<f64> = copies
-        .iter()
-        .map(|c| overhang(c, lo, hi))
-        .filter(|o| *o > own + tolerance)
-        .collect();
-    if !outside.is_empty() {
-        let worst = outside.iter().copied().fold(0.0, f64::max);
-        warnings.push(format!(
-            "{} of the pattern's {} copies go outside the stock, up to {worst:.1} mm \
-             further than the original does",
-            outside.len(),
-            copies.len()
-        ));
-    }
+    outside_said(work, raw, warnings);
     // Adaptive clearing steers each pass by the material ahead of it, and a
     // drill's holes have no way round.
     let steered = op.strategy.uses().links == Links::Own;
@@ -481,6 +485,29 @@ fn patterned(
         ));
     }
     Ok((r.path, r.copies))
+}
+
+/// Copies of `raw`, the original's path, as `work`'s operation's pattern
+/// makes them, that go further outside the stock than the original, said.
+fn outside_said(work: &Work<'_>, raw: &Toolpath, warnings: &mut Vec<String>) {
+    let (lo, hi) = work.bounds;
+    let tolerance = work.job.tolerance;
+    let own = overhang(raw.moves(), lo, hi);
+    let copies = each(raw, &work.op.transform);
+    let outside: Vec<f64> = copies
+        .iter()
+        .map(|c| overhang(c, lo, hi))
+        .filter(|o| *o > own + tolerance)
+        .collect();
+    if !outside.is_empty() {
+        let worst = outside.iter().copied().fold(0.0, f64::max);
+        warnings.push(format!(
+            "{} of the pattern's {} copies go outside the stock, up to {worst:.1} mm \
+             further than the original does",
+            outside.len(),
+            copies.len()
+        ));
+    }
 }
 
 /// What stands for an operation left out of a run: no paths, nothing cut. `spec`
