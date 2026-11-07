@@ -946,7 +946,8 @@ fn unusable_values_are_rejected_up_front() {
         ("stepover = 0.4", "stepover = 0.0"),
         ("feed = 2400.0", "feed = -1.0"),
         ("tolerance = 0.02", "tolerance = 0.0"),
-        ("wcs = 54", "wcs = 99"),
+        ("wcs = 54", "wcs = 53"),
+        ("wcs = 54", "wcs = 200"),
         ("stepdown = 2.0", "stepdown = 0.0"),
         ("margin = [2.0, 2.0, 1.0]", "margin = [2.0, -2.0, 1.0]"),
     ] {
@@ -2240,4 +2241,49 @@ fn a_new_operation_starts_as_fusions() {
     assert!(picked.setups[0].operations[1].can_measure_from_picks());
     picked.setups[0].operations[1].strategy = StrategySpec::named("drill").unwrap();
     assert!(!picked.setups[0].operations[1].can_measure_from_picks());
+}
+
+/// A tool's length from the gauge line is what sticks out of its holder and
+/// the holder's own length; with no holder, what sticks out; with neither
+/// length given, not known.
+#[test]
+fn a_tool_is_as_long_as_its_stickout_and_its_holder() {
+    let mut t = ToolSpec::default();
+    assert_eq!(t.gauge_length(), None);
+    t.overall_length = Some(50.0);
+    assert_eq!(t.gauge_length(), Some(50.0));
+    t.stickout = Some(30.0);
+    assert_eq!(t.gauge_length(), Some(30.0));
+    t.holder = Some(Holder {
+        name: "ER20".into(),
+        segments: vec![
+            HolderSegment {
+                diameter: 32.0,
+                length: 20.0,
+            },
+            HolderSegment {
+                diameter: 40.0,
+                length: 25.0,
+            },
+        ],
+    });
+    assert_eq!(t.gauge_length(), Some(75.0));
+}
+
+/// A setup may say where its work zero is in machine coordinates, and use
+/// a work offset past G59, which its post must have; one before G54 is
+/// refused.
+#[test]
+fn a_setup_says_where_its_work_offset_is() {
+    let text = SAMPLE.replace("wcs = 54", "wcs = 60\nwork_offset = [100.0, 50.0, -120.0]");
+    let j: Job = toml::from_str(&text).unwrap();
+    j.validate().unwrap();
+    assert_eq!(j.setups[0].wcs, 60);
+    assert_eq!(j.setups[0].work_offset, Some([100.0, 50.0, -120.0]));
+    let again: Job = toml::from_str(&toml::to_string(&j).unwrap()).unwrap();
+    assert_eq!(again.setups[0].work_offset, j.setups[0].work_offset);
+    let plain: Job = toml::from_str(SAMPLE).unwrap();
+    assert_eq!(plain.setups[0].work_offset, None);
+    let nan: Job = toml::from_str(&text.replace("-120.0", "nan")).unwrap();
+    assert!(nan.validate().is_err());
 }

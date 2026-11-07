@@ -110,6 +110,12 @@ pub struct OperationResult {
     pub path: Toolpath,
     /// Tool number, for the post.
     pub tool_number: u32,
+    /// How far the tool's tip is from the spindle's gauge line, in
+    /// millimetres, where its lengths say ([`ToolSpec::gauge_length`]): for
+    /// its travel in machine coordinates.
+    ///
+    /// [`ToolSpec::gauge_length`]: crate::job::ToolSpec::gauge_length
+    pub tool_length: Option<f64>,
     /// Spindle speed.
     pub rpm: u32,
     /// Tool description.

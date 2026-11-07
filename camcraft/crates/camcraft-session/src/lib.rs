@@ -36,6 +36,6 @@ pub use job_file::{job_text, parse_job, read_job, write_job};
 pub use model::{Model, Models, load_job_model, load_model, load_models, models_of, units_of};
 pub use post::{
     Posting, Program, builtin_posts, custom_gcode, load_profile, plan_posting, program,
-    program_name, program_spec, program_with, setup_profile, travel_problems, write_posting,
+    program_name, program_spec, program_with, setup_profile, travel_check, write_posting,
 };
 pub use run::{Passed, Ran, check_runnable, gate, run_setup, run_setup_planned};

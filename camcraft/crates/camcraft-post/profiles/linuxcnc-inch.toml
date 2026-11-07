@@ -24,6 +24,9 @@ length_offset = true
 # refused, as no plain move keeps the feed to the spindle as it reverses.
 drill_cycles = false
 
+# Work offsets past G59: a setup may use LinuxCNC's G59.1 to G59.3.
+extended_offsets = ["G59.1", "G59.2", "G59.3"]
+
 units = "inch"
 
 # The spindle's slowest and fastest, in rev/min: set them to the machine's, and a
@@ -63,10 +66,14 @@ suppress_motion = true
 suppress_axes   = true
 suppress_feed   = true
 
-# How far the program may go each way from the work zero, in its units (inches
-# here): set it to what the machine's travel leaves room for, and a program
-# that goes past it is a failed check.
+# How far the machine goes, in its own coordinates and the program's units (inches here):
+# set it to the machine's limits, and a program that goes past them, its work
+# zero where the setup says its work offset is and the tool's length added to Z
+# for G43, is a failed check. G53 G0 Z0 above must be inside it. (Without
+# `coordinates = "machine"`, the ranges are from the work zero as it is
+# usually set.)
 # [travel]
+# coordinates = "machine"
 # x = [0, 12]
-# y = [0, 8]
-# z = [-3, 0.5]
+# y = [-8, 0]
+# z = [-5, 0]

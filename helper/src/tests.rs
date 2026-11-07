@@ -1031,3 +1031,68 @@ fn a_program_past_the_travel_is_a_failed_check() {
         f.text
     );
 }
+
+/// Travel in machine coordinates: a setup that does not say where its work
+/// offset is is not checked, and a note says so; one whose offset puts the
+/// cut past the machine's travel is a failed check naming the axis, how far
+/// and the operation. With length offsets, a tool of no known length leaves
+/// Z unchecked, and says so.
+#[test]
+fn machine_travel_is_checked_where_the_work_offset_is() {
+    let travel = "[travel]\ncoordinates = \"machine\"\nx = [0, 10000]\nz = [-10000, 0]";
+    let unknown = answer(&custom_request("M0", travel)).unwrap();
+    assert!(unknown.passed, "{:?}", unknown.findings);
+    let note = unknown
+        .findings
+        .iter()
+        .find(|f| f.code == "travel")
+        .unwrap();
+    assert_eq!(
+        (note.level, note.operation),
+        (Level::Note, None),
+        "{note:?}"
+    );
+    assert!(
+        note.text
+            .starts_with("travel: My mill's travel is in machine coordinates"),
+        "{}",
+        note.text
+    );
+
+    let placed = |at: &str, travel: &str| {
+        let mut request = custom_request("M0", travel);
+        request.job = request.job.replacen(
+            "post = \"My mill\"",
+            &format!("post = \"My mill\"\nwork_offset = {at}"),
+            1,
+        );
+        answer(&request).unwrap()
+    };
+    let inside = placed("[5000.0, 0.0, -5000.0]", travel);
+    assert!(inside.passed, "{:?}", inside.findings);
+    assert!(!inside.findings.iter().any(|f| f.code == "travel"));
+    let past = placed("[-5000.0, 0.0, -5000.0]", travel);
+    assert!(!past.passed);
+    let f = past.findings.iter().find(|f| f.code == "travel").unwrap();
+    assert_eq!((f.level, f.operation), (Level::Fail, Some(1)), "{f:?}");
+    assert!(
+        f.text.starts_with("travel rough: X goes from -")
+            && f.text.contains("mm in machine coordinates, ")
+            && f.text
+                .contains(" mm under My mill's travel of 0 to 10000 mm"),
+        "{}",
+        f.text
+    );
+
+    // The job's tool has no length: with G43, Z cannot be placed.
+    let g43 = format!("length_offset = true\n{travel}");
+    let run = placed("[5000.0, 0.0, -5000.0]", &g43);
+    assert!(run.passed, "{:?}", run.findings);
+    let note = run.findings.iter().find(|f| f.code == "travel").unwrap();
+    assert_eq!(note.level, Level::Note);
+    assert!(
+        note.text.starts_with("travel: Z is not checked"),
+        "{}",
+        note.text
+    );
+}

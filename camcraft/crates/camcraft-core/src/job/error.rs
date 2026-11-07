@@ -118,13 +118,19 @@ pub enum JobError {
         strategy: &'static str,
     },
     /// A work offset outside the usual range.
-    #[error("setup '{setup}': work offset {wcs} is not in the range 54..=59")]
+    #[error(
+        "setup '{setup}': work offset {wcs} is not one: 54 to 59 for G54 to G59, \
+         from 60 a post's extended ones"
+    )]
     BadWorkOffset {
         /// Which setup.
         setup: String,
         /// The offset.
         wcs: u8,
     },
+    /// A work offset's position that is not a number.
+    #[error("setup '{0}': where its work offset is must be numbers")]
+    BadWorkOffsetPosition(String),
     /// A tool field that is not physically meaningful.
     #[error("tool '{name}', {source}")]
     BadToolField {

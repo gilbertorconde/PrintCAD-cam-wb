@@ -4,6 +4,7 @@
 //! The renderer's tests say what it means to write; this says what the text does.
 //! [`read`] interprets the words a program holds — units, distance mode, planes,
 //! arcs by centre or by radius, helices, drilling cycles, `G28` and `G53`,
+//! the work offsets `G54` to `G59` and `G59.1` to `G59.3` (60 to 62),
 //! length offsets, tool changes, rotaries positioned at rapid (`G0 A.. B..`,
 //! alone in their block) — into steps in millimetres, and refuses
 //! anything it does not understand rather than step over it. [`check`] replays
@@ -355,6 +356,14 @@ fn whole(letter: char, v: f64) -> Result<u32, String> {
     Ok(v as u32)
 }
 
+/// The word a work offset is selected by, as the standard has them.
+fn offset_word(wcs: u8) -> String {
+    match wcs {
+        60..=62 => format!("G59.{}", wcs - 59),
+        _ => format!("G{wcs}"),
+    }
+}
+
 /// The words of one block, gathered.
 #[derive(Default)]
 struct Block {
@@ -380,7 +389,14 @@ impl Block {
             let slot = match letter {
                 'N' => continue,
                 'G' => {
-                    b.g.push(whole('G', v)?);
+                    // The standard's three work offsets past G59, G59.1 to
+                    // G59.3, as 591 to 593.
+                    let tenths = (v * 10.0).round();
+                    if (591.0..=593.0).contains(&tenths) && (v * 10.0 - tenths).abs() < 1e-9 {
+                        b.g.push(whole('G', tenths)?);
+                    } else {
+                        b.g.push(whole('G', v)?);
+                    }
                     continue;
                 }
                 'M' => {
@@ -530,7 +546,7 @@ impl Reader {
                 98 => self.to_initial = true,
                 99 => self.to_initial = false,
                 4 | 28 | 40 | 43 | 49 | 53 | 94 => {}
-                54..=59 => {}
+                54..=59 | 591..=593 => {}
                 other => return Err(format!("G{other} is not understood")),
             }
         }
@@ -595,7 +611,12 @@ impl Reader {
             self.push(Action::LengthOffset(Some(h)));
             self.at[2] = None;
         }
-        if let Some(&g) = b.g.iter().find(|g| (54..=59).contains(*g)) {
+        if let Some(&g) =
+            b.g.iter()
+                .find(|g| (54..=59).contains(*g) || (591..=593).contains(*g))
+        {
+            // G59.1 is the seventh, 60, as a setup numbers them.
+            let g = if g > 59 { g - 591 + 60 } else { g };
             let n = u8::try_from(g).map_err(|_| "a work offset out of range")?;
             if self.wcs != Some(n) {
                 self.at = [None; 3];
@@ -1061,8 +1082,9 @@ impl<'a> Checker<'a> {
                         return Err(Problem::at(
                             step.line,
                             format!(
-                                "moves before tool {} is in and G{} is selected",
-                                self.spec.tool, self.spec.wcs
+                                "moves before tool {} is in and {} is selected",
+                                self.spec.tool,
+                                offset_word(self.spec.wcs)
                             ),
                         ));
                     }

@@ -33,7 +33,7 @@ pub enum Concern {
 
 /// One word of a line: its letter, in capitals, and its number, or `None`
 /// for one given as an expression (`X#1`, `X[2*3]`).
-fn words(line: &str) -> Vec<(char, Option<f64>, String)> {
+pub(crate) fn words(line: &str) -> Vec<(char, Option<f64>, String)> {
     // Comments left out: `(...)`, and `;` to the line's end.
     let mut code = String::new();
     let mut depth = 0;

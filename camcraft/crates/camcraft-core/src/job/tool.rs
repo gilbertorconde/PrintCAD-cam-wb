@@ -270,6 +270,21 @@ impl ToolSpec {
         }
     }
 
+    /// How far its tip is from the spindle's gauge line, in millimetres, as
+    /// a length offset (`G43`) holds it: what sticks out of the holder (its
+    /// stickout, else its overall length), and the holder's own length on
+    /// top, its segments stacked, when it has one. Without a holder the
+    /// gauge line is taken at the holder's face, as a router's collet nut
+    /// nearly is. `None` when neither length is given.
+    pub fn gauge_length(&self) -> Option<f64> {
+        let out = self.stickout.or(self.overall_length)?;
+        let holder = self
+            .holder
+            .as_ref()
+            .map_or(0.0, |h| h.segments.iter().map(|s| s.length).sum());
+        Some(out + holder)
+    }
+
     /// The preset called `name`.
     pub fn preset(&self, name: &str) -> Option<&Preset> {
         self.presets.iter().find(|p| p.name == name)

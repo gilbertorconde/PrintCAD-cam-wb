@@ -3,8 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    Depths, FixedBox, FixedCylinder, JOB_VERSION, Job, JobError, Operation, Origin, Retraction,
-    StockSpec, StockToLeave, StrategySpec, ToolSpec,
+    Depths, FixedBox, FixedCylinder, JOB_VERSION, Job, JobError, LAST_WCS, Operation, Origin,
+    Retraction, StockSpec, StockToLeave, StrategySpec, ToolSpec,
 };
 use crate::is_positive;
 
@@ -172,11 +172,17 @@ impl Job {
                 setup: name.clone(),
                 source,
             })?;
-        if !(54..=59).contains(&setup.wcs) {
+        if !(54..=LAST_WCS).contains(&setup.wcs) {
             return Err(JobError::BadWorkOffset {
                 setup: name.clone(),
                 wcs: setup.wcs,
             });
+        }
+        if setup
+            .work_offset
+            .is_some_and(|at| !at.iter().all(|v| v.is_finite()))
+        {
+            return Err(JobError::BadWorkOffsetPosition(name.clone()));
         }
         if setup.models.is_empty() {
             return Err(JobError::NoModels(name.clone()));

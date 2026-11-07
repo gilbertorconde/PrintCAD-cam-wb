@@ -322,7 +322,8 @@ z = [-80, 60]
         ..spec()
     };
     let (low, high) = camcraft_post::op::extents(&fixture()).unwrap();
-    assert!(profile.travel_problems(low, high).is_empty());
+    let at = camcraft_post::profile::Placement::default();
+    assert!(profile.travel_check(low, high, &at).past.is_empty());
     check_dated(
         &profile,
         &fixture(),
@@ -330,6 +331,46 @@ z = [-80, 60]
         "linuxcnc-custom",
         Some("2026-11-03"),
     );
+}
+
+/// LinuxCNC on its eighth work offset, `G59.2`, which it selects and reads
+/// back, with its travel in machine coordinates: the program kept inside it
+/// where its work offset puts it, and past it when moved.
+#[test]
+fn an_extended_work_offset_is_stable() {
+    use camcraft_post::profile::Placement;
+    use glam::dvec3;
+    let linuxcnc = include_str!("../profiles/linuxcnc.toml");
+    let text = format!(
+        "{linuxcnc}\n[travel]\ncoordinates = \"machine\"\nx = [0, 300]\ny = [-200, 0]\nz = [-150, 0]\n"
+    );
+    let profile = Profile::from_toml(&text).unwrap();
+    let spec = ProgramSpec {
+        wcs: 61,
+        extended_offsets: 3,
+        ..spec()
+    };
+    let (low, high) = camcraft_post::op::extents(&fixture()).unwrap();
+    // The tip 60 mm below the gauge line; G59.2 at X100 Y-150 Z-120.
+    let mut at = Placement {
+        zero: Some(dvec3(100.0, -150.0, -120.0)),
+        tool_length: Some(60.0),
+    };
+    let check = profile.travel_check(low, high, &at);
+    assert!(
+        check.past.is_empty() && check.unchecked.is_empty(),
+        "{check:?}"
+    );
+    // 40 mm higher, the gauge line goes past the top of Z.
+    at.zero = Some(dvec3(100.0, -150.0, -80.0));
+    let past = profile.travel_check(low, high, &at).past;
+    assert!(
+        past.len() == 1
+            && past[0].starts_with("Z goes from ")
+            && past[0].contains(" over LinuxCNC's travel of -150 to 0 mm"),
+        "{past:?}"
+    );
+    check_against(&profile, &fixture(), &spec, "linuxcnc-g59-2");
 }
 
 /// Every builtin profile must have a golden file. Adding a profile without one

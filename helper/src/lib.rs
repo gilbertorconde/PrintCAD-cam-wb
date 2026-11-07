@@ -32,7 +32,7 @@ use camcraft_post::render::render_dated;
 use camcraft_session::checks::Level as CheckLevel;
 use camcraft_session::{
     Model, Models, Ran, custom_gcode, load_profile, parse_job, program_spec, run_setup_planned,
-    travel_problems,
+    travel_check,
 };
 use camcraft_sim::stock::{Axis, Block};
 use glam::{DAffine3, DMat4, DVec2, DVec3};
@@ -189,6 +189,10 @@ pub(crate) fn execute(
     // tapping cycle: each a failed check, so the setup is not posted, while
     // its run is still shown.
     let mut refused = Vec::new();
+    // What the travel could not be checked for, and the operations it
+    // could not be for.
+    let mut unchecked: std::collections::BTreeMap<String, Vec<usize>> = Default::default();
+    let mut with_paths = 0;
     // Machining seconds before the operation under way.
     let mut elapsed = 0.0;
     let custom = custom_gcode(setup, &ran.result.operations);
@@ -257,19 +261,21 @@ pub(crate) fn execute(
         };
         // Past the machine's travel, the program stops at its limits part
         // way through, or crashes into them: a failed check, as the
-        // simulator's are, which Save anyway still gets past.
+        // simulator's are, which Save anyway still gets past. What could
+        // not be checked is said, not passed.
         if op.made.has_paths() {
-            refused.extend(
-                travel_problems(op, &profile)
-                    .into_iter()
-                    .map(|why| Finding {
-                        level: Level::Fail,
-                        code: "travel".into(),
-                        text: format!("travel {}: {why}", op.name),
-                        operation: Some(k),
-                        at_move: None,
-                    }),
-            );
+            let travel = travel_check(op, setup, &profile);
+            refused.extend(travel.past.into_iter().map(|why| Finding {
+                level: Level::Fail,
+                code: "travel".into(),
+                text: format!("travel {}: {why}", op.name),
+                operation: Some(k),
+                at_move: None,
+            }));
+            for why in travel.unchecked {
+                unchecked.entry(why).or_default().push(k);
+            }
+            with_paths += 1;
         }
         let summary = if op.made == Made::Text {
             let lines = setup
@@ -335,7 +341,13 @@ pub(crate) fn execute(
     let run = Run {
         version: VERSION,
         passed: ran.passed() && refused.is_empty(),
-        findings: refused.into_iter().chain(findings(&ran)).collect(),
+        findings: ranked(
+            refused
+                .into_iter()
+                .chain(travel_notes(unchecked, with_paths, &ran))
+                .chain(findings(&ran))
+                .collect(),
+        ),
         notes: loaded
             .iter()
             .flat_map(|(_, m)| m.notes.iter().cloned())
@@ -411,7 +423,7 @@ fn marks(
 
 /// The checks' findings, failures first, then warnings, notes and passes.
 fn findings(ran: &Ran) -> Vec<Finding> {
-    let mut out: Vec<Finding> = ran
+    let out: Vec<Finding> = ran
         .checks
         .groups
         .iter()
@@ -430,13 +442,48 @@ fn findings(ran: &Ran) -> Vec<Finding> {
             })
         })
         .collect();
+    ranked(out)
+}
+
+/// `findings`, failures first, then warnings, notes and passes, each kept in
+/// its order.
+fn ranked(mut findings: Vec<Finding>) -> Vec<Finding> {
     let rank = |l: Level| match l {
         Level::Fail => 0,
         Level::Warn => 1,
         Level::Note => 2,
         Level::Pass => 3,
     };
-    out.sort_by_key(|f| rank(f.level));
+    findings.sort_by_key(|f| rank(f.level));
+    findings
+}
+
+/// A note for each thing the travel could not be checked for: once for the
+/// setup when it holds for all `with_paths` of its operations that move,
+/// else once for each it holds for.
+fn travel_notes(
+    unchecked: std::collections::BTreeMap<String, Vec<usize>>,
+    with_paths: usize,
+    ran: &Ran,
+) -> Vec<Finding> {
+    let note = |text: String, operation| Finding {
+        level: Level::Note,
+        code: "travel".into(),
+        text,
+        operation,
+        at_move: None,
+    };
+    let mut out = Vec::new();
+    for (why, ops) in unchecked {
+        if ops.len() == with_paths {
+            out.push(note(format!("travel: {why}"), None));
+            continue;
+        }
+        for k in ops {
+            let name = ran.result.operations.get(k).map_or("", |o| o.name.as_str());
+            out.push(note(format!("travel {name}: {why}"), Some(k)));
+        }
+    }
     out
 }
 

@@ -439,5 +439,40 @@ fn custom_gcode_is_posted_beside_its_neighbours_and_travel_is_kept() {
             .any(|w| w.starts_with("travel rough: Z goes from -")),
         "{why:?}"
     );
+
+    // Its Z travel in machine coordinates, homed at the top: where the
+    // setup's work offset is decides. Not given, nothing is refused.
+    let machine = base.replacen("\"GRBL\"", "\"Homed\"", 1).replacen(
+        "[format]",
+        "[travel]\ncoordinates = \"machine\"\nz = [-100, 0]\n\n[format]",
+        1,
+    );
+    let file = out.join("homed.toml");
+    std::fs::write(&file, machine).unwrap();
+    let post = |setup: &camcraft_core::job::Setup| {
+        plan_posting(
+            &[(setup, &ran)],
+            &dir,
+            &out.join("programs"),
+            Some(file.to_str().unwrap()),
+        )
+        .unwrap()
+    };
+    assert!(post(&job.setups[0]).refused.is_empty());
+    let mut low = job.setups[0].clone();
+    low.work_offset = Some([0.0, 0.0, -50.0]);
+    assert!(post(&low).refused.is_empty());
+    // Its work zero 5 mm under the top of Z: the clearance goes past it.
+    let mut high = job.setups[0].clone();
+    high.work_offset = Some([0.0, 0.0, -5.0]);
+    let p = post(&high);
+    let (_, why) = &p.refused[0];
+    assert!(
+        why.iter()
+            .any(|w| w.starts_with("travel rough: Z goes from -")
+                && w.contains("in machine coordinates")
+                && w.contains("over Homed's travel of -100 to 0 mm")),
+        "{why:?}"
+    );
     let _ = std::fs::remove_dir_all(&out);
 }
