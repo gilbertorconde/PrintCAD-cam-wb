@@ -53,7 +53,7 @@ pub fn render_dated(
     date: Option<&str>,
 ) -> (String, RenderReport) {
     let mut w = Writer::new(profile);
-    w.values = values(ops, program_name, date);
+    w.values = values(ops, profile, program_name, date);
     let p = w.p;
     for line in &p.header {
         w.filled(line);
@@ -71,7 +71,7 @@ pub fn render_dated(
 
 /// What the placeholders of a program of `ops` called `name` stand for: the
 /// values of its operation, as its instructions give them.
-fn values(ops: &[Op], name: &str, date: Option<&str>) -> Values {
+fn values(ops: &[Op], profile: &Profile, name: &str, date: Option<&str>) -> Values {
     let mut v = Values {
         name: name.to_string(),
         date: date.map(str::to_string),
@@ -88,7 +88,7 @@ fn values(ops: &[Op], name: &str, date: Option<&str>) -> Values {
                 v.operation.clone_from(op_name);
                 v.tool = *tool;
                 v.strategy.clone_from(strategy);
-                v.wcs = *wcs;
+                v.wcs = profile.wcs_word(*wcs).unwrap_or_else(|| format!("G{wcs}"));
             }
             Op::ToolChange { comment, .. } => v.tool_comment.clone_from(comment),
             Op::SpindleOn { rpm, dir } => {
@@ -234,7 +234,8 @@ impl<'a> Writer<'a> {
                 strategy,
                 wcs,
             } => {
-                self.comment(&format!("{op_name} - {strategy} - T{tool} G{wcs}"));
+                let word = self.p.wcs_word(*wcs).unwrap_or_else(|| format!("G{wcs}"));
+                self.comment(&format!("{op_name} - {strategy} - T{tool} {word}"));
             }
             Op::SectionEnd => {}
             Op::Units(u) => {
@@ -248,7 +249,8 @@ impl<'a> Writer<'a> {
                 self.feed = None;
             }
             Op::WorkOffset(n) => {
-                let s = format!("G{n}");
+                // Lowering lets through only an offset the machine has.
+                let s = self.p.wcs_word(*n).unwrap_or_else(|| format!("G{n}"));
                 self.raw(&s);
                 // Another offset puts the same point at other coordinates.
                 self.at = None;

@@ -13,8 +13,9 @@ use camcraft_core::job::Setup;
 use camcraft_core::run::{Made, OperationResult, StrategyDetail};
 use camcraft_core::setup::frame::Frame;
 use camcraft_post::op::{CustomGcode, DrillCycles, LowerError, ProgramSpec, extents, lower};
-use camcraft_post::profile::Profile;
+use camcraft_post::profile::{Placement, Profile, TravelCheck};
 use camcraft_post::render::{RenderReport, render};
+use glam::DVec3;
 
 use crate::{Ran, SessionError, fs};
 
@@ -95,6 +96,7 @@ pub fn program_spec(
         tool: op.tool_number,
         tool_comment: op.tool_comment.clone(),
         wcs,
+        extended_offsets: u8::try_from(profile.extended_offsets.len()).unwrap_or(u8::MAX),
         rpm: op.rpm,
         spin: op.spindle,
         coolant: op.coolant,
@@ -151,12 +153,21 @@ pub fn custom_gcode(
     out
 }
 
-/// What is wrong with operation `op`'s moves on `profile`'s machine: each
-/// axis they take past its `travel`.
-pub fn travel_problems(op: &OperationResult, profile: &Profile) -> Vec<String> {
+/// How operation `op`'s moves, in `setup`, keep to `profile`'s travel: each
+/// axis they take past it, and what could not be checked. In machine
+/// coordinates, the setup's work offset places them on the machine, and the
+/// tool's length from the gauge line raises Z for a profile that takes length
+/// offsets. The moves are checked along the setup's own axes: tilted, as the
+/// machine moves once its rotaries have stood the part up (the setup's X on
+/// the machine's, as positioning them requires), or as it is fixtured tilted.
+pub fn travel_check(op: &OperationResult, setup: &Setup, profile: &Profile) -> TravelCheck {
+    let place = Placement {
+        zero: setup.work_offset.map(DVec3::from_array),
+        tool_length: op.tool_length,
+    };
     match extents(&op.path) {
-        Some((low, high)) => profile.travel_problems(low, high),
-        None => Vec::new(),
+        Some((low, high)) => profile.travel_check(low, high, &place),
+        None => TravelCheck::default(),
     }
 }
 
@@ -251,8 +262,10 @@ pub fn plan_posting(
             .result
             .operations
             .iter()
+            .filter(|op| op.made.has_paths())
             .flat_map(|op| {
-                travel_problems(op, &loaded)
+                travel_check(op, setup, &loaded)
+                    .past
                     .into_iter()
                     .map(|why| format!("travel {}: {why}", op.name))
             })

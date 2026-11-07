@@ -75,6 +75,7 @@ pub fn spec() -> ProgramSpec {
         tool: 3,
         tool_comment: "6mm ball (carbide)".into(),
         wcs: 54,
+        extended_offsets: 0,
         rpm: 18000,
         spin: SpindleDirection::Clockwise,
         coolant: Coolant::Flood,

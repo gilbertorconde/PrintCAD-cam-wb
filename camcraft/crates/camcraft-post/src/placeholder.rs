@@ -26,7 +26,7 @@ pub const PLACEHOLDERS: &[(&str, &str)] = &[
     ("coolant_code", "M8, M7 or M9"),
     ("units", "mm or inch"),
     ("units_code", "G21 or G20"),
-    ("wcs", "the work offset, G54 to G59"),
+    ("wcs", "the work offset, G54 to G59 or an extended one"),
     (
         "date",
         "the day it was posted, 2026-11-03, where it is known; else nothing",
@@ -54,8 +54,9 @@ pub struct Values {
     pub coolant: Coolant,
     /// The program's units.
     pub units: ProgramUnits,
-    /// The work offset, 54 for `G54`.
-    pub wcs: u8,
+    /// The word that selects the work offset, as the profile writes it:
+    /// `G54`, or `G59.1`.
+    pub wcs: String,
     /// The day it was posted, where that is known.
     pub date: Option<String>,
 }
@@ -72,7 +73,7 @@ impl Default for Values {
             spindle: SpindleDirection::Clockwise,
             coolant: Coolant::Off,
             units: ProgramUnits::Mm,
-            wcs: 54,
+            wcs: "G54".into(),
             date: None,
         }
     }
@@ -117,7 +118,7 @@ impl Values {
                 ProgramUnits::Inch => "G20",
             }
             .into(),
-            "wcs" => format!("G{}", self.wcs),
+            "wcs" => self.wcs.clone(),
             "date" => self.date.clone().unwrap_or_default(),
             _ => return None,
         })
@@ -214,7 +215,7 @@ mod tests {
             spindle: SpindleDirection::CounterClockwise,
             coolant: Coolant::Mist,
             units: ProgramUnits::Inch,
-            wcs: 55,
+            wcs: "G55".into(),
             date: Some("2026-11-03".into()),
         }
     }

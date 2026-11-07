@@ -18,9 +18,17 @@ pub struct Setup {
     /// The job's stocks this setup starts from, by name.
     #[serde(default)]
     pub stocks: Vec<String>,
-    /// Work offset, 54 for `G54`.
+    /// Work offset, 54 for `G54` to 59 for `G59`; from 60, the post's
+    /// extended ones in its order (60 is LinuxCNC's `G59.1`).
     #[serde(default = "default_wcs")]
     pub wcs: u8,
+    /// Where the work zero is in machine coordinates, in millimetres along
+    /// the setup's axes: what its work offset holds, for checking a
+    /// program against the machine's travel. Z is the spindle's gauge line
+    /// at the work zero when the post takes tool length offsets, else the
+    /// tool's tip. `None` when not known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_offset: Option<[f64; 3]>,
     /// The post processor: a built-in name, or a profile file relative to the job.
     #[serde(default = "default_post")]
     pub post: String,
@@ -43,6 +51,7 @@ impl Setup {
             models: Vec::new(),
             stocks: Vec::new(),
             wcs: default_wcs(),
+            work_offset: None,
             post: default_post(),
             orientation: Orientation::default(),
             origin: Origin::default(),
@@ -50,6 +59,10 @@ impl Setup {
         }
     }
 }
+
+/// The last work offset a setup may use: G59 and 99 extended ones past it,
+/// as many as Haas's `G154 P1` to `P99`.
+pub const LAST_WCS: u8 = 59 + 99;
 
 fn default_wcs() -> u8 {
     54

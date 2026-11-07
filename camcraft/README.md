@@ -179,7 +179,7 @@ renders with a date for `@date@`; `render` leaves it empty. A profile's
 optional `[travel]` gives each of `x`, `y` and `z` as `[lowest, highest]`
 in the program's coordinates and units, which `Profile::travel_problems`
 checks a program's extents against (`op::extents`, an arc's bulge
-included); `camcraft_session::travel_problems` checks an operation's, and
+included); `camcraft_session::travel_problems` (now `travel_check`, below) checks an operation's, and
 `plan_posting` refuses a setup that goes past it. In `camcraft-core`,
 `StrategySpec::CustomGcode` is an operation of lines for the program
 (`Operation::gcode`): it needs no tool, is not worked out or cut, and its
@@ -203,6 +203,29 @@ line that moves or changes a mode, or a placeholder that is not one:
 fails), `CC216` (a call not read) and `CC217` (custom G-code in a setup
 with no program to go into). A golden program with all of it
 (`linuxcnc-custom.nc`).
+
+And travel in machine coordinates, and work offsets past G59. In
+`camcraft-post`, a profile's `[travel]` takes `coordinates = "machine"`
+(`Coordinates`; left out it is `work`, as before), and
+`Profile::travel_check` (in place of `travel_problems`) places a program on
+the machine by a `Placement`: where its work zero is in machine
+coordinates, and the tool's length from the gauge line, added to Z when the
+profile takes length offsets. It returns a `TravelCheck`: each axis past
+the travel, how far under or over, and what was not checked (no work
+offset position; with length offsets, no tool length). A `G53` move in the
+profile's own blocks outside a machine travel makes it invalid. A profile's
+`extended_offsets` lists the work offsets it has past `G59` as it writes
+them; a work offset from 60 is one of them (`Profile::wcs_word`,
+`work_offsets`), `ProgramSpec::extended_offsets` says how many lowering
+lets through, and the renderer and `@wcs@` write the word. `readback`
+reads `G59.1` to `G59.3`. The LinuxCNC profiles list those three. In
+`camcraft-core`, `Setup::work_offset` is where its work zero is in machine
+coordinates, a `wcs` may be up to `LAST_WCS` (G59 and 99 more),
+`ToolSpec::gauge_length` is a tool's stickout (or overall length) and its
+holder's segments, and `OperationResult::tool_length` carries it. In
+`camcraft-session`, `travel_check` checks an operation of a setup, and
+`program_spec` copies the profile's extended offsets. A golden program on
+`G59.2` (`linuxcnc-g59-2.nc`).
 
 And one test: ogeom is 0.11.1 here, which printCAD's shapes need, and it
 meshes `round_edge_loose_fit.step`'s seam that 0.11.0 drew off the torus, so

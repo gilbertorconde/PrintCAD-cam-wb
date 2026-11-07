@@ -520,6 +520,7 @@ pub(super) fn not_made(op: &Operation, spec: Option<&ToolSpec>, made: Made) -> O
         strategy: op.strategy.name(),
         path: Toolpath::new(),
         tool_number: spec.map_or(0, |t| t.number),
+        tool_length: spec.and_then(|t| t.gauge_length()),
         rpm: op.passes.rpm.or(spec.map(|t| t.rpm)).unwrap_or(0),
         tool_comment: spec.map(|t| t.comment.clone()).unwrap_or_default(),
         // A tap turns the way its thread does, whichever way its tool says.

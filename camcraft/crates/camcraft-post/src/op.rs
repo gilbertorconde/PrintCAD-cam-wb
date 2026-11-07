@@ -183,8 +183,11 @@ pub struct ProgramSpec {
     pub tool: u32,
     /// Tool description for the operator.
     pub tool_comment: String,
-    /// Work offset, 54 for `G54`.
+    /// Work offset, 54 for `G54`; from 60, the machine's extended ones.
     pub wcs: u8,
+    /// How many work offsets past `G59` the machine has: its profile's
+    /// `extended_offsets`.
+    pub extended_offsets: u8,
     /// Spindle speed.
     pub rpm: u32,
     /// Spindle direction.
@@ -247,6 +250,7 @@ impl Default for ProgramSpec {
             tool: 1,
             tool_comment: String::new(),
             wcs: 54,
+            extended_offsets: 0,
             rpm: 18000,
             spin: SpindleDirection::Clockwise,
             coolant: Coolant::Off,
@@ -270,8 +274,11 @@ pub enum LowerError {
     /// guessed would be inventing a traverse nobody planned.
     #[error("toolpath still contains {0} unresolved link(s); run the linker first")]
     UnresolvedLinks(usize),
-    /// A work offset outside the usual range.
-    #[error("work offset {0} is not in the range 54..=59")]
+    /// A work offset the machine has not got.
+    #[error(
+        "work offset {0} is not one the machine has: 54 to 59 for G54 to G59, then its \
+         extended ones"
+    )]
     BadWorkOffset(u8),
     /// An arc turns about something other than X, Y or Z, which no three-axis
     /// machine can cut as an arc.
@@ -322,7 +329,7 @@ pub fn lower_counted(
     if unresolved > 0 {
         return Err(LowerError::UnresolvedLinks(unresolved));
     }
-    if !(54..=59).contains(&spec.wcs) {
+    if !(54..=59u16 + u16::from(spec.extended_offsets)).contains(&u16::from(spec.wcs)) {
         return Err(LowerError::BadWorkOffset(spec.wcs));
     }
     if let Some(m) = path
@@ -594,6 +601,24 @@ mod tests {
             lower(&linked_path(), &spec),
             Err(LowerError::BadWorkOffset(99))
         );
+        // Past G59, only as many as the machine has.
+        let g59_1 = ProgramSpec {
+            wcs: 60,
+            ..Default::default()
+        };
+        assert_eq!(
+            lower(&linked_path(), &g59_1),
+            Err(LowerError::BadWorkOffset(60))
+        );
+        let ops = lower(
+            &linked_path(),
+            &ProgramSpec {
+                extended_offsets: 3,
+                ..g59_1
+            },
+        )
+        .unwrap();
+        assert!(ops.contains(&Op::WorkOffset(60)));
     }
 
     #[test]

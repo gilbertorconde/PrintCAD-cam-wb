@@ -24,7 +24,7 @@
 //! | `@coolant_code@` | `M8`, `M7` or `M9` |
 //! | `@units@` | `mm` or `inch` |
 //! | `@units_code@` | `G21` or `G20` |
-//! | `@wcs@` | the work offset, `G54` to `G59` |
+//! | `@wcs@` | the work offset, `G54` to `G59`, or an extended one |
 //! | `@date@` | the day it was posted, `2026-11-03`, where that is known; else nothing |
 //!
 //! Words a person typed (the names and the tool's description) are made safe to
@@ -35,9 +35,23 @@
 //! # Travel
 //!
 //! `[travel]` gives, for any of X, Y and Z, the lowest and highest the
-//! program's own coordinates may go, in its units: how far the machine goes
-//! each way from the work zero as it is usually set. A program that goes past
-//! them is a failed check ([`Profile::travel_problems`]).
+//! machine goes, in the program's units. With `coordinates = "machine"`
+//! they are its own coordinates, as `G53` moves in, and a program is placed
+//! on the machine by where its work zero is there (what its work offset
+//! holds) and, with length offsets, the tool's length from the gauge line on
+//! Z ([`Placement`]); a program whose work zero is not known there is not
+//! checked, and says so. Without, as profiles had it first, they are the
+//! program's own coordinates: how far it goes each way from the work zero as
+//! it is usually set. A program that goes past them is a failed check
+//! ([`Profile::travel_check`]). In machine coordinates, a `G53` move in the
+//! profile's own blocks (a `safe_retract` of `G53 G0 Z0`) must be within
+//! them too, or the profile is not valid.
+//!
+//! # Work offsets
+//!
+//! A setup's work offset is `G54` to `G59` (54 to 59), and from 60 the
+//! profile's `extended_offsets` in order, written as it gives them:
+//! LinuxCNC's `["G59.1", "G59.2", "G59.3"]`, or a Fanuc's `"G54.1 P1"` on.
 //!
 //! # Modal suppression tracks what was *emitted*
 //!
@@ -54,6 +68,8 @@
 
 use glam::DVec3;
 use serde::Deserialize;
+
+use camcraft_core::job::LAST_WCS;
 
 use crate::placeholder;
 use crate::rotary::Rotary;
@@ -143,12 +159,26 @@ pub struct Modal {
     pub suppress_feed: bool,
 }
 
-/// How far a program's coordinates may go along each axis, in its units: the
-/// machine's travel, measured from the work zero as it is set for the work.
-/// An axis left out may go anywhere.
+/// What a [`Travel`]'s numbers are measured from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Coordinates {
+    /// The work zero as it is usually set: the program's own coordinates.
+    #[default]
+    Work,
+    /// The machine's own, as `G53` moves in.
+    Machine,
+}
+
+/// How far the machine goes along each axis, in the program's units: in its
+/// own coordinates, or from the work zero as it is set for the work. An axis
+/// left out may go anywhere.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Travel {
+    /// What the ranges are measured from: the work zero unless said.
+    #[serde(default)]
+    pub coordinates: Coordinates,
     /// The lowest and highest X.
     #[serde(default)]
     pub x: Option<[f64; 2]>,
@@ -168,6 +198,29 @@ impl Travel {
             .enumerate()
             .filter_map(|(i, (axis, range))| range.map(|r| (axis, i, r)))
     }
+}
+
+/// Where a program stands on the machine, for its travel in machine
+/// coordinates.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Placement {
+    /// The work zero in machine coordinates, in millimetres: what the work
+    /// offset holds. Z is the gauge line's with length offsets, else the
+    /// tool's tip's. `None` when not known.
+    pub zero: Option<DVec3>,
+    /// The tool's length from the spindle's gauge line, in millimetres,
+    /// added to Z when the profile takes length offsets. `None` when not
+    /// known.
+    pub tool_length: Option<f64>,
+}
+
+/// How a program keeps to a machine's travel.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TravelCheck {
+    /// Each axis it goes past, saying how far: a failed check.
+    pub past: Vec<String>,
+    /// What could not be checked, and why: a note.
+    pub unchecked: Vec<String>,
 }
 
 /// One machine dialect.
@@ -216,10 +269,14 @@ pub struct Profile {
     /// turn outside them is warned about. Absent, any speed goes.
     #[serde(default)]
     pub spindle: Option<[u32; 2]>,
-    /// How far the program's coordinates may go, in its units: see the
-    /// module's "Travel". Absent, they are not checked.
+    /// How far the machine goes, in the program's units: see the module's
+    /// "Travel". Absent, it is not checked.
     #[serde(default)]
     pub travel: Option<Travel>,
+    /// The work offsets it has past `G59`, as it writes each: see the
+    /// module's "Work offsets".
+    #[serde(default)]
+    pub extended_offsets: Vec<String>,
     /// The machine's rotary axes, for 3+2 machining: a setup tilted is
     /// stood up the spindle by them before it cuts ([`Rotary`]). Absent, a
     /// tilted setup is fixtured tilted by hand.
@@ -411,6 +468,30 @@ impl Profile {
                 }
             }
         }
+        if self.extended_offsets.len() > usize::from(LAST_WCS - 59) {
+            return Err(ProfileError::BadValue {
+                field: "extended_offsets",
+                reason: format!("at most {} past G59", LAST_WCS - 59),
+            });
+        }
+        for word in &self.extended_offsets {
+            let ok = word.starts_with(['G', 'g'])
+                && word
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | ' '));
+            if !ok {
+                return Err(ProfileError::BadValue {
+                    field: "extended_offsets",
+                    reason: format!("{word:?} is not a work offset's G code, as \"G59.1\""),
+                });
+            }
+        }
+        if let Some(why) = self.machine_moves_past_travel() {
+            return Err(ProfileError::BadValue {
+                field: "travel",
+                reason: why,
+            });
+        }
         for (field, lines) in self.blocks() {
             for (i, line) in lines.iter().enumerate() {
                 if let Some(why) = placeholder::problem(line) {
@@ -443,40 +524,138 @@ impl Profile {
         ]
     }
 
-    /// What is wrong with a program that goes from `low` to `high`, in
-    /// millimetres in its own coordinates, on this machine: each axis it
-    /// takes past the `travel`, saying how far it goes and how far it may.
-    pub fn travel_problems(&self, low: DVec3, high: DVec3) -> Vec<String> {
+    /// The first `G53` move of the profile's own blocks that goes past its
+    /// travel in machine coordinates, said; `None` when there is none, or
+    /// the travel is from the work zero, which a `G53` move does not know.
+    fn machine_moves_past_travel(&self) -> Option<String> {
+        let travel = self
+            .travel
+            .filter(|t| t.coordinates == Coordinates::Machine)?;
+        for (field, lines) in self.blocks() {
+            for (i, line) in lines.iter().enumerate() {
+                let words = crate::custom::words(line);
+                let g53 = words.iter().any(|(c, v, _)| *c == 'G' && *v == Some(53.0));
+                if !g53 {
+                    continue;
+                }
+                for (axis, _, [low, high]) in travel.axes() {
+                    let to = words
+                        .iter()
+                        .find_map(|(c, v, _)| (*c == axis).then_some(*v).flatten());
+                    if let Some(v) = to.filter(|v| *v < low || *v > high) {
+                        return Some(format!(
+                            "{field} line {}, a G53 move, sends {axis} to {v}, outside the \
+                             machine's travel of {low} to {high}",
+                            i + 1
+                        ));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// The word that selects work offset `wcs` (54 for `G54`), if this
+    /// machine has it: `G54` to `G59`, then its `extended_offsets`.
+    pub fn wcs_word(&self, wcs: u8) -> Option<String> {
+        match wcs {
+            54..=59 => Some(format!("G{wcs}")),
+            _ => self
+                .extended_offsets
+                .get(usize::from(wcs.checked_sub(60)?))
+                .cloned(),
+        }
+    }
+
+    /// Every work offset this machine has, by its number and its word.
+    pub fn work_offsets(&self) -> Vec<(u8, String)> {
+        (54..=LAST_WCS)
+            .map_while(|n| self.wcs_word(n).map(|w| (n, w)))
+            .collect()
+    }
+
+    /// How a program that goes from `low` to `high`, in millimetres in its
+    /// own coordinates, keeps to this machine's `travel`, placed on it by
+    /// `place` when the travel is in machine coordinates: each axis it goes
+    /// past, saying how far, and what could not be checked.
+    pub fn travel_check(&self, low: DVec3, high: DVec3, place: &Placement) -> TravelCheck {
+        let mut out = TravelCheck::default();
         let Some(travel) = &self.travel else {
-            return Vec::new();
+            return out;
         };
         let (scale, unit) = match self.units {
             ProgramUnits::Mm => (1.0, "mm"),
             ProgramUnits::Inch => (1.0 / MM_PER_INCH, "in"),
         };
-        let (low, high) = (low * scale, high * scale);
+        let n = |v: f64| self.length(v / scale, self.units == ProgramUnits::Inch);
+        let mut shift = DVec3::ZERO;
+        let mut skip_z = false;
+        let frame = match travel.coordinates {
+            Coordinates::Work => "from the work zero".to_string(),
+            Coordinates::Machine => {
+                let Some(zero) = place.zero else {
+                    out.unchecked.push(format!(
+                        "{}'s travel is in machine coordinates, and where the work offset \
+                         is on the machine is not given: not checked",
+                        self.name
+                    ));
+                    return out;
+                };
+                shift = zero;
+                let mut frame = "in machine coordinates".to_string();
+                if self.length_offset {
+                    match place.tool_length {
+                        Some(l) => {
+                            shift.z += l;
+                            frame = format!(
+                                "{frame}, the tool {} {unit} from the gauge line",
+                                n(l * scale)
+                            );
+                        }
+                        None => {
+                            skip_z = travel.z.is_some();
+                            if skip_z {
+                                out.unchecked.push(
+                                    "Z is not checked: the tool's length from the gauge line \
+                                     is not known (give its stickout or overall length)"
+                                        .into(),
+                                );
+                            }
+                        }
+                    }
+                }
+                frame
+            }
+        };
+        let (low, high) = ((low + shift) * scale, (high + shift) * scale);
         // Within the places it is written to is within.
         let slack = 0.5
             * 10f64.powi(-i32::from(match self.units {
                 ProgramUnits::Mm => self.format.axis_decimals,
                 ProgramUnits::Inch => self.format.inch_axis_decimals,
             }));
-        travel
-            .axes()
-            .filter(|&(_, i, [min, max])| low[i] < min - slack || high[i] > max + slack)
-            .map(|(axis, i, [min, max])| {
-                let n = |v: f64| self.length(v / scale, self.units == ProgramUnits::Inch);
-                format!(
-                    "{axis} goes from {} to {} {unit}, past {}'s travel of {} to {} {unit} \
-                     from the work zero",
-                    n(low[i]),
-                    n(high[i]),
-                    self.name,
-                    n(min),
-                    n(max)
-                )
-            })
-            .collect()
+        for (axis, i, [min, max]) in travel.axes() {
+            if skip_z && axis == 'Z' {
+                continue;
+            }
+            let under = min - low[i];
+            let over = high[i] - max;
+            let how = match (under > slack, over > slack) {
+                (false, false) => continue,
+                (true, false) => format!("{} {unit} under", n(under)),
+                (false, true) => format!("{} {unit} over", n(over)),
+                (true, true) => format!("{} {unit} under and {} {unit} over", n(under), n(over)),
+            };
+            out.past.push(format!(
+                "{axis} goes from {} to {} {unit} {frame}, {how} {}'s travel of {} to {} {unit}",
+                n(low[i]),
+                n(high[i]),
+                self.name,
+                n(min),
+                n(max)
+            ));
+        }
+        out
     }
 
     /// What is wrong with turning the spindle at `rpm` on this machine, if
@@ -834,45 +1013,152 @@ mod tests {
     }
 
     /// Travel inside its range is fine, outside it is said, axis by axis,
-    /// in the program's units; an axis not given goes anywhere.
+    /// how far past, in the program's units; an axis not given goes
+    /// anywhere.
     #[test]
     fn travel_is_checked_axis_by_axis() {
         use glam::dvec3;
         let p = grbl_with("[travel]\nx = [-10, 300]\nz = [-60, 40]").unwrap();
-        assert!(
-            p.travel_problems(dvec3(-10.0, -500.0, -60.0), dvec3(300.0, 900.0, 40.0))
-                .is_empty()
-        );
+        let at = Placement::default();
+        let check = |p: &Profile, low, high| p.travel_check(low, high, &at).past;
+        assert!(check(&p, dvec3(-10.0, -500.0, -60.0), dvec3(300.0, 900.0, 40.0)).is_empty());
         // Within the places it is written to is within.
-        assert!(
-            p.travel_problems(dvec3(-10.0004, 0.0, 0.0), dvec3(0.0, 0.0, 0.0))
-                .is_empty()
-        );
-        let past = p.travel_problems(dvec3(-10.0, 0.0, -75.5), dvec3(320.0, 0.0, 10.0));
+        assert!(check(&p, dvec3(-10.0004, 0.0, 0.0), dvec3(0.0, 0.0, 0.0)).is_empty());
+        let past = check(&p, dvec3(-10.0, 0.0, -75.5), dvec3(320.0, 0.0, 10.0));
         assert_eq!(past.len(), 2, "{past:?}");
-        assert!(
-            past[0].starts_with("X goes from -10 to 320 mm, past GRBL's travel of -10 to 300 mm"),
-            "{}",
-            past[0]
+        assert_eq!(
+            past[0],
+            "X goes from -10 to 320 mm from the work zero, 20 mm over GRBL's travel of \
+             -10 to 300 mm"
         );
         assert!(
-            past[1].starts_with("Z goes from -75.5 to 10 mm"),
+            past[1].starts_with("Z goes from -75.5 to 10 mm from the work zero, 15.5 mm under"),
             "{}",
             past[1]
         );
+        let both = check(&p, dvec3(-12.0, 0.0, 0.0), dvec3(301.0, 0.0, 0.0));
+        assert!(both[0].contains("2 mm under and 1 mm over"), "{both:?}");
         let mut inch = p.clone();
         inch.units = ProgramUnits::Inch;
         inch.travel = Some(Travel {
             x: Some([0.0, 10.0]),
             ..Travel::default()
         });
-        let past = inch.travel_problems(dvec3(0.0, 0.0, 0.0), dvec3(279.4, 0.0, 0.0));
-        assert!(past[0].contains("to 11 in, past"), "{past:?}");
-        let none = Profile::builtin("grbl").unwrap().unwrap();
+        let past = check(&inch, dvec3(0.0, 0.0, 0.0), dvec3(279.4, 0.0, 0.0));
         assert!(
-            none.travel_problems(DVec3::splat(-1e6), DVec3::splat(1e6))
-                .is_empty()
+            past[0].contains("to 11 in from the work zero, 1 in over"),
+            "{past:?}"
         );
+        let none = Profile::builtin("grbl").unwrap().unwrap();
+        assert_eq!(
+            none.travel_check(DVec3::splat(-1e6), DVec3::splat(1e6), &at),
+            TravelCheck::default()
+        );
+    }
+
+    /// In machine coordinates, a program is placed on the machine by where
+    /// its work zero is there, and on Z by the tool's length when the
+    /// controller takes length offsets; not knowing either is said, not
+    /// passed.
+    #[test]
+    fn machine_travel_is_checked_from_the_work_offset() {
+        use glam::dvec3;
+        let travel =
+            "[travel]\ncoordinates = \"machine\"\nx = [0, 300]\ny = [-200, 0]\nz = [-150, 0]";
+        let grbl = grbl_with(travel).unwrap();
+        let (low, high) = (dvec3(-5.0, 0.0, -20.0), dvec3(100.0, 50.0, 15.0));
+        // Not known where the work zero is: a note, nothing failed.
+        let unknown = grbl.travel_check(low, high, &Placement::default());
+        assert!(unknown.past.is_empty());
+        assert!(
+            unknown.unchecked[0].contains("machine coordinates")
+                && unknown.unchecked[0].contains("not checked"),
+            "{unknown:?}"
+        );
+        // G54 at X10 Y-100 Z-60: X -5 to 100 is 5 to 110, inside; Y 0 to 50
+        // is -100 to -50, inside; Z -20 to 15 is -80 to -45. GRBL takes no
+        // length offset, so the tool's length is not added.
+        let mut at = Placement {
+            zero: Some(dvec3(10.0, -100.0, -60.0)),
+            tool_length: Some(50.0),
+        };
+        assert_eq!(grbl.travel_check(low, high, &at), TravelCheck::default());
+        // Moved 3 mm left, X goes past its lowest.
+        at.zero = Some(dvec3(2.0, -100.0, -60.0));
+        let past = grbl.travel_check(low, high, &at).past;
+        assert_eq!(
+            past,
+            [
+                "X goes from -3 to 102 mm in machine coordinates, 3 mm under GRBL's travel of \
+              0 to 300 mm"
+            ]
+        );
+        // With length offsets the gauge line is the tool's length above the
+        // tip: Z -80 to -45 is -30 to 5 with a 50 mm tool, past the top.
+        let mut g43 = grbl.clone();
+        g43.length_offset = true;
+        at.zero = Some(dvec3(10.0, -100.0, -60.0));
+        let past = g43.travel_check(low, high, &at).past;
+        assert_eq!(
+            past,
+            [
+                "Z goes from -30 to 5 mm in machine coordinates, the tool 50 mm from the gauge \
+              line, 5 mm over GRBL's travel of -150 to 0 mm"
+            ]
+        );
+        // Its length not known, Z is not checked, and that is said.
+        at.tool_length = None;
+        let check = g43.travel_check(low, high, &at);
+        assert!(check.past.is_empty());
+        assert!(
+            check.unchecked[0].starts_with("Z is not checked"),
+            "{check:?}"
+        );
+    }
+
+    /// A `G53` move of the profile's own goes where the machine goes in
+    /// machine coordinates: outside its travel, the profile is not valid.
+    #[test]
+    fn a_profiles_own_machine_moves_keep_to_its_travel() {
+        let machine = "[travel]\ncoordinates = \"machine\"\nz = [-150, -1]";
+        let e = grbl_with(machine).unwrap_err();
+        assert!(
+            e.to_string()
+                .contains("safe_retract line 1, a G53 move, sends Z to 0"),
+            "{e}"
+        );
+        assert!(grbl_with("[travel]\ncoordinates = \"machine\"\nz = [-150, 0]").is_ok());
+        // From the work zero, G53 is somewhere else.
+        assert!(grbl_with("[travel]\nz = [-150, -1]").is_ok());
+        let parked = "end_home = [\"G53 G0 X-5 Y0 (park)\"]\n\
+                      [travel]\ncoordinates = \"machine\"\nx = [0, 300]";
+        let e = grbl_with(parked).unwrap_err();
+        assert!(e.to_string().contains("end_home line 1"), "{e}");
+    }
+
+    /// A work offset past G59 is the profile's, as it writes it; one it has
+    /// not got is none.
+    #[test]
+    fn extended_work_offsets_are_the_profiles() {
+        let grbl = Profile::builtin("grbl").unwrap().unwrap();
+        assert_eq!(grbl.wcs_word(54).as_deref(), Some("G54"));
+        assert_eq!(grbl.wcs_word(59).as_deref(), Some("G59"));
+        assert_eq!(grbl.wcs_word(60), None);
+        assert_eq!(grbl.wcs_word(53), None);
+        assert_eq!(grbl.work_offsets().len(), 6);
+        let linuxcnc = Profile::builtin("linuxcnc").unwrap().unwrap();
+        assert_eq!(linuxcnc.wcs_word(60).as_deref(), Some("G59.1"));
+        assert_eq!(linuxcnc.wcs_word(62).as_deref(), Some("G59.3"));
+        assert_eq!(linuxcnc.wcs_word(63), None);
+        assert_eq!(linuxcnc.work_offsets().len(), 9);
+        let fanuc = grbl_with("extended_offsets = [\"G54.1 P1\", \"G54.1 P2\"]").unwrap();
+        assert_eq!(fanuc.wcs_word(61).as_deref(), Some("G54.1 P2"));
+        for bad in ["\"\"", "\"M7\"", "\"G59.1 (x)\""] {
+            assert!(
+                grbl_with(&format!("extended_offsets = [{bad}]")).is_err(),
+                "{bad}"
+            );
+        }
     }
 
     #[test]
