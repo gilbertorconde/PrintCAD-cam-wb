@@ -6,7 +6,7 @@ use std::sync::Arc;
 use camcraft_sim::stock::{Block, PackedStock, PartSurface, SimReport, VerifyReport};
 use glam::DVec2;
 
-use crate::job::{Coolant, HeightContext, SpindleDirection};
+use crate::job::{Coolant, HeightContext, Piece, SpindleDirection};
 use crate::path::linker::LinkReport;
 use crate::path::toolpath::Toolpath;
 use crate::setup::frame::Frame;
@@ -102,6 +102,77 @@ pub enum Plan {
     Skip,
 }
 
+/// One piece of the tool above its flutes meeting material.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Clash {
+    /// Which piece.
+    pub piece: Piece,
+    /// How wide it is, at its widest, in millimetres.
+    pub diameter: f64,
+    /// The first move it meets material on, as an index into the path.
+    pub first_move: usize,
+    /// How many moves it meets material on.
+    pub moves: u64,
+    /// The most material stands into it, in millimetres.
+    pub deepest: f64,
+    /// Whether the part itself is in its way somewhere, not only material
+    /// left above it.
+    pub part: bool,
+    /// Whether a rapid is among the moves.
+    pub rapid: bool,
+}
+
+impl Clash {
+    /// What it is, in a sentence: what met what, on how many moves from
+    /// which, how far into it, and for the holder the stickout `needs` that
+    /// would clear it.
+    pub fn line(&self, needs: Option<f64>) -> String {
+        let what = match self.piece {
+            Piece::Body => "the cutter above its flutes".to_string(),
+            Piece::Shank => format!("the shank (Ø{:.2})", self.diameter),
+            Piece::Holder(i) => format!("holder segment {} (Ø{:.2})", i + 1, self.diameter),
+        };
+        let hit = if self.part { "the part" } else { "the stock" };
+        let rapid = if self.rapid {
+            ", a rapid among them"
+        } else {
+            ""
+        };
+        let mut out = format!(
+            "{what} meets {hit} on {} move(s) from move {}{rapid}, {:.2} mm into it",
+            self.moves,
+            self.first_move + 1,
+            self.deepest
+        );
+        if let (Piece::Holder(_), Some(n)) = (self.piece, needs) {
+            // Rounded up, so the stickout said clears it.
+            out.push_str(&format!(
+                ": needs {:.1} mm stickout",
+                (n * 10.0).ceil() / 10.0
+            ));
+        }
+        out
+    }
+}
+
+/// What the simulator found of the tool above its flutes: its body past the
+/// flute length, its shank and its holder, against the material as each move
+/// found it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Clashes {
+    /// Each piece that met material, from the tip upward.
+    pub found: Vec<Clash>,
+    /// The stickout the holder clears everything at, when it met material:
+    /// the tool's own and the most material stood into the holder.
+    pub needs_stickout: Option<f64>,
+    /// Whether the tool had anything above its flutes to check.
+    pub checked: bool,
+    /// What its lengths did not say enough to check.
+    pub unchecked: Vec<String>,
+    /// Cutting moves a 3D finish left out where they met the part.
+    pub trimmed: u64,
+}
+
 /// What one operation produced.
 #[derive(Debug, Clone)]
 pub struct OperationResult {
@@ -129,6 +200,8 @@ pub struct OperationResult {
     pub coolant: Coolant,
     /// What the simulator saw while this operation ran.
     pub sim: SimReport,
+    /// What it saw of the tool above its flutes.
+    pub clashes: Clashes,
     /// Cutting passes produced.
     pub passes: u64,
     /// Inter-pass travel removed by reordering, as a fraction.
@@ -166,6 +239,7 @@ impl OperationResult {
     /// steep descent deeper than the allowance fails the operation, not just warns.
     pub fn is_clean(&self) -> bool {
         self.sim.is_clean()
+            && self.clashes.found.is_empty()
             && !self.path.has_unplanned_links()
             && self.deepest_cut_descent_mm <= self.max_cut_step
     }

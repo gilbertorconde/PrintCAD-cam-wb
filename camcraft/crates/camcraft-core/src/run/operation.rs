@@ -5,11 +5,11 @@ use std::cell::OnceCell;
 
 use camcraft_geom::contour::{Region, contour_above};
 use camcraft_geom::topology::EdgeKind;
-use camcraft_sim::stock::{Block, SimReport, Stock};
+use camcraft_sim::stock::{Block, PartSurface, SimReport, Stock};
 use glam::{DVec2, DVec3, dvec2};
 
 use super::error::in_op;
-use super::{Made, OperationResult, PLUNGE_RATIO, RunError, StrategyDetail};
+use super::{Clashes, Made, OperationResult, PLUNGE_RATIO, RunError, StrategyDetail};
 use crate::cutter::allowance::{Allowance, EffectiveTool};
 use crate::cutter::dropcutter::DropCutter;
 use crate::cutter::tool::{Cutter, Flat, ToolProfile};
@@ -57,6 +57,7 @@ mod carving;
 mod clearing;
 mod copies;
 mod finishing;
+mod holder;
 mod holes;
 mod link;
 
@@ -72,6 +73,8 @@ use finishing::{
     contour_paths, flat_paths, morphed_spiral_paths, parallel_paths, radial_paths, scallop_paths,
     spiral_paths,
 };
+pub(super) use holder::cut_kept;
+use holder::{Watching, clash_warning, trim, trims};
 pub(super) use holes::hole_targets;
 use holes::milled_paths;
 use link::{Cutting, OnPart, link_params};
@@ -99,6 +102,9 @@ pub(super) struct Work<'a> {
     /// The heights of the part's flat faces, found for the setup when an
     /// operation first needs them.
     pub(super) flats: &'a OnceCell<Vec<f64>>,
+    /// The part's top, on the simulator's grid: what the tool above its
+    /// flutes is kept off and checked against.
+    pub(super) part: &'a PartSurface,
 }
 
 impl Work<'_> {
@@ -351,6 +357,24 @@ pub(super) fn run_operation(
         })
         .collect();
 
+    // A 3D finish asked to keep its shank and holder off the part leaves out
+    // the cuts where they would meet it, before linking, so the linker lifts
+    // over what is left out as over any gap.
+    let mut trimmed = 0;
+    let raw = if op.passes.use_holder && trims(op) {
+        let (kept, dropped) = trim(&raw, work.spec, work.part.field(), work.job.tolerance)
+            .map_err(|e| in_op(op)(StrategyError::from(e)))?;
+        if dropped > 0 {
+            warnings.push(format!(
+                "{dropped} cutting move(s) left out where the shank or holder would meet the part"
+            ));
+        }
+        trimmed = dropped;
+        kept
+    } else {
+        raw
+    };
+
     // Ordering is a Toolpath -> Toolpath transform, applied before linking so the
     // retracts it needs are planned around the order actually used. Holes are
     // already in order, and a hole reversed would be drilled from the bottom up.
@@ -408,11 +432,13 @@ pub(super) fn run_operation(
     // Linked over the material as each pass leaves it, and cut into it as linked.
     let before = stock.volume();
     let surface = OnPart::new(work.cutter, work.tool, work.job.tolerance);
+    let watching = Watching::new(stock, work.spec, work.job.tolerance, work.part.field());
     let mut cutting = Cutting {
         stock,
         tool: work.tool,
         rapid_contacts: 0,
         deepest: 0.0,
+        watching,
     };
     let (path, mut links) = link(
         &ordered,
@@ -434,6 +460,11 @@ pub(super) fn run_operation(
         rapid_contacts: cutting.rapid_contacts,
         deepest_rapid_contact_mm: cutting.deepest,
     };
+    let clashes = Clashes {
+        trimmed,
+        ..cutting.watching.finish()
+    };
+    warnings.extend(clashes.found.iter().map(|c| clash_warning(c, &clashes)));
     if links.suspicious_plunges > 0 {
         warnings.push(format!(
             "{} plunge(s) do not start above the surface",
@@ -462,6 +493,7 @@ pub(super) fn run_operation(
     Ok(OperationResult {
         path,
         sim,
+        clashes,
         passes,
         travel_saved: order.saved(),
         reliefs,
@@ -629,6 +661,7 @@ pub(super) fn not_made(op: &Operation, spec: Option<&ToolSpec>, made: Made) -> O
         },
         coolant: spec.map(|t| t.coolant).unwrap_or_default(),
         sim: SimReport::default(),
+        clashes: Clashes::default(),
         passes: 0,
         travel_saved: 0.0,
         reliefs: Vec::new(),

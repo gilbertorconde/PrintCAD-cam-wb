@@ -21,6 +21,7 @@ directories.workspace     = true
 thiserror.workspace       = true
 rayon.workspace           = true
 csv.workspace             = true
+serde_json.workspace      = true
 
 [lints]
 workspace = true

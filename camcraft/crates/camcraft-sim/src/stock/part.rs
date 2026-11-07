@@ -71,6 +71,12 @@ impl PartSurface {
         })
     }
 
+    /// The part's heights, over the window of the grid it covers: unset
+    /// where there is no part.
+    pub fn field(&self) -> &HeightMap {
+        &self.field
+    }
+
     /// Height of the part at a column, or `None` where the part is absent.
     pub fn height_at(&self, x: f64, y: f64) -> Option<f64> {
         self.field.sample(x, y)

@@ -23,7 +23,7 @@
 use camcraft_core::cutter::allowance::{Allowance, EffectiveTool};
 use camcraft_core::cutter::dropcutter::{DropCutter, DropTest};
 use camcraft_core::cutter::tool::ToolProfile;
-use camcraft_core::job::Job;
+use camcraft_core::job::{Job, Piece};
 use camcraft_core::path::toolpath::{MoveRole, PLUNGE_RATIO, Toolpath};
 use camcraft_core::run::{Made, OperationResult, StrategyDetail};
 use camcraft_core::strategy::parallel::ParallelReport;
@@ -242,6 +242,55 @@ fn finding(level: Level, code: &'static str, message: String, detail: String) ->
     }
 }
 
+/// CC111: what of the tool above its flutes met material, each piece a
+/// failure at the first move it did; else a pass, or a note of what its
+/// lengths did not let be checked.
+fn holder_findings(op: &OperationResult, out: &mut Vec<Finding>) {
+    let c = &op.clashes;
+    for clash in &c.found {
+        let detail = match clash.piece {
+            Piece::Holder(_) => "lengthen the stickout, or use a slimmer holder".into(),
+            Piece::Shank => "a longer neck or a slimmer shank would clear it".into(),
+            Piece::Body => "longer flutes, or less taken at a time, would clear it".into(),
+        };
+        out.push(
+            finding(Level::Fail, "CC111", clash.line(c.needs_stickout), detail)
+                .at(clash.first_move),
+        );
+    }
+    if c.found.is_empty() && c.checked {
+        out.push(finding(
+            Level::Pass,
+            "CC111",
+            "simulator: the tool above its flutes, its shank and its holder meet no material"
+                .into(),
+            if c.unchecked.is_empty() {
+                String::new()
+            } else {
+                format!("not checked: {}", c.unchecked.join("; "))
+            },
+        ));
+    } else if !c.checked {
+        out.push(finding(
+            Level::Note,
+            "CC111",
+            "the tool above its flutes is not checked".into(),
+            c.unchecked.join("; "),
+        ));
+    }
+    if c.trimmed > 0 {
+        out.push(finding(
+            Level::Note,
+            "CC218",
+            format!(
+                "{} cutting move(s) left out where the shank or holder would meet the part",
+                c.trimmed
+            ),
+            "and not finished: Use shank and holder".into(),
+        ));
+    }
+}
+
 fn setup_findings(verify: &VerifyReport, budget: f64, model_warnings: &[String]) -> Vec<Finding> {
     let mut out = Vec::new();
     out.push(if verify.gouged == 0 {
@@ -443,6 +492,10 @@ fn operation_findings(
             format!("deepest {:.2} mm", op.sim.deepest_rapid_contact_mm),
         )
     });
+
+    // CC111: the tool above its flutes, its shank and its holder, against the
+    // material as the simulator found it at each move.
+    holder_findings(op, &mut out);
 
     // Advisories.
     match &op.detail {

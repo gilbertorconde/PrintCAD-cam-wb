@@ -2257,14 +2257,8 @@ fn a_tool_is_as_long_as_its_stickout_and_its_holder() {
     t.holder = Some(Holder {
         name: "ER20".into(),
         segments: vec![
-            HolderSegment {
-                diameter: 32.0,
-                length: 20.0,
-            },
-            HolderSegment {
-                diameter: 40.0,
-                length: 25.0,
-            },
+            HolderSegment::cylinder(32.0, 20.0),
+            HolderSegment::cylinder(40.0, 25.0),
         ],
     });
     assert_eq!(t.gauge_length(), Some(75.0));

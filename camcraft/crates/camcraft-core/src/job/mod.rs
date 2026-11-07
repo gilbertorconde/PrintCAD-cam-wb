@@ -103,8 +103,8 @@ pub use strategy_spec::{
     RadialDirection, Rest, RestSource, SlotPattern, StrategySpec, ThreadHand, TraceDirection,
 };
 pub use tool::{
-    Coolant, DRILL_POINT, Holder, HolderSegment, Preset, SpindleDirection, ToolFieldError,
-    ToolKind, ToolMaterial, ToolSpec, free_preset_name,
+    AboveFlutes, Coolant, DRILL_POINT, Holder, HolderSegment, Piece, Preset, SpindleDirection,
+    ToolFieldError, ToolKind, ToolMaterial, ToolSpec, free_preset_name,
 };
 pub use uses::{Depths, HelixSize, Leave, Links, Reach, Uses};
 

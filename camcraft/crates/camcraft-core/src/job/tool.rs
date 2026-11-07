@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use super::{StockToLeave, is_default};
 use crate::cutter::tool::{Ball, Bullnose, Cone, Cutter, Flat, ToolError};
 use crate::is_positive;
+use camcraft_sim::stock::{Body, Ring};
 
 /// A cutter.
 ///
@@ -227,14 +228,61 @@ pub struct Holder {
     pub segments: Vec<HolderSegment>,
 }
 
-/// One cylinder of a holder.
+/// One piece of a holder: a cylinder, or a cone where its top is given and
+/// differs from its foot, as Fusion's segments have a lower and an upper
+/// diameter.
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HolderSegment {
-    /// Diameter, in millimetres.
+    /// Diameter at its foot, the end nearer the tool, in millimetres.
     pub diameter: f64,
     /// Length, in millimetres.
     pub length: f64,
+    /// Diameter at its top, in millimetres; its foot's when not given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_diameter: Option<f64>,
+}
+
+impl HolderSegment {
+    /// A cylinder `diameter` across and `length` long.
+    pub fn cylinder(diameter: f64, length: f64) -> Self {
+        Self {
+            diameter,
+            length,
+            top_diameter: None,
+        }
+    }
+
+    /// Its diameter at its top.
+    pub fn top(&self) -> f64 {
+        self.top_diameter.unwrap_or(self.diameter)
+    }
+}
+
+/// A part of a tool that does not cut: what stands above the flutes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Piece {
+    /// The cutter itself above its flute length, up to its shank.
+    Body,
+    /// The shank, up to the holder.
+    Shank,
+    /// One segment of the holder, from the one at the tool.
+    Holder(usize),
+}
+
+/// What of a tool stands above its flutes, as the simulator checks it: its
+/// rings, each the [`Piece`] it is, and where the holder starts.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AboveFlutes {
+    /// Its rings, from the tip upward.
+    pub body: Body,
+    /// What each ring is.
+    pub pieces: Vec<Piece>,
+    /// How far the holder's face is from the tip, when there is a holder
+    /// checked.
+    pub stickout: Option<f64>,
+    /// What could not be checked, and why.
+    pub unchecked: Vec<String>,
 }
 
 /// A tool field that is not physically meaningful, and why.
@@ -319,6 +367,87 @@ impl ToolSpec {
         (pitch < fine - 1e-9 || pitch > coarse + 1e-9).then(|| {
             format!("a {pitch} mm pitch is outside the thread mill's {fine} to {coarse} mm")
         })
+    }
+
+    /// What stands above its flutes, from the tip upward, as far as its
+    /// lengths say:
+    ///
+    /// - past its flute length, the cutter itself, as wide as it cuts, up to
+    ///   its shoulder where it has a shank of its own, else up to the holder;
+    /// - its shank, from its shoulder (or its flutes) up to the holder;
+    /// - its holder's segments, stacked from its stickout (else its overall
+    ///   length) up.
+    ///
+    /// A thread mill's teeth stand on a neck narrower than they are, which
+    /// goes into the hole behind them, so nothing is checked between its
+    /// teeth and its shoulder (the neck's length); its shank from there up.
+    ///
+    /// Nothing is guessed: what its lengths do not place is left out, and
+    /// said in [`AboveFlutes::unchecked`].
+    pub fn above_flutes(&self) -> AboveFlutes {
+        let mut out = AboveFlutes::default();
+        let out_of_holder = self.stickout.or(self.overall_length);
+        let top = out_of_holder.unwrap_or(f64::INFINITY);
+        let thread_mill = self.kind == ToolKind::ThreadMill;
+        let shank_from = if thread_mill {
+            self.shoulder_length
+        } else {
+            self.shoulder_length.or(self.flute_length)
+        };
+        let mut ring = |piece, from: f64, to: f64, below: f64, above: f64| {
+            if to > from && below > 0.0 && above > 0.0 {
+                out.body.rings.push(Ring {
+                    from,
+                    to,
+                    radius_from: below / 2.0,
+                    radius_to: above / 2.0,
+                });
+                out.pieces.push(piece);
+            }
+        };
+        if let Some(flutes) = self.flute_length.filter(|_| !thread_mill) {
+            // Without a shank of its own the cutter is as wide all the way up.
+            let to = match self.shank_diameter {
+                Some(_) => shank_from.unwrap_or(flutes),
+                None => top,
+            };
+            ring(
+                Piece::Body,
+                flutes,
+                to.min(top),
+                self.diameter,
+                self.diameter,
+            );
+        }
+        match (self.shank_diameter, shank_from) {
+            (Some(d), Some(from)) => ring(Piece::Shank, from, top, d, d),
+            (Some(_), None) if thread_mill => out
+                .unchecked
+                .push("the shank: the thread mill has no shoulder (neck) length".into()),
+            (Some(_), None) => out
+                .unchecked
+                .push("the shank: the tool has no flute or shoulder length".into()),
+            _ => {}
+        }
+        if self.flute_length.is_none() && !thread_mill {
+            out.unchecked
+                .push("the cutter above its flutes: the tool has no flute length".into());
+        }
+        let segments = self.holder.as_ref().map_or(&[][..], |h| &h.segments[..]);
+        if segments.is_empty() {
+            out.unchecked.push("the holder: the tool has none".into());
+        } else if let Some(at) = out_of_holder {
+            out.stickout = Some(at);
+            let mut from = at;
+            for (i, s) in segments.iter().enumerate() {
+                ring(Piece::Holder(i), from, from + s.length, s.diameter, s.top());
+                from += s.length;
+            }
+        } else {
+            out.unchecked
+                .push("the holder: the tool has no stickout or overall length".into());
+        }
+        out
     }
 
     /// The preset called `name`.
@@ -427,7 +556,10 @@ impl ToolSpec {
         }
         if let Some(h) = &self.holder {
             for (i, seg) in h.segments.iter().enumerate() {
-                if !is_positive(seg.diameter) || !is_positive(seg.length) {
+                if !is_positive(seg.diameter)
+                    || !is_positive(seg.length)
+                    || seg.top_diameter.is_some_and(|d| !is_positive(d))
+                {
                     bad(
                         "holder",
                         format!("segment {} needs a positive diameter and length", i + 1),

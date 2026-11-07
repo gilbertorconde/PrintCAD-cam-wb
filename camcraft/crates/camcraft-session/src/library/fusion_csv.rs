@@ -173,7 +173,7 @@ fn key_of(cell: &str) -> String {
 
 /// A name for an imported tool: its product code, else its description made
 /// fit for a name.
-fn name_for(tool: &ToolSpec) -> String {
+pub(super) fn name_for(tool: &ToolSpec) -> String {
     let base = tool.product.clone().unwrap_or_else(|| tool.comment.clone());
     let name: String = base
         .chars()

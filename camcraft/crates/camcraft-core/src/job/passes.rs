@@ -45,6 +45,12 @@ pub struct Passes {
     /// ([`Uses::relief`](super::Uses::relief), [`crate::path::relief`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relief: Option<Relief>,
+    /// Whether a 3D finish keeps what stands above the tool's flutes, its
+    /// shank and its holder, off the part, leaving out the cuts where they
+    /// would meet it: Fusion's Use Shank and Holder. Every operation is
+    /// checked for them meeting material either way.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub use_holder: bool,
 }
 
 impl Default for Passes {
@@ -59,6 +65,7 @@ impl Default for Passes {
             tabs: None,
             finishing: None,
             relief: None,
+            use_holder: false,
         }
     }
 }
