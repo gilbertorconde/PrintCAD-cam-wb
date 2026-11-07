@@ -287,8 +287,22 @@ pub struct SetupData {
     /// post.
     #[serde(default)]
     pub post_profile: Option<String>,
-    /// Work offset, 54 for G54.
+    /// Work offset, 54 for G54; from 60, the post's extended ones in its
+    /// order (60 is LinuxCNC's G59.1).
     pub wcs: f64,
+    /// Whether where the work zero is on the machine is given, in
+    /// `wcs_x`, `wcs_y` and `wcs_z`: what the work offset holds.
+    #[serde(default)]
+    pub wcs_known: bool,
+    /// Where the work zero is in machine coordinates, millimetres along the
+    /// setup's axes: Z the gauge line's when the post takes tool length
+    /// offsets, else the tool's tip's.
+    #[serde(default)]
+    pub wcs_x: f64,
+    #[serde(default)]
+    pub wcs_y: f64,
+    #[serde(default)]
+    pub wcs_z: f64,
     /// Chordal tolerance, millimetres.
     pub tolerance: f64,
     /// The tools its operations cut with, by name: copies, never links to the
@@ -333,6 +347,10 @@ impl SetupData {
             post: post.into(),
             post_profile: None,
             wcs: 54.0,
+            wcs_known: false,
+            wcs_x: 0.0,
+            wcs_y: 0.0,
+            wcs_z: 0.0,
             tolerance,
             tools: BTreeMap::new(),
         }
@@ -529,6 +547,32 @@ impl SetupData {
         free
     }
 
+    /// Its post's machine profile: its own copy, or the built-in one it
+    /// names; `None` when it does not load.
+    pub fn profile(&self) -> Option<camcraft_post::profile::Profile> {
+        match &self.post_profile {
+            Some(text) => camcraft_post::profile::Profile::from_toml(text).ok(),
+            None => camcraft_post::profile::Profile::builtin(&self.post)?.ok(),
+        }
+    }
+
+    /// The work offsets its post has, by number (54 for G54) and word:
+    /// G54 to G59, and its extended ones.
+    pub fn work_offsets(&self) -> Vec<(u8, String)> {
+        match self.profile() {
+            Some(p) => p.work_offsets(),
+            None => (54..=59).map(|n| (n, format!("G{n}"))).collect(),
+        }
+    }
+
+    /// The word that selects its work offset, as its post writes it.
+    pub fn wcs_word(&self) -> String {
+        self.work_offsets()
+            .into_iter()
+            .find(|(n, _)| f64::from(*n) == self.wcs)
+            .map_or_else(|| format!("G{}", self.wcs), |(_, w)| w)
+    }
+
     pub fn problem(&self) -> Option<String> {
         if self.bodies.is_empty() {
             return Some("Pick the bodies the setup machines.".into());
@@ -561,8 +605,20 @@ impl SetupData {
                 return Some("The stock's margins cannot be less than 0.".into());
             }
         }
-        if !(1.0..=99.0).contains(&self.wcs) {
-            return Some("The work offset must be 54 to 59, or another the machine has.".into());
+        let offsets = self.work_offsets();
+        if !offsets.iter().any(|(n, _)| f64::from(*n) == self.wcs) {
+            let last = offsets.last().map_or("G59", |(_, w)| w.as_str());
+            return Some(format!(
+                "The work offset must be one {} has: G54 to {last}.",
+                self.post
+            ));
+        }
+        if self.wcs_known
+            && ![self.wcs_x, self.wcs_y, self.wcs_z]
+                .iter()
+                .all(|v| v.is_finite())
+        {
+            return Some("Where the work offset is on the machine must be numbers.".into());
         }
         match (self.tool_axis, &self.axis_pick) {
             (ToolAxis::Face, None) => {
@@ -1166,7 +1222,13 @@ pub fn job(
     let mut camcraft = Setup::new(name);
     camcraft.models = models.iter().map(|m| m.name.clone()).collect();
     camcraft.stocks = vec!["stock".into()];
-    camcraft.wcs = setup.wcs.round().clamp(1.0, 99.0) as u8;
+    camcraft.wcs = setup
+        .wcs
+        .round()
+        .clamp(54.0, f64::from(camcraft_core::job::LAST_WCS)) as u8;
+    camcraft.work_offset = setup
+        .wcs_known
+        .then_some([setup.wcs_x, setup.wcs_y, setup.wcs_z]);
     camcraft.post = setup.post.clone();
     camcraft.orientation = setup.orientation(model_of);
     let offset = [setup.offset_x, setup.offset_y, setup.offset_z];
@@ -1571,6 +1633,48 @@ mod tests {
             ),
             "{said}"
         );
+    }
+
+    /// A setup picks its work offset from those its post has, LinuxCNC's
+    /// past G59 among them, and says where it is on the machine only when
+    /// asked to; the job carries both.
+    #[test]
+    fn a_setups_work_offset_is_its_posts_and_says_where_it_is() {
+        let mut setup = SetupData::new(vec!["b1".into()], "linuxcnc", 0.05);
+        let words: Vec<String> = setup.work_offsets().into_iter().map(|(_, w)| w).collect();
+        assert_eq!(words.len(), 9);
+        assert_eq!(words[6], "G59.1");
+        setup.wcs = 61.0;
+        assert_eq!(setup.wcs_word(), "G59.2");
+        assert_eq!(setup.problem(), None);
+        (setup.wcs_x, setup.wcs_y, setup.wcs_z) = (120.0, -80.0, -95.5);
+        let models = models_of(&setup, |_| Some("Part".into()));
+        let unknown = job("S", &setup, &models, &[]);
+        assert_eq!(
+            (unknown.setups[0].wcs, unknown.setups[0].work_offset),
+            (61, None)
+        );
+        setup.wcs_known = true;
+        let known = job("S", &setup, &models, &[]);
+        assert_eq!(known.setups[0].work_offset, Some([120.0, -80.0, -95.5]));
+        let text = camcraft_session::job_text(&known).unwrap();
+        assert_eq!(camcraft_session::parse_job(&text, "t").unwrap(), known);
+        // GRBL has none past G59.
+        setup.post = "grbl".into();
+        assert_eq!(setup.work_offsets().len(), 6);
+        assert!(
+            setup
+                .problem()
+                .unwrap()
+                .starts_with("The work offset must be one grbl has")
+        );
+        // A document from before keeps G54 and no position.
+        let mut old = SetupData::new(vec!["b1".into()], "grbl", 0.05).to_value();
+        for key in ["wcs_known", "wcs_x", "wcs_y", "wcs_z"] {
+            old.as_object_mut().unwrap().remove(key);
+        }
+        let old = SetupData::from(&old).unwrap();
+        assert!(!old.wcs_known && old.wcs == 54.0);
     }
 
     /// A chamfer of picked edges: its width, tip offset and side survive

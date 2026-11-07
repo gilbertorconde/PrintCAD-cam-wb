@@ -1042,6 +1042,21 @@ impl Bench for Cam {
                             "grbl, masso, masso-inch, centroid-avid, centroid-avid-inch, linuxcnc or linuxcnc-inch",
                         ),
                         param(
+                            "wcs",
+                            ParamKind::String,
+                            false,
+                            "the work offset its programs select: G54 (the default) to G59, \
+                             or one past them its post has, as G59.1 on LinuxCNC",
+                        ),
+                        param(
+                            "work_offset",
+                            ParamKind::Any,
+                            false,
+                            "{x, y, z}: where the work zero is in machine coordinates, mm, as \
+                             the work offset holds it (Z the gauge line's for a post with G43, \
+                             else the tip's), for checking the post's travel there",
+                        ),
+                        param(
                             "tolerance",
                             ParamKind::Number,
                             false,
@@ -1247,8 +1262,11 @@ impl Bench for Cam {
                             .into(),
                         "Besides camcraft's fields, it may give the spindle's range \
                          (spindle = [min, max]), the travel its programs must keep inside \
-                         ([travel] x = [min, max], y, z, in the program's units from the work \
-                         zero), and its own tool change (tool_change_lines, naming @tool@)."
+                         ([travel] x = [min, max], y, z, in the program's units: from the work \
+                         zero, or with coordinates = \"machine\" in machine coordinates, \
+                         where a setup's work_offset places them), the work offsets it has \
+                         past G59 (extended_offsets = [\"G59.1\", ...]) and its own tool \
+                         change (tool_change_lines, naming @tool@)."
                             .into(),
                     ],
                     ..Default::default()
@@ -1304,6 +1322,9 @@ impl Bench for Cam {
                 "offset_x",
                 "offset_y",
                 "offset_z",
+                "wcs_x",
+                "wcs_y",
+                "wcs_z",
                 "tolerance",
                 "stepover",
                 "stepdown",
@@ -1368,6 +1389,9 @@ impl Bench for Cam {
                 p("axis_dx", "Tool axis direction X", Dim::Number),
                 p("axis_dy", "Tool axis direction Y", Dim::Number),
                 p("axis_dz", "Tool axis direction Z", Dim::Number),
+                p("wcs_x", "Work offset, machine X", Dim::Length),
+                p("wcs_y", "Work offset, machine Y", Dim::Length),
+                p("wcs_z", "Work offset, machine Z", Dim::Length),
                 p("tolerance", "Tolerance", Dim::Length),
             ];
         }
@@ -1496,6 +1520,39 @@ impl Bench for Cam {
                     None => None,
                 };
                 let machine_x = axis_named("machine_x")?;
+                let work_offset: Option<Direction3> = match args.get("work_offset") {
+                    Some(v) => Some(
+                        serde_json::from_value(v.clone())
+                            .map_err(|_| "work_offset is {x, y, z} in mm")?,
+                    ),
+                    None => None,
+                };
+                // G55, or 55, among those the post it will have has.
+                let wcs = match args.get("wcs") {
+                    None => None,
+                    Some(given) => {
+                        let w = match given {
+                            Value::String(w) => w.trim().to_ascii_uppercase(),
+                            v => format!("G{}", v.as_f64().ok_or("wcs is G54 or the like")?),
+                        };
+                        let mut post = SetupData::new(
+                            Vec::new(),
+                            &text("post").unwrap_or_else(|| self.settings.post.clone()),
+                            0.0,
+                        );
+                        post.post_profile = self.settings.posts.get(&post.post).cloned();
+                        let offsets = post.work_offsets();
+                        let Some(&(n, _)) = offsets.iter().find(|(_, o)| *o == w) else {
+                            let all: Vec<&str> = offsets.iter().map(|(_, o)| o.as_str()).collect();
+                            return Err(format!(
+                                "no work offset {w} on {}: {}",
+                                post.post,
+                                all.join(", ")
+                            ));
+                        };
+                        Some(f64::from(n))
+                    }
+                };
                 let id = self.make_setup(bodies, text("name").as_deref())?;
                 if let Some((_, mut data)) = setup_node(&id) {
                     if let Some(z) = up_axis {
@@ -1543,6 +1600,13 @@ impl Bench for Cam {
                     }
                     if let Some(t) = number("tolerance") {
                         data.tolerance = t;
+                    }
+                    if let Some(n) = wcs {
+                        data.wcs = n;
+                    }
+                    if let Some(at) = work_offset {
+                        data.wcs_known = true;
+                        (data.wcs_x, data.wcs_y, data.wcs_z) = (at.x, at.y, at.z);
                     }
                     host::set_feature_data(&id, data.to_value())?;
                 }

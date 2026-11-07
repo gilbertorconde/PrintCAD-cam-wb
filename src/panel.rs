@@ -673,7 +673,6 @@ pub fn setup_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
                 posts.clone(),
                 posts.iter().position(|p| *p == setup.post).unwrap_or(0),
             ),
-            number("wcs", "Work offset (G54…)", setup.wcs, Dim::Number, 0, id),
             number(
                 "tolerance",
                 "Tolerance",
@@ -684,6 +683,7 @@ pub fn setup_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
             ),
         ],
     ));
+    panel.push(group("Work offset", work_offset_rows(id, &setup)));
     let ops = operations_of(id);
     let run = cam.runs.get(id).and_then(|c| c.shown());
     let items = ops
@@ -750,6 +750,69 @@ pub fn setup_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
     panel
 }
 
+/// The work offset a setup's programs select, from those its post has, and
+/// where it is on the machine, for checking the post's travel there.
+fn work_offset_rows(id: &str, setup: &SetupData) -> Vec<Widget> {
+    let mut offsets: Vec<String> = setup.work_offsets().into_iter().map(|(_, w)| w).collect();
+    let at = setup
+        .work_offsets()
+        .iter()
+        .position(|(n, _)| f64::from(*n) == setup.wcs);
+    // One its post has not got, kept so it shows; the setup says so.
+    let selected = at.unwrap_or_else(|| {
+        offsets.push(format!("{} (not on this post)", setup.wcs_word()));
+        offsets.len() - 1
+    });
+    let word = setup.wcs_word();
+    let mut rows = vec![
+        choice("wcs", "Work offset", offsets, selected),
+        Widget::Toggle {
+            id: "wcs_known".into(),
+            label: format!("Say where {word} is on the machine"),
+            on: setup.wcs_known,
+        },
+    ];
+    let travel = setup.profile().and_then(|p| p.travel);
+    let machine =
+        travel.is_some_and(|t| t.coordinates == camcraft_post::profile::Coordinates::Machine);
+    if setup.wcs_known {
+        rows.extend([
+            number("wcs_x", "Machine X", setup.wcs_x, Dim::Length, 3, id),
+            number("wcs_y", "Machine Y", setup.wcs_y, Dim::Length, 3, id),
+            number("wcs_z", "Machine Z", setup.wcs_z, Dim::Length, 3, id),
+        ]);
+        let z = if setup.profile().is_some_and(|p| p.length_offset) {
+            "Z is the spindle's gauge line at the work zero (G43 adds each tool's length)"
+        } else {
+            "Z is the tool's tip at the work zero, touched off"
+        };
+        rows.push(Widget::Text {
+            text: format!(
+                "The work zero in machine coordinates, as {word} holds it, along the \
+                 setup's axes (for a tilted setup, with the part turned). {z}."
+            ),
+            mono: false,
+        });
+    }
+    rows.push(Widget::Text {
+        text: match (travel, machine, setup.wcs_known) {
+            (None, ..) => "Its post gives no travel: nothing is checked against it.".into(),
+            (Some(_), false, _) => {
+                "Its post's travel is from the work zero, not in machine coordinates.".into()
+            }
+            (Some(_), true, true) => {
+                "Its programs are checked against its post's travel there.".into()
+            }
+            (Some(_), true, false) => format!(
+                "Its post's travel is in machine coordinates: say where {word} is to check \
+                 it."
+            ),
+        },
+        mono: false,
+    });
+    rows
+}
+
 pub fn setup_event(cam: &mut Cam, id: &str, event: PanelEvent) {
     let Some((_, mut setup)) = setup_node(id) else {
         return;
@@ -775,7 +838,9 @@ pub fn setup_event(cam: &mut Cam, id: &str, event: PanelEvent) {
                 "axis_dx" => &mut setup.axis_dx,
                 "axis_dy" => &mut setup.axis_dy,
                 "axis_dz" => &mut setup.axis_dz,
-                "wcs" => &mut setup.wcs,
+                "wcs_x" => &mut setup.wcs_x,
+                "wcs_y" => &mut setup.wcs_y,
+                "wcs_z" => &mut setup.wcs_z,
                 "tolerance" => &mut setup.tolerance,
                 _ => return,
             };
@@ -850,6 +915,11 @@ pub fn setup_event(cam: &mut Cam, id: &str, event: PanelEvent) {
                         setup.post = p;
                     }
                 }
+                "wcs" => match setup.work_offsets().get(index) {
+                    Some(&(n, _)) => setup.wcs = f64::from(n),
+                    // The one it had, which its post has not got.
+                    None => return,
+                },
                 "new_strategy" => {
                     cam.new_strategy = index.min(STRATEGIES.len() - 1);
                     return;
@@ -913,6 +983,10 @@ pub fn setup_event(cam: &mut Cam, id: &str, event: PanelEvent) {
                     Err(e) => cam.hint = Some(e),
                 }
             }
+        }
+        PanelEvent::Toggle { id: t, on } if t == "wcs_known" => {
+            setup.wcs_known = on;
+            cam.write_setup(id, &setup);
         }
         PanelEvent::Toggle { id: t, on } if t == "show_material" => cam.show_material = on,
         PanelEvent::Button { id: b } if b == "generate" => cam.refresh(id, true),

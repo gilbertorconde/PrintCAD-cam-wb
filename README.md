@@ -183,20 +183,42 @@ panels, the drawing and the helper that runs camcraft.
   machine profile of your own in camcraft's TOML, which a setup carries a
   copy of. A profile can give the spindle's range (`spindle = [6000, 24000]`),
   and an operation whose tool turns outside it is warned about. It can give
-  its travel, in the program's own coordinates and units, so what your work
-  zero leaves room for each way:
+  its travel, in the program's units, in the machine's own coordinates:
 
   ```toml
-  [travel]          # any of x, y and z; an axis left out goes anywhere
-  x = [-5, 295]     # the lowest and highest X the program may go to
-  z = [-80, 40]
+  [travel]
+  coordinates = "machine"   # as G53 moves; left out, from the work zero
+  x = [0, 600]              # any of x, y and z; an axis left out goes anywhere
+  y = [-400, 0]
+  z = [-120, 0]
   ```
 
-  A program that goes past it (its rapids and arcs counted) is a failed
-  check on the operation that does, saying which axis and how far: past its
-  limits a machine stops part-way through the cut, or crashes into them, so
-  it is refused before it gets there, like the simulator's failures (Save
-  anyway still writes it). The lines a profile gives, `header`, `footer`,
+  A setup then says where its work zero is on the machine, what its work
+  offset holds (Machine X, Y and Z in its panel, each taking a formula), and
+  its programs are checked there. With tool length offsets (`G43`, a
+  profile's `length_offset`), Machine Z is the spindle's gauge line at the
+  work zero, and each tool's length from the gauge line is added: what
+  sticks out of its holder (its stickout, else its overall length) and the
+  holder's segments, when it has one; without a holder the gauge line is
+  taken at the collet. A tool of no known length leaves Z unchecked, and a
+  note says so. Without length offsets, Machine Z is the tip's, touched off.
+  A setup that does not say where its work offset is is not checked, and a
+  note says so. A `G53` move of the profile's own (`safe_retract = ["G53 G0
+  Z0"]`, a tool change, the park at the end) must be inside the travel, or
+  the profile does not load. A tilted setup is checked along its own axes,
+  which are the machine's once its rotaries have stood the part up, or as
+  it is fixtured: its work offset is the one set with the part turned.
+  The older form, without `coordinates`, still loads and means what it did:
+  ranges from the work zero as you set it, whatever the work offset.
+  A program that goes past the travel (its rapids and arcs counted) is a
+  failed check on the operation that does, saying which axis, how far under
+  or over, and in what coordinates: past its limits a machine stops part-way
+  through the cut, or crashes into them, so it is refused before it gets
+  there, like the simulator's failures (Save anyway still writes it).
+  A setup picks its work offset from those its post has: `G54` to `G59`,
+  and any past them the profile lists (`extended_offsets = ["G59.1",
+  "G59.2", "G59.3"]` on LinuxCNC; a Fanuc-like one could list `"G54.1
+  P1"` on), which its programs select. The lines a profile gives, `header`, `footer`,
   `safe_retract`, `end_home` and its own tool change, `tool_change_lines`
   (written in place of `T.. M6` or the pause, and naming `@tool@`), take
   placeholders: `@name@` (the program), `@operation@`, `@strategy@`,
@@ -239,6 +261,8 @@ local setup = cam.setup{bodies = {"<body id>"}, margin = 3, post = "grbl"}
 local disc = cam.setup{bodies = {"<body id>"}, stock = "cylinder", axis = "tool",
                        diameter = 80, length = 25}  -- or margin = 3 round the bodies
 local side = cam.setup{bodies = {"<body id>"}, tool_axis = "-y", machine_x = "+x"}
+local placed = cam.setup{bodies = {"<body id>"}, post = "linuxcnc", wcs = "G59.1",
+                        work_offset = {x = 250, y = -180, z = -95}}  -- in machine coordinates
 local tilted = cam.setup{bodies = {"<body id>"}, tilt = {x = 30, y = 0}}
                                         -- or tool_axis = {x = 0, y = -0.5, z = 0.866}
 local rough = cam.operation{setup = setup.feature, strategy = "adaptive", tool = "1/4 upcut",
@@ -293,9 +317,11 @@ useful there.
   macro it calls does is not known, only warned about. A profile's own
   blocks are written as it gives them, and only the built-in posts' are
   read back in the tests.
-- Travel is one range an axis, from the work zero as you set it: a program
-  is not checked against the machine's limits in machine coordinates, nor
-  for a work offset other than the one the profile was written for.
+- Travel is checked as a box of the program's moves, in the setup's
+  frame: where the rotaries carry the part while they turn, the holder and
+  the spindle against the part or the table, and a controller's own
+  tool-change position (outside a `G53` move in the profile) are not
+  checked.
 
 ## Install it
 
