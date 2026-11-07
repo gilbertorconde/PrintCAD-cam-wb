@@ -436,6 +436,33 @@ the sheet to say what the program's header says of a tilt. In
 `camcraft-session`, `SetupProgram::tool_changes` says how many times a
 setup's program changes the tool.
 
+And holder and shank collisions. In `camcraft-sim`, `stock::reach`: a
+tool's `Body` above its flutes as `Ring`s (heights above the tip, a radius
+at each end, a cone checked as four cylinders no narrower than it), `Reach`
+to find what material stands into each over a straight move (exact for a
+cylinder, the lowest its foot comes while within reach of a cell), `Tops`,
+each 8 by 8 block's tallest cell, so a ring well above the material skips
+it (a block cut into is read again only when a ring comes down to it), and
+`Stock::sweep_watching`, which checks each move before sweeping it.
+`PartSurface::field` is public. In `camcraft-core`, `HolderSegment` has an
+optional `top_diameter` (a cone, as Fusion's upper diameter) and
+`HolderSegment::cylinder`; `ToolSpec::above_flutes` gives the rings the
+tool's lengths place, each a `Piece` (body, shank, holder segment), and
+what they leave unchecked (a thread mill's neck, behind its teeth, is not
+checked; its shank is, from its shoulder); `Passes::use_holder` is Fusion's Use Shank and
+Holder. A run makes the part's `PartSurface` before its operations, not
+after, and each operation (and each kept one) is cut watching its tool
+(`run/operation/holder.rs`), its `OperationResult::clashes` saying what met
+material, from which move, how far, whether the part, and the stickout
+that clears the holder; a clash fails `is_clean` and is a warning. With
+`use_holder`, a 3D finish's raw path loses the cuts where the tool above
+its flutes meets the part, a link left where it goes on, before ordering
+and linking. In `camcraft-session`, the check `CC111` (a failure at the
+first move, or a pass, or a note of what was not checked) and `CC218` (cuts
+left out); `library::system::holders`, a dozen common holders; and
+`library::fusion_json`, Fusion's JSON tool library, which carries holders,
+read as `fusion_csv` reads CSV (`fusion_csv::name_for` is shared).
+
 And one test: ogeom is 0.11.1 here, which printCAD's shapes need, and it
 meshes `round_edge_loose_fit.step`'s seam that 0.11.0 drew off the torus, so
 `a_loose_fit_is_refused_for_ogeoms_seam` became

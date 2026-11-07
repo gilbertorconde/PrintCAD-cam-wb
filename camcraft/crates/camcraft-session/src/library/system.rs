@@ -14,7 +14,7 @@
 //! conservative chip load, and a stepdown and stepover from its diameter.
 
 use camcraft_core::cutter::cutting::feed_for;
-use camcraft_core::job::{Preset, ToolKind, ToolMaterial, ToolSpec};
+use camcraft_core::job::{Holder, HolderSegment, Preset, ToolKind, ToolMaterial, ToolSpec};
 
 use super::{Folder, MM_PER_INCH};
 use crate::checks::thousands;
@@ -386,6 +386,58 @@ fn inches(v: f64) -> String {
     s.trim_end_matches('0').to_string()
 }
 
+/// Common holders, for a tool to be given one: the router's collet nuts, and
+/// collet chucks and side-lock holders on the usual tapers. Their sizes are
+/// typical ones, from the tool's end up to the spindle's face; a maker's
+/// differ a little, so a holder that matters is best measured.
+pub fn holders() -> Vec<Holder> {
+    let cyl = HolderSegment::cylinder;
+    let cone = |from: f64, to: f64, length: f64| HolderSegment {
+        diameter: from,
+        length,
+        top_diameter: Some(to),
+    };
+    let holder = |name: &str, segments: Vec<HolderSegment>| Holder {
+        name: name.into(),
+        segments,
+    };
+    vec![
+        holder("ER11 collet nut", vec![cyl(16.0, 11.0), cyl(25.0, 10.0)]),
+        holder("ER16 collet nut", vec![cyl(22.0, 17.0), cyl(32.0, 12.0)]),
+        holder("ER20 collet nut", vec![cyl(28.0, 19.0), cyl(42.0, 15.0)]),
+        holder("ER25 collet nut", vec![cyl(35.0, 20.0), cyl(52.0, 15.0)]),
+        holder("ER32 collet nut", vec![cyl(50.0, 22.0), cyl(62.0, 15.0)]),
+        holder(
+            "BT30 ER20 collet chuck, 60 mm",
+            vec![cyl(32.0, 20.0), cone(34.0, 40.0, 30.0), cyl(46.0, 10.0)],
+        ),
+        holder(
+            "BT30 side-lock 6 mm, 50 mm",
+            vec![cyl(25.0, 40.0), cyl(46.0, 10.0)],
+        ),
+        holder(
+            "CAT40 ER32 collet chuck, 70 mm",
+            vec![cyl(50.0, 25.0), cone(50.0, 56.0, 31.0), cyl(63.5, 14.0)],
+        ),
+        holder(
+            "CAT40 side-lock 12 mm, 65 mm",
+            vec![cyl(42.0, 51.0), cyl(63.5, 14.0)],
+        ),
+        holder(
+            "BT40 ER32 collet chuck, 70 mm",
+            vec![cyl(50.0, 25.0), cone(50.0, 56.0, 30.0), cyl(63.0, 15.0)],
+        ),
+        holder(
+            "HSK63A ER32 collet chuck, 100 mm",
+            vec![cyl(50.0, 25.0), cone(50.0, 53.0, 55.0), cyl(63.0, 20.0)],
+        ),
+        holder(
+            "HSK63A side-lock 12 mm, 80 mm",
+            vec![cyl(42.0, 60.0), cyl(63.0, 20.0)],
+        ),
+    ]
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
@@ -508,5 +560,20 @@ mod tests {
     fn chip_loads_read_as_charted() {
         assert_eq!(inches(0.0005 * 1.5), "0.00075");
         assert_eq!(inches(0.002), "0.002");
+    }
+
+    /// Every built-in holder is one a tool may have.
+    #[test]
+    fn the_holders_are_sound() {
+        let all = holders();
+        assert!(all.len() >= 10);
+        for h in all {
+            let tool = ToolSpec {
+                stickout: Some(30.0),
+                holder: Some(h.clone()),
+                ..ToolSpec::default()
+            };
+            assert!(tool.check().is_empty(), "{}: {:?}", h.name, tool.check());
+        }
     }
 }

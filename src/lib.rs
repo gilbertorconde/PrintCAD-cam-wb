@@ -1276,10 +1276,11 @@ impl Bench for Cam {
                              inner_radius, angle_from, angle_to, min_ring_length, \
                              pass_extension, tab_width, tab_height, tab_spacing, \
                              finishing_passes: numbers; centre, tabs, finishing, \
-                             finishing_repeat, relief: booleans; tab_shape: \
-                             rectangular|triangular; relief_style: dogbone|t-bone-x|\
-                             t-bone-y|t-bone-long|t-bone-short; relief_angle: \
-                             {value, given}, degrees, only corners sharper; \
+                             finishing_repeat, relief, use_holder (a 3D finish's Use shank \
+                             and holder): booleans; tab_shape: rectangular|triangular; \
+                             relief_style: dogbone|t-bone-x|t-bone-y|t-bone-long|\
+                             t-bone-short; relief_angle: {value, given}, degrees, only \
+                             corners sharper; \
                              hand: right|left; depth: engrave's and slot's, mm; chamfer_width, \
                              tip_offset: a chamfer's, mm; bore_pitch: a bore's helix, mm a \
                              turn; boss_width: circular's, mm; thread_pitch, thread_passes: \
@@ -1461,13 +1462,14 @@ impl Bench for Cam {
                 },
                 Command {
                     id: id(IMPORT_TOOLS),
-                    summary: "Add a Fusion tool library, exported as CSV, to the tool library"
+                    summary: "Add a Fusion tool library, exported as CSV or JSON, to the tool \
+                              library"
                         .into(),
                     params: vec![param(
                         "text",
                         ParamKind::String,
                         true,
-                        "the CSV file's text",
+                        "the CSV or JSON file's text",
                     )],
                     returns: "{said}: what was added, and what left out".into(),
                     see_also: vec![id(TOOLS)],
@@ -2054,7 +2056,7 @@ impl Bench for Cam {
                 Ok(json!({ "feature": id }))
             }
             IMPORT_TOOLS => {
-                let text = text("text").ok_or("the CSV's text, as `text`")?;
+                let text = text("text").ok_or("the CSV's or JSON's text, as `text`")?;
                 let said = tools::import_tools(&mut self.settings.tools, &text)?;
                 Ok(json!({ "said": said }))
             }

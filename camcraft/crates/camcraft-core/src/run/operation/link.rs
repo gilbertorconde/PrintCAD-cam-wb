@@ -1,6 +1,7 @@
 //! How an operation is linked: its linking settings as the linker takes them,
 //! and the material and part the linker measures its links against.
 
+use super::holder::Watching;
 use super::*;
 
 /// How `work`'s operation links: its own settings, with the strategy's defaults
@@ -97,6 +98,8 @@ pub(super) struct Cutting<'a> {
     pub(super) tool: &'a EffectiveTool,
     pub(super) rapid_contacts: u64,
     pub(super) deepest: f64,
+    /// The tool above its flutes, watched as it cuts.
+    pub(super) watching: Watching<'a>,
 }
 
 impl Material for Cutting<'_> {
@@ -107,7 +110,9 @@ impl Material for Cutting<'_> {
     }
 
     fn cut(&mut self, moves: &[Move]) {
-        let swept = self.stock.sweep(&sim_moves_of(moves), self.tool);
+        let swept = self
+            .watching
+            .cut(self.stock, &sim_moves_of(moves), self.tool);
         self.rapid_contacts += swept.rapid_contacts;
         self.deepest = self.deepest.max(swept.deepest_rapid_contact_mm);
     }

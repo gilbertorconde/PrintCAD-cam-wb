@@ -27,6 +27,15 @@ mod result;
 )]
 mod tests;
 
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::float_cmp,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+mod holder_tests;
+
 use std::cell::OnceCell;
 use std::sync::Arc;
 
@@ -35,17 +44,17 @@ use camcraft_sim::stock::{PackedStock, PartSurface, Stock};
 use crate::cutter::allowance::{Allowance, EffectiveTool};
 use crate::cutter::dropcutter::DropCutter;
 use crate::job::{Job, JobError, Operation, Setup, StrategySpec, ToolSpec};
-use crate::path::simadapt::sim_moves;
 use crate::setup::features::{FeatureError, Picking};
 use crate::setup::{Bodies, Prepared};
 
 pub use crate::path::toolpath::PLUNGE_RATIO;
 pub use error::RunError;
-pub use result::{Made, OperationResult, Plan, SetupResult, Stage, StrategyDetail};
+pub use result::{Clash, Clashes, Made, OperationResult, Plan, SetupResult, Stage, StrategyDetail};
 
 use error::in_op;
 use operation::{
-    Target, Work, chamfer_curves, heights_of, hole_targets, not_made, planar_areas, run_operation,
+    Target, Work, chamfer_curves, cut_kept, heights_of, hole_targets, not_made, planar_areas,
+    run_operation,
 };
 use pitch::sim_pitch;
 
@@ -102,6 +111,10 @@ pub fn run_prepared_planned(
     let sim_pitch = sim_pitch(job.tolerance, hi - lo, narrowest);
     let blocks = &prepared.stocks;
     let mut stock = Stock::from_blocks(blocks, ctx.stock_bottom - 1.0, sim_pitch)?;
+    // The part's top on the simulator's grid: what the tool above its flutes
+    // is checked against as each operation cuts, and what the result is
+    // verified against at the end.
+    let surface = PartSurface::from_mesh(mesh, lo, hi, sim_pitch)?;
     let cutter = DropCutter::new(mesh);
     // Found once for the setup, when an operation first needs them.
     let flats = OnceCell::new();
@@ -138,7 +151,14 @@ pub fn run_prepared_planned(
         let (spec, tool) = tool_of(job, op)?;
         if let Plan::Keep(before) = plan {
             let mut kept = (**before).clone();
-            kept.sim = stock.apply(&sim_moves(&kept.path), &tool);
+            (kept.sim, kept.clashes) = cut_kept(
+                &mut stock,
+                &kept.path,
+                spec,
+                &tool,
+                job.tolerance,
+                surface.field(),
+            );
             kept.made = Made::Kept;
             operations.push(kept);
             keyframes.push(Arc::new(PackedStock::pack(&stock)));
@@ -188,6 +208,7 @@ pub fn run_prepared_planned(
             bounds: (lo, hi),
             blocks,
             flats: &flats,
+            part: &surface,
         };
         operations.push(run_operation(&work, &target, &mut stock)?);
         keyframes.push(Arc::new(PackedStock::pack(&stock)));
@@ -198,12 +219,7 @@ pub fn run_prepared_planned(
     // across as well as down, or every vertical wall is a gouge beside it.
     progress(Stage::Verifying);
     let budget = job.tolerance + sim_pitch;
-    let part = cut_past(
-        job,
-        setup,
-        PartSurface::from_mesh(mesh, lo, hi, sim_pitch)?,
-        (&operations, &keyframes),
-    )?;
+    let part = cut_past(job, setup, surface, (&operations, &keyframes))?;
     let part = Arc::new(part.reaching(budget));
     let verify = stock.verify(&part, budget, LEFTOVER_LIMIT);
 

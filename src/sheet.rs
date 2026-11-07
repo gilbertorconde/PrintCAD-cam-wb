@@ -844,6 +844,40 @@ mod tests {
         at("<b>Warning</b>, finish: passes left cutting &lt;conventional&gt;");
     }
 
+    /// The shank and holder check, failed, is among the checks, with the
+    /// stickout that clears it.
+    #[test]
+    fn a_holder_that_meets_the_part_is_on_the_sheet() {
+        let mut run = run();
+        run.findings.insert(
+            0,
+            Finding {
+                level: Level::Fail,
+                code: "CC111".into(),
+                text: "CC111 1. rough: holder segment 1 (Ø28.00) meets the part on 4 move(s) \
+                       from move 40, 4.50 mm into it: needs 24.5 mm stickout"
+                    .into(),
+                operation: Some(0),
+                at_move: Some(39),
+            },
+        );
+        let setup = setup();
+        let html = Sheet {
+            name: "Top",
+            setup: &setup,
+            bodies: vec!["Bracket".into()],
+            run: &run,
+        }
+        .html();
+        assert!(html.contains("2 check(s) failed"), "{html}");
+        assert!(
+            html.contains(
+                "<b>Failed</b>: CC111 1. rough: holder segment 1 (Ø28.00) meets the part"
+            ) && html.contains("needs 24.5 mm stickout"),
+            "{html}"
+        );
+    }
+
     /// The sheet as it is written: `UPDATE_GOLDEN=1` writes it again, to be
     /// read before it is committed.
     #[test]

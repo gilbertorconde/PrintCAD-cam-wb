@@ -104,6 +104,10 @@ pub struct PassesData {
     pub relief_style: ReliefStyle,
     #[serde(default = "obtuse")]
     pub relief_angle: Opt,
+    /// Whether a 3D finish leaves out the cuts where the tool's shank or
+    /// holder would meet the part: Fusion's Use Shank and Holder.
+    #[serde(default)]
+    pub use_holder: bool,
 }
 
 impl Default for PassesData {
@@ -153,6 +157,7 @@ impl Default for PassesData {
             relief: false,
             relief_style: ReliefStyle::default(),
             relief_angle: obtuse(),
+            use_holder: false,
         };
         for name in [
             "radial",
@@ -208,6 +213,7 @@ impl PassesData {
         out.read_strategy(&op.strategy);
         let p = &op.passes;
         out.max_cut_step = p.max_cut_step;
+        out.use_holder = p.use_holder;
         if let Some(t) = p.tabs {
             out.tabs = true;
             out.tab_shape = t.shape;
@@ -457,8 +463,10 @@ impl PassesData {
             _ => {}
         }
         let uses = op.strategy.uses();
+        let finish = follows_part(&op.strategy);
         let p = &mut op.passes;
         p.max_cut_step = self.max_cut_step;
+        p.use_holder = finish && self.use_holder;
         p.tabs = (uses.tabs && self.tabs).then_some(Tabs {
             shape: self.tab_shape,
             width: self.tab_width,
@@ -964,12 +972,34 @@ pub fn strategy_rows(data: &OperationData, tool: Option<&ToolSpec>, feature: &st
             mono: false,
         });
     }
+    if follows_part(&s) {
+        rows.push(Widget::Toggle {
+            id: "passes/use_holder".into(),
+            label: "Use shank and holder: leave out cuts where they meet the part".into(),
+            on: p.use_holder,
+        });
+    }
     rows.push(length(
         "passes/max_cut_step",
         "Deepest step",
         p.max_cut_step,
     ));
     rows
+}
+
+/// Whether `s` is a 3D finish, which follows the part and so can leave out
+/// the cuts where the tool's shank or holder would meet it.
+fn follows_part(s: &StrategySpec) -> bool {
+    matches!(
+        s,
+        StrategySpec::Parallel { .. }
+            | StrategySpec::Scallop { .. }
+            | StrategySpec::Contour { .. }
+            | StrategySpec::Flat { .. }
+            | StrategySpec::Spiral { .. }
+            | StrategySpec::Radial { .. }
+            | StrategySpec::MorphedSpiral { .. }
+    )
 }
 
 /// Where a chamfer puts `tool`, or why it cannot.
@@ -1758,6 +1788,28 @@ mod tests {
             OperationData::from(&old).unwrap().operation(""),
             op("drill").operation("")
         );
+    }
+
+    #[test]
+    fn shank_and_holder_are_used_only_by_a_3d_finish() {
+        for (strategy, kept) in [("parallel", true), ("pocket-clearing", false)] {
+            let mut data = op(strategy);
+            let toggle = PanelEvent::Toggle {
+                id: "passes/use_holder".into(),
+                on: true,
+            };
+            assert!(passes_event(&mut data, "use_holder", &toggle, None));
+            let mut o = data.operation.clone();
+            data.passes.apply(&mut o);
+            assert_eq!(o.passes.use_holder, kept, "{strategy}");
+            let shown = strategy_rows(&data, None, "f")
+                .iter()
+                .any(|w| matches!(w, Widget::Toggle { id, .. } if id == "passes/use_holder"));
+            assert_eq!(shown, kept, "{strategy}");
+            if kept {
+                assert!(PassesData::of(&o).use_holder);
+            }
+        }
     }
 
     #[test]

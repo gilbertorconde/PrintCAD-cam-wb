@@ -35,6 +35,7 @@
 mod block;
 mod packed;
 mod part;
+mod reach;
 mod sweep;
 
 #[cfg(test)]
@@ -49,6 +50,7 @@ use rayon::prelude::*;
 pub use block::{Axis, Bar, Block};
 pub use packed::PackedStock;
 pub use part::PartSurface;
+pub use reach::{Body, Contact, Reach, Ring, Tops, Watch};
 
 /// The minimum a simulator needs to know about a cutter.
 pub trait SweptTool: Sync {

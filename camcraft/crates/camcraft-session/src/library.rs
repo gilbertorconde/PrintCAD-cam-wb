@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::fs::write_atomically;
 
 pub mod fusion_csv;
+pub mod fusion_json;
 pub mod system;
 
 /// Millimetres in an inch, as tool makers' tables give sizes.
