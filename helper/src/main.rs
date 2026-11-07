@@ -8,7 +8,7 @@
 use std::io::{BufRead, Read, Write};
 
 use cam_protocol::{Request, Response, SessionIn};
-use camcraft_helper::{answer_reporting, cache, read, session};
+use camcraft_helper::{answer_kept, cache, read, session};
 
 fn main() -> std::process::ExitCode {
     // A session's first line opens it; a request is the whole of the input.
@@ -65,7 +65,8 @@ fn main() -> std::process::ExitCode {
                 let _ = writeln!(errors, "progress {done} {total}");
                 let _ = errors.flush();
             };
-            match answer_reporting(&request, &mut progress) {
+            let folder = kept.as_ref().map(|(f, _)| f.as_path());
+            match answer_kept(&request, &mut progress, folder) {
                 Ok(run) => Response::Ran(Box::new(run)),
                 Err(why) => Response::Refused { why },
             }

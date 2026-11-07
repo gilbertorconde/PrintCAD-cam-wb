@@ -16,7 +16,7 @@ pub const HELPER: &str = "camcraft-helper";
 
 /// Bumped whenever a request or response changes shape, so a package never
 /// reads an answer from a helper of another build.
-pub const VERSION: u32 = 7;
+pub const VERSION: u32 = 8;
 
 /// One setup to run.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -39,6 +39,11 @@ pub struct Request {
     /// ([`Response::Read`]): what a package in printCAD's sandbox cannot do.
     #[serde(default)]
     pub read: Option<String>,
+    /// The earlier setup this one carries on from, as it is run on its own:
+    /// this one's stock is the material that one leaves, which the helper
+    /// keeps from when it ran it, or runs it again for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<Box<Request>>,
 }
 
 /// A body's solid, as printCAD keeps it.

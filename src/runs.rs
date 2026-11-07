@@ -3,7 +3,9 @@
 //! A setup runs as one job, which hands it to the native helper; the helper
 //! uses every core, so one setup runs at a time and the rest wait their turn.
 //! A setup is run again only when what it is run from changed: its job, or its
-//! bodies' shapes.
+//! bodies' shapes, or, for one that carries on from an earlier setup, that
+//! one's. A setup waits for the one it carries on from, so the helper keeps
+//! what that one left for it rather than run it twice.
 
 use std::collections::BTreeMap;
 
@@ -41,6 +43,8 @@ pub struct Computed {
     /// run's operations each is. Kept here because a feature's badge is
     /// asked for without the document, where they could be looked up.
     pub operations: Vec<String>,
+    /// The setup it carries on from, which runs first.
+    after: Option<String>,
 }
 
 impl Computed {
@@ -75,6 +79,7 @@ impl Computed {
             state: State::Ready(Box::new(run)),
             last: None,
             operations,
+            after: None,
         }
     }
 }
@@ -91,14 +96,23 @@ impl Runs {
 
     /// Run `setup` from `request`, which runs `operations` (their feature
     /// ids, in order), unless it has a run, or one coming, from the same
-    /// request; `again` runs a stopped or failed one again too.
-    pub fn want(&mut self, setup: &str, request: String, operations: Vec<String>, again: bool) {
+    /// request; `again` runs a stopped or failed one again too. `after` is
+    /// the setup it carries on from, which it waits for.
+    pub fn want(
+        &mut self,
+        setup: &str,
+        request: String,
+        operations: Vec<String>,
+        again: bool,
+        after: Option<String>,
+    ) {
         let key = digest(&request);
         if let Some(known) = self.setups.get_mut(setup)
             && known.key == key
             && (!again || !matches!(known.state, State::Stopped | State::Failed(_)))
         {
             known.operations = operations;
+            known.after = after;
             return;
         }
         self.stop(setup);
@@ -115,6 +129,7 @@ impl Runs {
                 state: State::Queued,
                 last,
                 operations,
+                after,
             },
         );
         self.pump();
@@ -133,6 +148,7 @@ impl Runs {
                 state: State::Failed(why),
                 last,
                 operations: Vec::new(),
+                after: None,
             },
         );
         self.pump();
@@ -168,11 +184,7 @@ impl Runs {
         {
             return;
         }
-        let Some(c) = self
-            .setups
-            .values_mut()
-            .find(|c| matches!(c.state, State::Queued))
-        else {
+        let Some(c) = self.next().and_then(|id| self.setups.get_mut(&id)) else {
             return;
         };
         let request = c.request.take().unwrap_or_default();
@@ -184,6 +196,26 @@ impl Runs {
         if matches!(c.state, State::Failed(_)) {
             self.pump();
         }
+    }
+
+    /// The setup to run next: the first waiting whose earlier setup is not
+    /// waiting or running itself. One always is, as each comes after the one
+    /// it waits for.
+    fn next(&self) -> Option<String> {
+        let busy = |id: &Option<String>| {
+            id.as_ref()
+                .and_then(|a| self.setups.get(a))
+                .is_some_and(|a| matches!(a.state, State::Queued | State::Running(_)))
+        };
+        let waiting = || {
+            self.setups
+                .iter()
+                .filter(|(_, c)| matches!(c.state, State::Queued))
+        };
+        waiting()
+            .find(|(_, c)| !busy(&c.after))
+            .or_else(|| waiting().next())
+            .map(|(id, _)| id.clone())
     }
 
     /// Job `job` ended with `result`; the setup it ran, if it was one.
@@ -235,6 +267,7 @@ mod tests {
                 state: State::Running(7),
                 last: None,
                 operations: Vec::new(),
+                after: None,
             },
         );
         assert_eq!(runs.get("s").unwrap().ran_from(), None, "not back yet");
@@ -243,5 +276,27 @@ mod tests {
         let c = runs.get("s").unwrap();
         assert_eq!(c.ran_from(), Some("asked"));
         assert_eq!(digest(c.ran_from().unwrap()), c.key);
+    }
+
+    /// A setup that carries on from another waits for it, whichever comes
+    /// first by id.
+    #[test]
+    fn a_setup_waits_for_the_one_it_carries_on_from() {
+        let waiting = |after: Option<&str>| Computed {
+            key: 0,
+            request: Some("asked".into()),
+            ran: None,
+            state: State::Queued,
+            last: None,
+            operations: Vec::new(),
+            after: after.map(String::from),
+        };
+        let mut runs = Runs::default();
+        runs.setups
+            .insert("a-side-two".into(), waiting(Some("b-side-one")));
+        runs.setups.insert("b-side-one".into(), waiting(None));
+        assert_eq!(runs.next().as_deref(), Some("b-side-one"));
+        runs.setups.get_mut("b-side-one").unwrap().state = State::Stopped;
+        assert_eq!(runs.next().as_deref(), Some("a-side-two"));
     }
 }

@@ -245,8 +245,54 @@ fn set_enabled(id: &str, on: bool) -> Result<(), String> {
     .map(|_| ())
 }
 
+/// The setup `setup` (feature `id`) carries on from, when its stock is what an
+/// earlier one leaves: the one it names, or the one just before it, which
+/// must come before it in the document.
+fn source_of(id: &str, setup: &SetupData) -> Option<Result<(Node, SetupData), String>> {
+    if setup.stock != StockKind::Earlier {
+        return None;
+    }
+    let all = setups();
+    let earlier = &all[..all
+        .iter()
+        .position(|(n, _)| n.id == id)
+        .unwrap_or(all.len())];
+    let source = match &setup.stock_from {
+        Some(from) => earlier
+            .iter()
+            .find(|(n, _)| &n.id == from)
+            .cloned()
+            .ok_or_else(|| {
+                "The setup its stock carries on from is gone, or no longer before it.".into()
+            }),
+        None => earlier
+            .last()
+            .cloned()
+            .ok_or_else(|| "There is no setup before it for its stock to carry on from.".into()),
+    };
+    // One turned off leaves nothing: it never runs.
+    Some(source.and_then(|(n, d)| {
+        if d.enabled {
+            Ok((n, d))
+        } else {
+            Err(format!(
+                "The setup its stock carries on from, {}, is turned off: turn it on, or \
+                 take the stock from another.",
+                n.name
+            ))
+        }
+    }))
+}
+
 /// The request that runs setup `id`, or why it cannot run.
 fn request_for(node: &Node, setup: &SetupData) -> Result<String, String> {
+    let request = helper_request(node, setup)?;
+    serde_json::to_string(&request).map_err(|e| e.to_string())
+}
+
+/// What [`request_for`] asks, as it is: a setup that carries on from an
+/// earlier one asks with that one's own request beside it.
+fn helper_request(node: &Node, setup: &SetupData) -> Result<HelperRequest, String> {
     if let Some(problem) = setup.problem() {
         return Err(problem);
     }
@@ -307,15 +353,24 @@ fn request_for(node: &Node, setup: &SetupData) -> Result<String, String> {
             },
         );
     }
-    let request = HelperRequest {
+    let from = match source_of(&node.id, setup) {
+        None => None,
+        Some(source) => {
+            let (n, s) = source?;
+            let earlier = helper_request(&n, &s)
+                .map_err(|e| format!("The setup it carries on from, {}: {e}", n.name))?;
+            Some(Box::new(earlier))
+        }
+    };
+    Ok(HelperRequest {
         version: VERSION,
         job: camcraft_session::job_text(&job).map_err(|e| e.to_string())?,
         shapes,
         max_points: DRAWN_POINTS,
         post: setup.post_profile.clone(),
         read: None,
-    };
-    serde_json::to_string(&request).map_err(|e| e.to_string())
+        from,
+    })
 }
 
 fn status(state: FeatureState, note: &str) -> FeatureStatus {
@@ -752,6 +807,14 @@ impl Cam {
     /// Run setup `id` unless what it is run from is unchanged; `again` runs a
     /// stopped or failed one again too.
     fn refresh(&mut self, id: &str, again: bool) {
+        self.refresh_from(id, again, true);
+    }
+
+    /// [`Cam::refresh`], and the setups that carry on from it after it;
+    /// `earlier` runs first the setups it carries on from, unless they have
+    /// run as they are, so the helper takes what each left from its cache
+    /// rather than run it again.
+    fn refresh_from(&mut self, id: &str, again: bool, earlier: bool) {
         let Some((node, setup)) = setup_node(id) else {
             self.runs.forget(id);
             return;
@@ -759,18 +822,51 @@ impl Cam {
         // Turned off, it has no run, and what it had is gone with it.
         if !setup.enabled {
             self.runs.forget(id);
-            host::redraw();
-            return;
-        }
-        match request_for(&node, &setup) {
-            Ok(request) => {
-                let operations = operations_of(id).into_iter().map(|(n, _)| n.id).collect();
-                self.runs.want(id, request, operations, again);
+        } else {
+            if earlier {
+                self.queue_earlier(id, &setup);
             }
-            Err(why) => self.runs.refuse(id, why),
+            self.queue(&node, &setup, again);
+        }
+        // A setup whose stock is what this one leaves runs again with it,
+        // or says it cannot. Each comes after the one it carries on from, so
+        // this ends.
+        for (later, data) in setups() {
+            if source_of(&later.id, &data)
+                .and_then(Result::ok)
+                .is_some_and(|(n, _)| n.id == id)
+            {
+                self.refresh_from(&later.id, again, false);
+            }
         }
         // The tree's badges follow the run.
         host::redraw();
+    }
+
+    /// Run `setup` (feature `node`) unless it has run, or is to, as it is.
+    fn queue(&mut self, node: &Node, setup: &SetupData, again: bool) {
+        match request_for(node, setup) {
+            Ok(request) => {
+                let operations = operations_of(&node.id)
+                    .into_iter()
+                    .map(|(n, _)| n.id)
+                    .collect();
+                let after = source_of(&node.id, setup)
+                    .and_then(Result::ok)
+                    .map(|(n, _)| n.id);
+                self.runs.want(&node.id, request, operations, again, after);
+            }
+            Err(why) => self.runs.refuse(&node.id, why),
+        }
+    }
+
+    /// Run the setups `setup` (feature `id`) carries on from, the earliest
+    /// first, unless each has run, or is to, as it is.
+    fn queue_earlier(&mut self, id: &str, setup: &SetupData) {
+        if let Some(Ok((node, data))) = source_of(id, setup) {
+            self.queue_earlier(&node.id, &data);
+            self.queue(&node, &data, false);
+        }
     }
 
     /// How a setup's or an operation's work stands, for its badge in the
@@ -1004,6 +1100,9 @@ impl Cam {
                 })
                 .collect(),
             run,
+            carried_from: source_of(&setup, &data)
+                .and_then(Result::ok)
+                .map(|(n, _)| n.name),
         }
         .html();
         Ok((node.name, html))
@@ -1114,9 +1213,11 @@ impl Bench for Cam {
                         ),
                         param(
                             "stock",
-                            ParamKind::String,
+                            ParamKind::Any,
                             false,
-                            "box (round the bodies, the default), fixed-box or cylinder",
+                            "box (round the bodies, the default), fixed-box or cylinder; or \
+                             {from = \"previous\"}, what the setup before it leaves, or \
+                             {from = <a setup's name>}, what that earlier one leaves",
                         ),
                         param(
                             "size",
@@ -1219,6 +1320,12 @@ impl Bench for Cam {
                          rotary axes stands the part up with G0 A.. B.. first; without, the part \
                          is fixtured tilted by hand. Pick a face or an edge for the tool axis in \
                          the setup's panel."
+                            .into(),
+                        "stock = {from = \"previous\"} starts from what the setup before it \
+                         leaves after its last operation, turned as this one sees the part \
+                         (as Fusion's Continue from previous setup); {from = \"Top\"} from \
+                         what the earlier setup named Top leaves. It runs after that one, and \
+                         again when that one changes."
                             .into(),
                         "A setup runs when it has operations; io.github.gilbertorconde.cam.status \
                          says where it stands."
@@ -1747,14 +1854,36 @@ impl Bench for Cam {
                     None => self.chosen_bodies(),
                 };
                 // Read before the setup is made, so a wrong one makes none.
-                let stock = match text("stock").as_deref() {
+                let mut stock_from = None;
+                let stock = match args.get("stock") {
                     None => None,
-                    Some("box") => Some(StockKind::Around),
-                    Some("fixed-box") => Some(StockKind::Fixed),
-                    Some("cylinder") => Some(StockKind::Cylinder),
-                    Some(other) => {
-                        return Err(format!("no stock '{other}': box, fixed-box or cylinder"));
+                    Some(Value::Object(o)) => {
+                        let from = o
+                            .get("from")
+                            .and_then(Value::as_str)
+                            .ok_or("stock is a kind, or {from = \"previous\"} or a setup's name")?;
+                        if from != "previous" {
+                            let (n, _) = setups()
+                                .into_iter()
+                                .find(|(n, _)| n.name == from)
+                                .ok_or_else(|| format!("no setup '{from}' to carry on from"))?;
+                            stock_from = Some(n.id);
+                        } else if setups().is_empty() {
+                            return Err("no setup before it to carry on from".into());
+                        }
+                        Some(StockKind::Earlier)
                     }
+                    Some(_) => match text("stock").as_deref() {
+                        Some("box") => Some(StockKind::Around),
+                        Some("fixed-box") => Some(StockKind::Fixed),
+                        Some("cylinder") => Some(StockKind::Cylinder),
+                        other => {
+                            return Err(format!(
+                                "no stock '{}': box, fixed-box, cylinder or {{from = ...}}",
+                                other.unwrap_or_default()
+                            ));
+                        }
+                    },
                 };
                 let size: Option<[f64; 3]> = match args.get("size") {
                     Some(v) => Some(
@@ -1864,6 +1993,7 @@ impl Bench for Cam {
                     }
                     if let Some(kind) = stock {
                         data.stock = kind;
+                        data.stock_from = stock_from;
                     }
                     if let Some([x, y, z]) = size {
                         (data.size_x, data.size_y, data.size_z) = (x, y, z);
