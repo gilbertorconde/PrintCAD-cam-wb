@@ -12,6 +12,7 @@ comment   = ["(", ")"]
 
 arc_style   = "ij"
 tool_change = "m6"
+tool_change_seconds = 30
 # Masso documents G73 (backing off a fixed 1 mm), G81, G82, G83 and G80,
 # returning with G98.
 drill_cycles = true
@@ -56,3 +57,12 @@ increment = 5
 suppress_motion = true
 suppress_axes   = true
 suppress_feed   = true
+
+# Machining time. Typical of a router on a Masso, not of any one: the
+# machine's are the maximum speeds on Masso's axis set-up screen. A change by
+# hand with a tool setter is about half a minute; an automatic changer is
+# quicker.
+[rapid]  # mm/min, whatever the program's units
+x = 10000
+y = 10000
+z = 5000

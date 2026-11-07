@@ -23,6 +23,7 @@ comment_upper = true
 
 arc_style     = "ij"
 tool_change   = "m6"
+tool_change_seconds = 60
 length_offset = true
 # Mach takes G81, G82, G83, G73, G84 and G74. Off until they have been dry-run
 # on the machine; off, a drilling operation is posted as plain moves instead.
@@ -59,3 +60,11 @@ enabled = false
 suppress_motion = true
 suppress_axes   = true
 suppress_feed   = true
+
+# Machining time. Typical of a hobby router, not of any one: Mach's are its
+# Motor Tuning velocities. A change by hand, the tool touched off again, is
+# about a minute.
+[rapid]  # mm/min
+x = 5000
+y = 5000
+z = 2500

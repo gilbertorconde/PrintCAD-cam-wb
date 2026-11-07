@@ -47,6 +47,17 @@
 //! profile's own blocks (a `safe_retract` of `G53 G0 Z0`) must be within
 //! them too, or the profile is not valid.
 //!
+//! # Machining time
+//!
+//! `[rapid]` gives how fast each of X, Y and Z goes at rapid, in millimetres
+//! a minute whatever the program's units, and `tool_change_seconds` how long
+//! a tool change takes, chip to chip: what a program's machining time is
+//! worked out from ([`Rapid`]). An axis left out goes at [`ASSUMED_RAPID`];
+//! a profile without `tool_change_seconds` leaves the changes out of the
+//! time. Neither the rapids nor the feeds speed up or slow down: the time
+//! is what the moves take at full speed, so a real machine takes longer,
+//! the more so the shorter its moves.
+//!
 //! # Work offsets
 //!
 //! A setup's work offset is `G54` to `G59` (54 to 59), and from 60 the
@@ -253,6 +264,64 @@ pub struct Placement {
     pub tool_length: Option<f64>,
 }
 
+/// The rapid rate an axis is timed at when a profile does not give one, in
+/// mm/min: what camcraft's app times every rapid at.
+pub const ASSUMED_RAPID: f64 = 5000.0;
+
+fn assumed_rapid() -> f64 {
+    ASSUMED_RAPID
+}
+
+/// How fast each axis goes at rapid, in millimetres a minute whatever the
+/// program's units: see the module's "Machining time". An axis left out goes
+/// at [`ASSUMED_RAPID`].
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Rapid {
+    /// X's rapid rate, mm/min.
+    #[serde(default = "assumed_rapid")]
+    pub x: f64,
+    /// Y's.
+    #[serde(default = "assumed_rapid")]
+    pub y: f64,
+    /// Z's.
+    #[serde(default = "assumed_rapid")]
+    pub z: f64,
+}
+
+impl Default for Rapid {
+    fn default() -> Self {
+        Self {
+            x: ASSUMED_RAPID,
+            y: ASSUMED_RAPID,
+            z: ASSUMED_RAPID,
+        }
+    }
+}
+
+impl Rapid {
+    /// How long a rapid `d` long along the program's axes takes, in seconds:
+    /// each axis at its own rate, the move done when the slowest is. A
+    /// controller that moves them together slows the others to match, and
+    /// one that moves each at its own pace waits for the last, so both take
+    /// this long.
+    pub fn seconds(&self, d: DVec3) -> f64 {
+        let along = |v: f64, rate: f64| v.abs() / rate;
+        along(d.x, self.x)
+            .max(along(d.y, self.y))
+            .max(along(d.z, self.z))
+            * 60.0
+    }
+
+    /// How long a move `length` long at `feed` mm/min takes, in seconds,
+    /// `d` from its start to its end: at the feed, but never quicker than
+    /// its axes can go, as a controller holds a feed past an axis's top
+    /// speed to it.
+    pub fn feed_seconds(&self, length: f64, d: DVec3, feed: f64) -> f64 {
+        (length / feed * 60.0).max(self.seconds(d))
+    }
+}
+
 /// How a program keeps to a machine's travel.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TravelCheck {
@@ -330,6 +399,14 @@ pub struct Profile {
     /// turn outside them is warned about. Absent, any speed goes.
     #[serde(default)]
     pub spindle: Option<[u32; 2]>,
+    /// How fast each axis goes at rapid, in mm/min, for timing a program:
+    /// see the module's "Machining time". Absent, [`ASSUMED_RAPID`] each.
+    #[serde(default)]
+    pub rapid: Option<Rapid>,
+    /// How long a tool change takes, in seconds, chip to chip, for timing a
+    /// program. Absent, not known, and left out of the time.
+    #[serde(default)]
+    pub tool_change_seconds: Option<f64>,
     /// How far the machine goes, in the program's units: see the module's
     /// "Travel". Absent, it is not checked.
     #[serde(default)]
@@ -527,6 +604,24 @@ impl Profile {
                 reason: format!("its slowest, {low}, is faster than its fastest, {high}"),
             });
         }
+        if let Some(r) = &self.rapid {
+            for (axis, rate) in [('x', r.x), ('y', r.y), ('z', r.z)] {
+                if !(rate.is_finite() && rate > 0.0) {
+                    return Err(ProfileError::BadValue {
+                        field: "rapid",
+                        reason: format!("{axis} = {rate}: a rate must be more than 0 mm/min"),
+                    });
+                }
+            }
+        }
+        if let Some(s) = self.tool_change_seconds
+            && !(s.is_finite() && s >= 0.0)
+        {
+            return Err(ProfileError::BadValue {
+                field: "tool_change_seconds",
+                reason: format!("{s} is not a time: give the seconds a change takes"),
+            });
+        }
         if let Some(travel) = &self.travel {
             for (axis, _, [low, high]) in travel.axes() {
                 if !(low.is_finite() && high.is_finite()) || low >= high {
@@ -635,6 +730,12 @@ impl Profile {
             None if self.drill_cycles => TapStyle::Cycle,
             None => TapStyle::Cannot,
         }
+    }
+
+    /// How fast each axis goes at rapid: as the profile says, else
+    /// [`ASSUMED_RAPID`].
+    pub fn rapids(&self) -> Rapid {
+        self.rapid.unwrap_or_default()
     }
 
     /// The built-in machines that tap, by name, each once whatever its
@@ -1140,6 +1241,63 @@ mod tests {
         assert_eq!(p.pitch(25.4 / 13.0, true), "0.0769231");
         let masso = Profile::builtin("masso").unwrap().unwrap();
         assert_eq!(masso.pitch(1.0, false), "1.");
+    }
+
+    /// A rapid takes as long as its slowest axis; a feed as long as it says,
+    /// or as its slowest axis takes at rapid, whichever is longer.
+    #[test]
+    fn a_move_takes_as_long_as_its_slowest_axis() {
+        let r = Rapid {
+            x: 6000.0,
+            y: 6000.0,
+            z: 1200.0,
+        };
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-12;
+        // 100 mm along X at 6000 mm/min: a second.
+        assert!(near(r.seconds(DVec3::new(100.0, 0.0, 0.0)), 1.0));
+        // 100 across and 30 down: Z's 30 mm at 1200 mm/min is a second and
+        // a half, X's a second.
+        assert!(near(r.seconds(DVec3::new(-100.0, 50.0, -30.0)), 1.5));
+        // 10 mm fed at 600 mm/min: a second.
+        assert!(near(r.feed_seconds(10.0, DVec3::X * 10.0, 600.0), 1.0));
+        // 30 mm straight down fed at 3000 mm/min: Z goes no faster than
+        // 1200.
+        assert!(near(r.feed_seconds(30.0, DVec3::NEG_Z * 30.0, 3000.0), 1.5));
+        assert_eq!(Rapid::default().x, ASSUMED_RAPID);
+    }
+
+    /// Every built-in machine says how fast it rapids and how long it takes
+    /// to change a tool, so its programs are timed.
+    #[test]
+    fn every_builtin_is_timed() {
+        for name in Profile::builtin_names() {
+            let p = Profile::builtin(name).unwrap().unwrap();
+            assert!(p.rapid.is_some(), "{name}");
+            assert!(p.tool_change_seconds.is_some(), "{name}");
+        }
+    }
+
+    /// An axis left out of `[rapid]` goes at the assumed rate; a rate of
+    /// nothing, or a time that is not one, does not load.
+    #[test]
+    fn rapids_and_tool_change_times_are_checked() {
+        let grbl = include_str!("../profiles/grbl.toml");
+        let p = Profile::from_toml(&grbl.replace("z = 2500", "")).unwrap();
+        assert_eq!(p.rapids().z, ASSUMED_RAPID);
+        assert_eq!(p.rapids().x, 5000.0);
+        let none = grbl
+            .replace("[rapid]", "")
+            .replace("x = 5000\n", "")
+            .replace("y = 5000\n", "")
+            .replace("z = 2500\n", "")
+            .replace("tool_change_seconds = 60\n", "");
+        let p = Profile::from_toml(&none).unwrap();
+        assert_eq!((p.rapid, p.tool_change_seconds), (None, None));
+        assert_eq!(p.rapids(), Rapid::default());
+        assert!(Profile::from_toml(&grbl.replace("z = 2500", "z = 0")).is_err());
+        assert!(Profile::from_toml(&grbl.replace("z = 2500", "w = 2500")).is_err());
+        let late = grbl.replace("tool_change_seconds = 60", "tool_change_seconds = -1");
+        assert!(Profile::from_toml(&late).is_err());
     }
 
     /// A speed outside the machine's range is a problem; inside it, or with no

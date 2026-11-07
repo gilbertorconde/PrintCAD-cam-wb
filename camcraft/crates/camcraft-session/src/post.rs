@@ -287,6 +287,9 @@ pub struct SetupProgram {
     /// it has run: with `report.op_lines`, which operation and move each
     /// line is of.
     pub made: Vec<(usize, usize)>,
+    /// How many times it changes the tool, the first included: for its
+    /// machining time.
+    pub tool_changes: usize,
 }
 
 /// Every operation of `setup` that has a program, as run (`result`),
@@ -311,11 +314,20 @@ pub fn setup_program(
         (k, e.error)
     })?;
     let (text, report) = render_program(&ops, profile, title);
+    let tool_changes = ops
+        .iter()
+        .filter(|op| matches!(op, camcraft_post::op::Op::ToolChange { .. }))
+        .count();
     let made = made
         .into_iter()
         .map(|(section, n)| (specs.get(section).map_or(0, |(k, _)| *k), n))
         .collect();
-    Ok(SetupProgram { text, report, made })
+    Ok(SetupProgram {
+        text,
+        report,
+        made,
+        tool_changes,
+    })
 }
 
 /// One program, rendered.
