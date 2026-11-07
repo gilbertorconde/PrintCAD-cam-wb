@@ -130,6 +130,21 @@ panels, the drawing and the helper that runs camcraft.
   reach, not the whole area again. Its adjustment leaves rest thinner than
   it alone, so it does not go round a sliver for nothing. Pocket clearing
   always clears only what is left.
+- **Corner relief.** A 2D profile, pocket or slot can cut out each inside
+  corner its tool leaves round, the tool's radius across, so a square part,
+  a tenon or another sheet's tab, fits it. A dogbone goes into the corner
+  halfway between its walls, as far as takes the tool's side to the
+  corner's point: a round notch reaching it, about four tenths of the
+  tool's radius at a square corner. A T-bone goes on along one wall into
+  the other, the tool's radius at a square corner: the wall nearer the
+  setup's X, or its Y, or the longer or the shorter wall, so the notch is
+  hidden in the one that shows least. Only corners sharper than an angle,
+  when one is given; corners the tool goes round, a curve's chords, and
+  any already square within the tolerance are left. Every corner is
+  relieved at every level and every pass round it, ramped or not, climbing
+  or not, with leads and tabs, and in every copy of a pattern; the
+  simulation cuts the notches, and the checks take what they cut past the
+  part as meant, not as a gouge.
 - **Picking in the view,** as camcraft's: a pick row in the panel arms it,
   and while it is armed, hovering shows what a click takes. An operation
   takes faces, and edges by the loop they go round at their height (an edge

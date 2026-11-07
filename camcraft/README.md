@@ -406,6 +406,22 @@ chain. `StrategyDetail::Holes` reports the holes. Golden programs:
 `heidenhain-holes.nc` (each helix a Klartext `CP IPA.. IZ.. DR±`), read
 back in every profile, alone and in a setup's one program.
 
+And corner relief, dogbones and T-bones, in `camcraft-core`. `Passes` has
+`relief` (`job::Relief`: a `style`, `ReliefStyle`, `dogbone` or `t-bone-x`,
+`t-bone-y`, `t-bone-long`, `t-bone-short`, and `sharper_than`, degrees, to
+leave blunter corners), which `Uses::relief` gives a 2D profile, a pocket
+and a slot, and `Operation::relief` reads. The new `path::relief` finds the
+corners from the areas' rings, or a slot's curves (`corners`, `ring_edges`,
+`trace_edges`): the sharp corners of the tool centre's path whose outside
+is the material kept, each reaching as far as takes the tool's side to the
+walls' point; and `relieve` goes out to each and back, level, every time a
+cut or a ramp reaches one. `run_operation` relieves the strategy's path
+before the pattern repeats it, and `OperationResult::reliefs` says where
+each relief went, in every copy, for `cut_past` to take what the notches
+cut past the part as meant, not as a gouge. Tests in `path/relief/tests.rs`
+and `a_square_hole_has_its_corners_relieved`; in `camcraft-post`, the
+golden program `grbl-dogbone.nc`.
+
 And one test: ogeom is 0.11.1 here, which printCAD's shapes need, and it
 meshes `round_edge_loose_fit.step`'s seam that 0.11.0 drew off the torus, so
 `a_loose_fit_is_refused_for_ogeoms_seam` became

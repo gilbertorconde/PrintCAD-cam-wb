@@ -394,6 +394,15 @@ impl Operation {
             positive(&field("passes.tabs.height"), t.height)?;
             positive(&field("passes.tabs.spacing"), t.spacing)?;
         }
+        if let Some(a) = self.relief().and_then(|r| r.sharper_than)
+            && !(a > 0.0 && a <= 180.0)
+        {
+            return Err(bad(
+                field("passes.relief.sharper_than"),
+                a,
+                "above 0 and at most 180 degrees",
+            ));
+        }
         if let Some(f) = self.passes.finishing.filter(|_| uses.finishing) {
             if f.passes == Some(0) {
                 return Err(bad(field("passes.finishing.passes"), 0.0, "at least one"));

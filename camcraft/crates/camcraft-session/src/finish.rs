@@ -108,6 +108,7 @@ pub fn single_operation(spec: &FinishSpec, model: ModelDef) -> Job {
             rpm: None,
             tabs: None,
             finishing: None,
+            relief: None,
         },
         linking: Linking {
             retract_feed: spec.feed,

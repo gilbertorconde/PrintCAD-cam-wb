@@ -15,15 +15,16 @@ use crate::cutter::dropcutter::DropCutter;
 use crate::cutter::tool::{Cutter, Flat, ToolProfile};
 use crate::job::{
     ChamferSide, ContourOrder, CutDirection, Depths, Entry, FaceDirection, HeightContext, Job,
-    Links, Operation, PassOrder, Picks, RadialDirection, Retraction, SlotPattern, SpindleDirection,
-    StrategySpec, ToolSpec,
+    Links, Operation, PassOrder, Picks, ProfileSide, RadialDirection, Relief, Retraction,
+    SlotPattern, SpindleDirection, StrategySpec, ToolSpec,
 };
 use crate::path::linker::{
     ClearanceField, EntryKind, LinkParams, LinkReport, Material, Ramp, StayDown, Surface,
     highest_under, link,
 };
 use crate::path::ordering::order_passes;
-use crate::path::pattern::{each, overhang, repeat};
+use crate::path::pattern::{copies, each, overhang, repeat};
+use crate::path::relief::{Corner, Kept, corners, relieve, ring_edges, trace_edges};
 use crate::path::simadapt::sim_moves_of;
 use crate::path::tabs::{TabParams, add_tabs};
 use crate::path::toolpath::{Move, Toolpath};
@@ -318,6 +319,18 @@ pub(super) fn run_operation(
         }
     };
 
+    // Corner relief goes into the strategy's own path, so every copy of a
+    // pattern has it, and the tabs and the linker see it as cutting.
+    let (raw, corners) = match op.relief() {
+        Some(relief) => {
+            let corners = relief_corners(work, &relief, found, traces);
+            let (path, _) =
+                relieve(&raw, &corners).map_err(|e| in_op(op)(StrategyError::from(e)))?;
+            (path, corners)
+        }
+        None => (raw, Vec::new()),
+    };
+
     // A pattern repeats the strategy's path before anything else is done to
     // it, so each copy is ordered, tabbed, linked into the material and
     // simulated as the original is.
@@ -329,6 +342,14 @@ pub(super) fn run_operation(
     } else {
         (raw, passes)
     };
+    // Where each relief is, in every copy, for the verifier.
+    let reliefs: Vec<[DVec2; 2]> = copies(&op.transform)
+        .iter()
+        .flat_map(|c| {
+            let at = |p: DVec2| c.point(p.extend(0.0)).truncate();
+            corners.iter().map(move |k| [at(k.at), at(k.reach)])
+        })
+        .collect();
 
     // Ordering is a Toolpath -> Toolpath transform, applied before linking so the
     // retracts it needs are planned around the order actually used. Holes are
@@ -443,6 +464,7 @@ pub(super) fn run_operation(
         sim,
         passes,
         travel_saved: order.saved(),
+        reliefs,
         detail,
         links,
         clearance_z,
@@ -513,6 +535,44 @@ fn outside_said(work: &Work<'_>, raw: &Toolpath, warnings: &mut Vec<String>) {
     }
 }
 
+/// The corners `work`'s operation relieves as `relief` asks: those of its
+/// `areas`' rings, or of the curves a slot follows, `traces`, whose walls
+/// are either side.
+fn relief_corners(
+    work: &Work<'_>,
+    relief: &Relief,
+    areas: &[Area],
+    traces: &[Trace],
+) -> Vec<Corner> {
+    let op = work.op;
+    let radius = work.tool.cutter_radius() + op.stock_to_leave().radial;
+    let tolerance = work.job.tolerance;
+    // An area's rings go round it as its region winds them, the region on
+    // their left: outside a profile what is kept is the region's side, and
+    // inside one or a pocket, the other.
+    let kept = match op.strategy {
+        StrategySpec::Profile {
+            side: ProfileSide::Outside,
+            ..
+        } => Kept::Left,
+        StrategySpec::Profile {
+            side: ProfileSide::Inside,
+            ..
+        }
+        | StrategySpec::Pocket { .. } => Kept::Right,
+        _ => Kept::Both,
+    };
+    let rings = areas
+        .iter()
+        .flat_map(|a| &a.rings)
+        .flat_map(|r| corners(&ring_edges(r), true, kept, radius, relief, tolerance));
+    let curves = traces.iter().flat_map(|t| {
+        let (edges, closed) = trace_edges(t, tolerance);
+        corners(&edges, closed, Kept::Both, radius, relief, tolerance)
+    });
+    rings.chain(curves).collect()
+}
+
 /// What stands for an operation left out of a run: no paths, nothing cut. `spec`
 /// is its tool, if it names one the job has.
 ///
@@ -571,6 +631,7 @@ pub(super) fn not_made(op: &Operation, spec: Option<&ToolSpec>, made: Made) -> O
         sim: SimReport::default(),
         passes: 0,
         travel_saved: 0.0,
+        reliefs: Vec::new(),
         detail,
         links: LinkReport::default(),
         clearance_z: 0.0,

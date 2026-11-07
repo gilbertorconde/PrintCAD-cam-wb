@@ -1329,3 +1329,50 @@ selection = {{ edges = [
     let all = helixes(true);
     assert!(all > one, "{one} then {all}");
 }
+
+/// The hinge jig roughed then profiled, as a request.
+fn rough_then_profile(rough: &str) -> Request {
+    let job = format!(
+        "{JOB}{rough}\n[[setup.operation]]\nname = \"outline\"\nstrategy = \"profile\"\n\
+         tool = \"flat-6\"\npasses = {{ stepdown = 6.0 }}\n"
+    );
+    Request {
+        version: VERSION,
+        job,
+        shapes: BTreeMap::from([(
+            "part".to_string(),
+            Shape {
+                text: native("hinge_jig.step"),
+                placement: IDENTITY,
+            },
+        )]),
+        max_points: 2000,
+        ..Request::default()
+    }
+}
+
+/// A profile asked for corner relief posts longer: out into each inside
+/// corner and back. The verifier takes the notches as meant, not gouges.
+#[test]
+fn a_profile_posts_its_dogbones() {
+    let cut = |relief: &str| {
+        let mut request = rough_then_profile("enabled = false\n");
+        request.job = request.job.replace(
+            "passes = { stepdown = 6.0 }",
+            &format!("passes = {{ stepdown = 6.0{relief} }}"),
+        );
+        let run = answer(&request).unwrap();
+        let op = &run.operations[1];
+        assert_eq!(op.made, "generated", "{:?}", op.warnings);
+        let gouges = run
+            .findings
+            .iter()
+            .filter(|f| f.level == Level::Fail)
+            .count();
+        (op.program.as_ref().unwrap().text.lines().count(), gouges)
+    };
+    let (plain, failed) = cut("");
+    let (relieved, failed_relieved) = cut(", relief = { style = \"dogbone\" }");
+    assert!(relieved > plain, "{relieved} lines against {plain}");
+    assert_eq!(failed_relieved, failed);
+}

@@ -16,7 +16,7 @@ use crate::data::{
     ToolAxis, Zero,
 };
 use crate::linking::{linking_event, linking_group};
-use crate::passes::{finishing_group, passes_event, strategy_rows, tabs_group};
+use crate::passes::{finishing_group, passes_event, relief_group, strategy_rows, tabs_group};
 use crate::pattern::{pattern_event, pattern_group};
 use crate::picking::Slot;
 use crate::runs::State;
@@ -1611,6 +1611,7 @@ pub fn operation_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
     passes.extend(strategy_rows(&data, spec, id));
     panel.push(group("Passes", passes));
     panel.extend(tabs_group(&data, id));
+    panel.extend(relief_group(&data, id));
     panel.extend(finishing_group(&data, spec, id));
 
     // What it machines.

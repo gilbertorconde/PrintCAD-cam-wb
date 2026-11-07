@@ -133,6 +133,10 @@ pub struct OperationResult {
     pub passes: u64,
     /// Inter-pass travel removed by reordering, as a fraction.
     pub travel_saved: f64,
+    /// Where its corner reliefs take the tool's centre, seen from above: from
+    /// each corner to the relief's end, in every copy of its pattern. What
+    /// they cut past the part is no gouge.
+    pub reliefs: Vec<[DVec2; 2]>,
     /// What the strategy reported.
     pub detail: StrategyDetail,
     /// What linking did.

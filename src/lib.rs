@@ -1159,7 +1159,10 @@ impl Bench for Cam {
                              inner_radius, angle_from, angle_to, min_ring_length, \
                              pass_extension, tab_width, tab_height, tab_spacing, \
                              finishing_passes: numbers; centre, tabs, finishing, \
-                             finishing_repeat: booleans; tab_shape: rectangular|triangular; \
+                             finishing_repeat, relief: booleans; tab_shape: \
+                             rectangular|triangular; relief_style: dogbone|t-bone-x|\
+                             t-bone-y|t-bone-long|t-bone-short; relief_angle: \
+                             {value, given}, degrees, only corners sharper; \
                              hand: right|left; depth: engrave's and slot's, mm; chamfer_width, \
                              tip_offset: a chamfer's, mm; bore_pitch: a bore's helix, mm a \
                              turn; boss_width: circular's, mm; thread_pitch, thread_passes: \
@@ -1287,6 +1290,13 @@ impl Bench for Cam {
                          Adaptive and pocket clearing are worked out again for each copy, \
                          against the material where it is. Every copy is simulated and \
                          checked, and one outside the stock is a warning."
+                            .into(),
+                        "Corner relief (passes.relief) on a 2D profile, pocket or slot cuts out \
+                         each inside corner the tool leaves round, to its sharp point, so a \
+                         square part fits: a dogbone goes into the corner, halfway between \
+                         its walls; a T-bone on along one wall into the other, the one \
+                         nearer X or Y, or the longer or shorter. At every level, and in \
+                         every copy of a pattern; it is no gouge."
                             .into(),
                         "A library tool's first preset sets its feeds and speeds.".into(),
                         "Custom G-code (strategy custom-gcode) has no tool and no toolpath: its \

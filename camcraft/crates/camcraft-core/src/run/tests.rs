@@ -2403,3 +2403,126 @@ fn rest_machining_clears_only_what_the_big_tool_left() {
     let thin = cut_length(&adjusted.operations[1]);
     assert!(thin < 0.5 * some, "adjusted {thin} mm against {some}");
 }
+
+/// A square plate `h` thick, `half` across from its middle to each side, with
+/// a square hole through it `inner` across from the middle to each side.
+fn square_frame(half: f64, inner: f64, h: f64) -> camcraft_geom::mesh::TriMesh {
+    // Anticlockwise from the corner at +X +Y.
+    let ways = [(1.0, 1.0), (-1.0, 1.0), (-1.0, -1.0), (1.0, -1.0)];
+    let mut v = Vec::new();
+    // Hole bottom, hole top, outside bottom, outside top.
+    for ring in 0..4 {
+        let z = if ring % 2 == 0 { 0.0 } else { h };
+        let size = if ring < 2 { inner } else { half };
+        v.extend(ways.iter().map(|(x, y)| DVec3::new(x * size, y * size, z)));
+    }
+    let at = |ring: u32, i: u32| ring * 4 + i % 4;
+    let mut t = Vec::new();
+    for i in 0..4 {
+        let j = i + 1;
+        let (hb0, hb1, ht0, ht1) = (at(0, i), at(0, j), at(1, i), at(1, j));
+        let (ob0, ob1, ot0, ot1) = (at(2, i), at(2, j), at(3, i), at(3, j));
+        t.extend([
+            [ht0, ot0, ot1],
+            [ht0, ot1, ht1],
+            [hb0, ob1, ob0],
+            [hb0, hb1, ob1],
+            [hb0, ht1, hb1],
+            [hb0, ht0, ht1],
+            [ob0, ob1, ot1],
+            [ob0, ot1, ot0],
+        ]);
+    }
+    camcraft_geom::mesh::TriMesh::new(v, t).unwrap()
+}
+
+/// A part cut out of a sheet round a square hole, its corners relieved: in
+/// every style the tool's side reaches each of the hole's sharp corners at
+/// every level, where without it stays a radius off round them, and more is
+/// taken out. The outline's corners, which the tool goes round, are left.
+/// The notches cut past the part as asked, so are no gouge, and the run is
+/// clean; mirrored, every copy's are. Under an angle sharper than the
+/// corners, none are relieved.
+#[test]
+fn a_square_hole_has_its_corners_relieved() {
+    use crate::job::{Mirror, MirrorAxis, Pattern, ProfileSide, Relief, ReliefStyle};
+    use crate::path::toolpath::MoveRole;
+    let frame = Body::derived(square_frame(20.0, 8.0, 5.0));
+    let profile = StrategySpec::Profile {
+        side: ProfileSide::Outside,
+        conventional: false,
+    };
+    let (mut job, without) = in_a_sheet(profile, &frame);
+    let bodies: Bodies<'_> = [("dome", &frame)].into_iter().collect();
+    // How near the tool's centre comes to `p` at height `z`.
+    let nearest = |r: &SetupResult, p: DVec2, z: f64| {
+        r.operations[0]
+            .path
+            .moves()
+            .iter()
+            .filter(|m| m.role == MoveRole::Cut && (m.to.z - z).abs() < 1e-9)
+            .map(|m| m.to.truncate().distance(p))
+            .fold(f64::MAX, f64::min)
+    };
+    let levels: Vec<f64> = {
+        let mut z: Vec<f64> = without.operations[0]
+            .path
+            .moves()
+            .iter()
+            .filter(|m| m.role == MoveRole::Cut)
+            .map(|m| m.to.z)
+            .collect();
+        z.sort_by(f64::total_cmp);
+        z.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+        z
+    };
+    assert_eq!(levels.len(), 3, "{levels:?}");
+    let corners = [(8.0, 8.0), (-8.0, 8.0), (-8.0, -8.0), (8.0, -8.0)].map(|(x, y)| dvec2(x, y));
+    for c in corners {
+        let off = nearest(&without, c, 0.0);
+        assert!((off - 3.0 * 2f64.sqrt()).abs() < 0.01, "{c}: {off}");
+    }
+    for style in [
+        ReliefStyle::Dogbone,
+        ReliefStyle::TBoneX,
+        ReliefStyle::TBoneLong,
+    ] {
+        job.setups[0].operations[0].passes.relief = Some(Relief {
+            style,
+            sharper_than: None,
+        });
+        let with = run_setup(&job, 0, &bodies).unwrap();
+        let op = &with.operations[0];
+        assert!(with.is_clean(), "{style:?}: {:?}", with.warnings());
+        assert_eq!(with.verify.gouged, 0, "{style:?}");
+        assert_eq!(op.reliefs.len(), 4, "{style:?}");
+        for c in corners {
+            for &z in &levels {
+                let off = nearest(&with, c, z);
+                assert!((off - 3.0).abs() < 1e-6, "{style:?} {c} at {z}: {off}");
+            }
+        }
+        let (a, b) = (op.sim.removed_mm3, without.operations[0].sim.removed_mm3);
+        assert!(a > b + 1.0, "{style:?}: removed {a} against {b}");
+    }
+    let o = &mut job.setups[0].operations[0];
+    o.transform = Pattern {
+        mirror: Some(Mirror {
+            axis: MirrorAxis::Y,
+            through: [0.0, 0.0],
+        }),
+        ..Pattern::default()
+    };
+    let mirrored = run_setup(&job, 0, &bodies).unwrap();
+    assert_eq!(mirrored.operations[0].reliefs.len(), 8);
+    assert_eq!(mirrored.verify.gouged, 0);
+    let o = &mut job.setups[0].operations[0];
+    o.transform = Pattern::default();
+    o.passes.relief = Some(Relief {
+        style: ReliefStyle::Dogbone,
+        sharper_than: Some(80.0),
+    });
+    let blunt = run_setup(&job, 0, &bodies).unwrap();
+    assert!(blunt.operations[0].reliefs.is_empty());
+    assert_eq!(blunt.operations[0].path, without.operations[0].path);
+}

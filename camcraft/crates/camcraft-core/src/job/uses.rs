@@ -22,6 +22,7 @@ impl StrategySpec {
             depths: Depths::Optional,
             tabs: false,
             finishing: false,
+            relief: false,
             links: Links::Level,
             stay_down: true,
             reach: Reach::Tools(5),
@@ -127,6 +128,7 @@ impl StrategySpec {
                 boundary: false,
                 outline: true,
                 finishing: true,
+                relief: true,
                 entries: &[Entry::Helix, Entry::Ramp, Entry::Plunge],
                 ..cuts_loops
             },
@@ -141,6 +143,7 @@ impl StrategySpec {
                     Leave::Both
                 },
                 tabs: true,
+                relief: true,
                 leads: true,
                 entries: &[Entry::Helix, Entry::Plunge, Entry::Ramp],
                 ..cuts_loops
@@ -170,6 +173,7 @@ impl StrategySpec {
                 depths: Depths::None,
                 tabs: false,
                 finishing: false,
+                relief: false,
                 // Up out of each hole, and across to the next.
                 links: Links::Own,
                 stay_down: false,
@@ -255,6 +259,9 @@ impl StrategySpec {
                 tabs: false,
                 helix: HelixSize::Tool,
                 ramp: true,
+                // Its walls meet in a sharp corner inside each bend, and
+                // the tool leaves the outside one round.
+                relief: true,
                 entries: &[Entry::Ramp, Entry::Plunge],
                 top: Some(HeightRef::ModelTop),
                 bottom: None,
@@ -343,6 +350,9 @@ pub struct Uses {
     pub tabs: bool,
     /// Finishing passes along a pocket's walls, as Fusion's 2D pocket has.
     pub finishing: bool,
+    /// Inside corners relieved, dogbones or T-bones: a 2D cut's, along
+    /// walls it leaves standing.
+    pub relief: bool,
     /// How the links it leaves to the linker are made.
     pub links: Links,
     /// Links made without lifting.
