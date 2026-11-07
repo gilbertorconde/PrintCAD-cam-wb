@@ -1,6 +1,8 @@
 //! An operation's program beside its playback: the lines round the one the
 //! playhead stands on, numbered, that line marked, and a click on a line's
-//! number taking the playhead to its move.
+//! number taking the playhead to its move. A setup posted as one program is
+//! listed whole, whichever operation is under way: each of its lines knows
+//! which operation's move it is.
 //!
 //! A program can run to a hundred thousand lines, and the panel is built
 //! again every frame while it plays, so only a window of lines round the
@@ -73,9 +75,18 @@ pub fn window(lines: usize, at: usize, before: usize, after: usize) -> Range<usi
     start..start + size
 }
 
+/// The program operation `op` is listed in: its setup's, posted as one, or
+/// its own.
+fn program_of(run: &Run, op: usize) -> Option<&Program> {
+    run.program
+        .as_ref()
+        .or_else(|| run.operations.get(op)?.program.as_ref())
+}
+
 /// Where the playhead stands in operation `op`'s program: the line it is on,
 /// when it is in that operation; else the program's first line when it has
-/// not started yet, or its last when it is done, unmarked.
+/// not started yet, or its last when it is done, unmarked. In a setup's
+/// program, the line it is on, whichever operation it is in.
 fn standing(
     program: &Program,
     lines: usize,
@@ -83,6 +94,12 @@ fn standing(
     under_way: Option<(usize, usize)>,
 ) -> (usize, bool) {
     let last = lines.saturating_sub(1);
+    if program.is_setups() {
+        return match under_way.and_then(|(o, made)| program.line_at(o, made)) {
+            Some(line) => (line.min(last), true),
+            None => (last, false),
+        };
+    }
     match under_way {
         Some((o, made)) if o == op => match program.line_of(made) {
             Some(line) => (line.min(last), true),
@@ -107,7 +124,7 @@ pub fn widgets(
     let Some(o) = run.operations.get(op) else {
         return Vec::new();
     };
-    let Some(program) = &o.program else {
+    let Some(program) = program_of(run, op) else {
         return Vec::new();
     };
     let lines = kept.count(&program.text);
@@ -141,8 +158,14 @@ pub fn widgets(
         })
         .collect();
     kept.shown = Some((op, shown.start));
+    // A setup's program is named for the operation the playhead is in.
+    let name = match program.moment(at).and_then(|(k, _)| run.operations.get(k)) {
+        Some(under) if marked => &under.name,
+        _ if program.is_setups() => &program.name,
+        _ => &o.name,
+    };
     let mut children = vec![Widget::Value {
-        label: o.name.clone(),
+        label: name.clone(),
         value: if marked {
             format!("line {} of {lines}", at + 1)
         } else {
@@ -176,7 +199,10 @@ pub fn clicked(run: &Run, event: &PanelEvent, kept: &Lines) -> Option<(usize, us
         return None;
     }
     let (op, start) = kept.shown?;
-    let program = run.operations.get(op)?.program.as_ref()?;
+    let program = program_of(run, op)?;
+    if program.is_setups() {
+        return program.moment(start + index);
+    }
     Some((op, program.made_by(start + index)?))
 }
 
@@ -262,6 +288,61 @@ mod tests {
         // In another operation, nothing is marked.
         let (_, marked) = sheet(&widgets(&run, 0, Some((1, 3)), &mut kept));
         assert_eq!(marked, None);
+    }
+
+    /// Two operations in one program, the second's moves on lines 4 to 6,
+    /// and a custom G-code operation between them with none.
+    fn setups_run() -> Run {
+        let text = "G21\nG0 Z5\nG1 X1\nT2 M6\nG1 X2\nG1 X3\nM30\n";
+        let op = |name: &str| OperationRun {
+            name: name.into(),
+            ..OperationRun::default()
+        };
+        Run {
+            operations: vec![op("Rough"), op("Look"), op("Finish")],
+            program: Some(Program {
+                name: "top".into(),
+                lines: 7,
+                operations: vec![0, 0, 0, 2, 2, 2, 2],
+                moves: vec![0, 1, 2, 0, 1, 2, 2],
+                text: text.into(),
+                ..Program::default()
+            }),
+            ..Run::default()
+        }
+    }
+
+    /// A setup's program is listed in every operation's panel, the line
+    /// marked wherever the playhead is, named for its operation; a click on
+    /// a line finds its operation and move.
+    #[test]
+    fn a_setups_program_follows_every_operation() {
+        let run = setups_run();
+        let mut kept = Lines::default();
+        let (rows, marked) = sheet(&widgets(&run, 0, Some((2, 1)), &mut kept));
+        assert_eq!(rows.len(), 7, "the whole program");
+        assert_eq!(marked, Some(4), "the second's first move");
+        let label = |w: &[Widget]| match w.first() {
+            Some(Widget::Group { children, .. }) => match children.first() {
+                Some(Widget::Value { label, .. }) => label.clone(),
+                _ => String::new(),
+            },
+            _ => String::new(),
+        };
+        assert_eq!(label(&widgets(&run, 0, Some((2, 1)), &mut kept)), "Finish");
+        assert_eq!(label(&widgets(&run, 1, None, &mut kept)), "top");
+        let (_, marked) = sheet(&widgets(&run, 1, None, &mut kept));
+        assert_eq!(marked, None, "not played back: unmarked");
+        let event = PanelEvent::Select {
+            id: ID.into(),
+            index: 5,
+        };
+        assert_eq!(clicked(&run, &event, &kept), Some((2, 2)));
+        let event = PanelEvent::Select {
+            id: ID.into(),
+            index: 1,
+        };
+        assert_eq!(clicked(&run, &event, &kept), Some((0, 1)));
     }
 
     #[test]

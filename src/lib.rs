@@ -10,8 +10,8 @@
 //! None of the machining happens here. A setup runs as a job that hands it, as
 //! a camcraft job with each body's B-rep, to the package's native helper
 //! (`helper/`), which runs camcraft's engine on every core: the toolpaths, the
-//! simulation against the material, the checks, and a G-code program for each
-//! operation. The package draws what comes back, shows the checks, and saves
+//! simulation against the material, the checks, and a G-code program for the
+//! setup, or one for each operation. The package draws what comes back, shows the checks, and saves
 //! the programs through the save dialog, refusing one camcraft refuses.
 
 // Every literal of the contract's structs ends in `..Default::default()`,
@@ -906,10 +906,17 @@ impl Cam {
         });
     }
 
-    /// The program of operation `op`, when its setup has run.
+    /// The program of operation `op`, or of its setup when it is posted as
+    /// one; or of setup `op`, posted as one; when the setup has run.
     fn program_of(&self, op: &str, force: bool) -> Result<cam_protocol::Program, String> {
-        let (node, data) = operation_node(op).ok_or_else(|| format!("no operation {op}"))?;
-        let setup = data.setup.ok_or("The operation is in no setup.")?;
+        let (node, setup) = match operation_node(op) {
+            Some((node, data)) => (
+                Some(node),
+                data.setup.ok_or("The operation is in no setup.")?,
+            ),
+            None if setup_node(op).is_some() => (None, op.to_string()),
+            None => return Err(format!("no operation or setup {op}")),
+        };
         let computed = self.runs.get(&setup).ok_or("Its setup has not been run.")?;
         let run = match &computed.state {
             State::Ready(run) => run,
@@ -924,6 +931,14 @@ impl Cam {
                 "camcraft refuses to post a setup that failed its checks: read them first.".into(),
             );
         }
+        if let Some(p) = &run.program {
+            return Ok(p.clone());
+        }
+        let Some(node) = node else {
+            return Err(
+                "The setup is posted one program an operation: ask for an operation's.".into(),
+            );
+        };
         let index = operations_of(&setup)
             .iter()
             .position(|(n, _)| n.id == node.id)
@@ -1063,6 +1078,19 @@ impl Bench for Cam {
                             ParamKind::Number,
                             false,
                             "mm; the preferences' (0.05)",
+                        ),
+                        param(
+                            "programs",
+                            ParamKind::String,
+                            false,
+                            "setup (one program for the setup, the default) or operation \
+                             (one an operation)",
+                        ),
+                        param(
+                            "number",
+                            ParamKind::Number,
+                            false,
+                            "the program's number, @number@ in a post's lines; 1001",
                         ),
                         param("name", ParamKind::String, false, "the setup's name"),
                     ],
@@ -1294,10 +1322,16 @@ impl Bench for Cam {
                 },
                 Command {
                     id: id(GCODE),
-                    summary: "An operation's G-code, once its setup has run and passed its checks"
+                    summary: "An operation's G-code, or its setup's when the setup is posted \
+                              as one program, once the setup has run and passed its checks"
                         .into(),
                     params: vec![
-                        param("id", ParamKind::Id, true, "the operation"),
+                        param(
+                            "id",
+                            ParamKind::Id,
+                            true,
+                            "the operation, or the setup (posted as one program)",
+                        ),
                         param(
                             "force",
                             ParamKind::Bool,
@@ -1555,6 +1589,13 @@ impl Bench for Cam {
                         Some(f64::from(n))
                     }
                 };
+                let programs = match text("programs").as_deref() {
+                    None | Some("setup") => camcraft_core::job::Programs::Setup,
+                    Some("operation") => camcraft_core::job::Programs::Operation,
+                    Some(other) => {
+                        return Err(format!("no programs '{other}': setup or operation"));
+                    }
+                };
                 let id = self.make_setup(bodies, text("name").as_deref())?;
                 if let Some((_, mut data)) = setup_node(&id) {
                     if let Some(z) = up_axis {
@@ -1609,6 +1650,10 @@ impl Bench for Cam {
                     if let Some(at) = work_offset {
                         data.wcs_known = true;
                         (data.wcs_x, data.wcs_y, data.wcs_z) = (at.x, at.y, at.z);
+                    }
+                    data.programs = programs;
+                    if let Some(n) = number("number") {
+                        data.program_number = n;
                     }
                     host::set_feature_data(&id, data.to_value())?;
                 }
@@ -2150,6 +2195,7 @@ impl Cam {
                     "cut_mm": o.cut_mm,
                     "lines": o.program.as_ref().map(|p| p.lines),
                 })).collect::<Vec<_>>(),
+                "lines": run.program.as_ref().map(|p| p.lines),
             }),
         }
     }

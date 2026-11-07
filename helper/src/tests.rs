@@ -54,6 +54,7 @@ name = "top"
 models = ["part"]
 stocks = ["block"]
 post = "grbl"
+programs = "operation"
 
 [[setup.operation]]
 name = "rough"
@@ -624,6 +625,18 @@ fn each_line_counts_the_moves_of_the_instruction_that_wrote_it() {
     );
 }
 
+#[test]
+fn each_line_of_a_setups_program_says_whose_move_it_is() {
+    // A header line; operation 1's two lines making none, then a move;
+    // operation 3's tool change making none, then two moves; a footer line.
+    let made = [(1, 0), (1, 1), (3, 0), (3, 2)];
+    let op_lines = [3, 4, 5, 6];
+    assert_eq!(
+        crate::line_moments(&made, &op_lines, 7),
+        (vec![1, 1, 1, 1, 3, 3, 3], vec![0, 0, 0, 1, 0, 2, 2])
+    );
+}
+
 /// One of the sled base's holes, picked by its top and bottom rims, tapped
 /// left-hand. For a post without the tapping cycle the run is shown but fails,
 /// saying why, and has no program; for one with it, it passes, a G74 a hole.
@@ -654,6 +667,7 @@ name = "top"
 models = ["sled"]
 stocks = ["block"]
 post = "grbl"
+programs = "operation"
 
 [[setup.operation]]
 name = "threads"
@@ -947,6 +961,80 @@ fn custom_request(gcode: &str, travel: &str) -> Request {
         post: Some(mine),
         read: None,
     }
+}
+
+/// A setup posted as one program, as it is unless it says otherwise: the
+/// run has it, no operation one of its own; one header and footer, custom
+/// G-code where it stands; and each line says whose move it is, which the
+/// operations' own lines and moves find again.
+#[test]
+fn a_setup_is_one_program() {
+    let job = JOB.replace("programs = \"operation\"\n", "number = 42\n")
+        + r#"
+[[setup.operation]]
+name = "between"
+strategy = "custom-gcode"
+gcode = "M0 (look)"
+
+[[setup.operation]]
+name = "again"
+strategy = "pocket-clearing"
+tool = "flat-6"
+passes = { stepdown = 3.0, stepover = 2.5, feed = 900.0 }
+"#;
+    let request = Request {
+        version: VERSION,
+        job,
+        shapes: BTreeMap::from([(
+            "part".to_string(),
+            Shape {
+                text: native("hinge_jig.step"),
+                placement: IDENTITY,
+            },
+        )]),
+        max_points: 0,
+        ..Request::default()
+    };
+    let run = answer(&request).unwrap();
+    assert!(run.operations.iter().all(|o| o.program.is_none()));
+    let program = run.program.as_ref().expect("the setup's program");
+    assert_eq!(program.name, "top");
+    let text = &program.text;
+    let at = |w: &str| {
+        text.find(w)
+            .unwrap_or_else(|| panic!("no {w:?} in\n{text}"))
+    };
+    assert!(at("(rough - ") < at("(custom gcode: between)"));
+    assert!(at("(custom gcode: between)") < at("(again - "));
+    assert_eq!(text.matches("M30").count(), 1);
+    assert_eq!(program.moves.len(), program.lines);
+    assert_eq!(program.operations.len(), program.lines);
+    assert_eq!(program.lines, text.lines().count());
+    let moments: Vec<(usize, usize)> = (0..program.lines)
+        .map(|l| program.moment(l).unwrap())
+        .collect();
+    assert!(moments.windows(2).all(|w| w[0] <= w[1]));
+    assert_eq!(moments.first(), Some(&(0, 0)));
+    let ends = |k: usize| {
+        let moments = &run.playback.as_ref().unwrap().moments;
+        moments.iter().rfind(|m| m.op == k).unwrap().of
+    };
+    assert_eq!(moments.last(), Some(&(2, ends(2))));
+    assert!(moments.contains(&(0, ends(0))));
+    // The second operation's first cut, found again from its move.
+    let lines: Vec<&str> = text.lines().collect();
+    let again = lines
+        .iter()
+        .position(|l| l.starts_with("(again - "))
+        .unwrap();
+    let first_cut = again
+        + lines[again..]
+            .iter()
+            .position(|l| l.starts_with("G1"))
+            .unwrap();
+    let (op, made) = program.moment(first_cut).unwrap();
+    assert_eq!(op, 2);
+    assert_eq!(program.line_at(op, made), Some(first_cut));
 }
 
 /// Custom G-code is written into the program beside it, where it stands,

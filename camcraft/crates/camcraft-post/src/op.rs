@@ -158,6 +158,9 @@ pub enum Op {
     Rotary(Vec<RotaryAt>),
     /// Take the tool straight up clear of everything, as the profile does it.
     SafeRetract,
+    /// Stop if the operator has asked for it (`M1`), between two operations
+    /// of one program, the spindle stopped and the tool clear.
+    OptionalStop,
     /// Send the machine home across, as the profile does it.
     Home,
     /// End of program.
@@ -342,33 +345,7 @@ pub fn lower_counted(
     path: &Toolpath,
     spec: &ProgramSpec,
 ) -> Result<(Vec<Op>, Vec<usize>), LowerError> {
-    let unresolved = path
-        .moves()
-        .iter()
-        .filter(|m| m.role.is_unplanned())
-        .count();
-    if unresolved > 0 {
-        return Err(LowerError::UnresolvedLinks(unresolved));
-    }
-    if !(54..=59u16 + u16::from(spec.extended_offsets)).contains(&u16::from(spec.wcs)) {
-        return Err(LowerError::BadWorkOffset(spec.wcs));
-    }
-    if let Some(m) = path
-        .moves()
-        .iter()
-        .find(|m| matches!(m.kind, MoveKind::Arc(a) if !principal(a.axis)))
-    {
-        return Err(LowerError::ArcOutOfPlane(m.to));
-    }
-    let tap = spec.drill.as_ref().and_then(|d| d.tap);
-    if spec.taps && tap.is_none() {
-        return Err(LowerError::TapsAsMoves);
-    }
-    if let Some(t) = tap
-        && t.hand.spindle() != spec.spin
-    {
-        return Err(LowerError::TapTurnsAgainstThread(t.hand));
-    }
+    refuse(path, spec)?;
 
     // The profile header owns the program name via `{name}`; repeating it here
     // would print it twice in every file.
@@ -440,10 +417,42 @@ pub fn lower_counted(
     Ok((out, made))
 }
 
+/// What makes `path`, with `spec`, no program: whatever [`lower`] refuses.
+pub(crate) fn refuse(path: &Toolpath, spec: &ProgramSpec) -> Result<(), LowerError> {
+    let unresolved = path
+        .moves()
+        .iter()
+        .filter(|m| m.role.is_unplanned())
+        .count();
+    if unresolved > 0 {
+        return Err(LowerError::UnresolvedLinks(unresolved));
+    }
+    if !(54..=59u16 + u16::from(spec.extended_offsets)).contains(&u16::from(spec.wcs)) {
+        return Err(LowerError::BadWorkOffset(spec.wcs));
+    }
+    if let Some(m) = path
+        .moves()
+        .iter()
+        .find(|m| matches!(m.kind, MoveKind::Arc(a) if !principal(a.axis)))
+    {
+        return Err(LowerError::ArcOutOfPlane(m.to));
+    }
+    let tap = spec.drill.as_ref().and_then(|d| d.tap);
+    if spec.taps && tap.is_none() {
+        return Err(LowerError::TapsAsMoves);
+    }
+    if let Some(t) = tap
+        && t.hand.spindle() != spec.spin
+    {
+        return Err(LowerError::TapTurnsAgainstThread(t.hand));
+    }
+    Ok(())
+}
+
 /// What the program's header says of a tilted setup: which way its tool
 /// axis is, how it is stood up the spindle, and that the coordinates are in
 /// the tilted frame. Nothing for one up the model's Z.
-fn tilt_notes(spec: &ProgramSpec) -> Vec<String> {
+pub(crate) fn tilt_notes(spec: &ProgramSpec) -> Vec<String> {
     let Some(axis) = spec.tilt else {
         return Vec::new();
     };
@@ -472,7 +481,7 @@ fn tilt_notes(spec: &ProgramSpec) -> Vec<String> {
 /// then each cycle returning there (`G98`) before the next, and `G80` after.
 /// `made` gets, for each, how many of `path`'s moves it stands for: those
 /// down to its hole and back out, found in order.
-fn cycles(d: &DrillCycles, path: &Toolpath, out: &mut Vec<Op>, made: &mut Vec<usize>) {
+pub(crate) fn cycles(d: &DrillCycles, path: &Toolpath, out: &mut Vec<Op>, made: &mut Vec<usize>) {
     let Some(first) = d.holes.first() else {
         return;
     };
@@ -547,7 +556,7 @@ pub fn extents(path: &Toolpath) -> Option<(DVec3, DVec3)> {
     Some((low, high))
 }
 
-fn moves(path: &Toolpath, out: &mut Vec<Op>, made: &mut Vec<usize>) {
+pub(crate) fn moves(path: &Toolpath, out: &mut Vec<Op>, made: &mut Vec<usize>) {
     for (i, m) in path.moves().iter().enumerate() {
         let op = match (m.kind, m.role, m.feed) {
             (MoveKind::Linear, MoveRole::Rapid, _) => Op::Rapid { to: m.to },

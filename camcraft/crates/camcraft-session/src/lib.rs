@@ -11,7 +11,7 @@
 //! - the one set of checks ([`checks`]) and the one verification policy
 //!   ([`gate`]): no program from a setup with a failure among them,
 //! - and how a program is named, rendered and written ([`plan_posting`],
-//!   [`program_name`]).
+//!   [`program_name`], [`setup_program`]).
 //!
 //! Position in the dependency DAG: depends on every library crate, and only the two
 //! binaries depend on it. It says nothing about how anything is shown. It returns
@@ -35,7 +35,8 @@ pub use finish::{FinishSpec, single_operation};
 pub use job_file::{job_text, parse_job, read_job, write_job};
 pub use model::{Model, Models, load_job_model, load_model, load_models, models_of, units_of};
 pub use post::{
-    Posting, Program, builtin_posts, custom_gcode, load_profile, next_tools, plan_posting, program,
-    program_name, program_spec, program_with, setup_profile, travel_check, write_posting,
+    Posting, Program, SetupProgram, builtin_posts, custom_gcode, load_profile, next_tools,
+    plan_posting, program, program_name, program_spec, program_with, setup_profile, setup_program,
+    setup_program_name, setup_specs, travel_check, write_posting,
 };
 pub use run::{Passed, Ran, check_runnable, gate, run_setup, run_setup_planned};

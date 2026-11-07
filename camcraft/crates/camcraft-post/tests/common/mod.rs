@@ -253,3 +253,48 @@ pub fn slot() -> Toolpath {
     let (path, _) = engrave(&[hook], &params).unwrap();
     linked(&path)
 }
+
+/// A square pocket 3 mm deep, roughed with a flat end mill.
+pub fn roughing() -> Toolpath {
+    let mut t = Toolpath::new();
+    t.rapid_to(dvec3(0.0, 0.0, 15.0)).unwrap();
+    t.rapid_to(dvec3(20.0, 20.0, 15.0)).unwrap();
+    t.feed_to(dvec3(20.0, 20.0, -3.0), MoveRole::Plunge, 300.0)
+        .unwrap();
+    for (x, y) in [(40.0, 20.0), (40.0, 40.0), (20.0, 40.0), (20.0, 20.0)] {
+        t.feed_to(dvec3(x, y, -3.0), MoveRole::Cut, 1500.0).unwrap();
+    }
+    t.feed_to(dvec3(20.0, 20.0, 15.0), MoveRole::Retract, 1000.0)
+        .unwrap();
+    t
+}
+
+/// A setup of three operations on two tools: roughing with tool 1 and
+/// flood, then finishing ([`fixture`], [`spec`]) and engraving
+/// ([`engraving`]) both with tool 3, the engraving slower and dry.
+pub fn setup() -> Vec<(Toolpath, ProgramSpec)> {
+    vec![
+        (
+            roughing(),
+            ProgramSpec {
+                op_name: "rough".into(),
+                strategy: "pocket".into(),
+                tool: 1,
+                tool_comment: "6mm flat (carbide)".into(),
+                rpm: 16000,
+                ..spec()
+            },
+        ),
+        (fixture(), spec()),
+        (
+            engraving(),
+            ProgramSpec {
+                op_name: "engrave".into(),
+                strategy: "engrave".into(),
+                rpm: 12000,
+                coolant: Coolant::Off,
+                ..spec()
+            },
+        ),
+    ]
+}

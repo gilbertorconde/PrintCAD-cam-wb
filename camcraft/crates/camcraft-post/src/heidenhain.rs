@@ -60,7 +60,9 @@ use crate::op::{CycleKind, Op};
 use crate::placeholder::{Values, fill};
 use crate::profile::{Profile, ProgramUnits, ToolChangeStyle};
 use crate::readback::{Action, Motion, Position, Problem, Step, Turn, flat, known, turned};
-use crate::render::{RenderReport, SHORTEST_CHORD, STRAIGHTENED, custom_begin, custom_end, values};
+use crate::render::{
+    RenderReport, SHORTEST_CHORD, STRAIGHTENED, Title, custom_begin, custom_end, values,
+};
 
 /// Millimetres in a tenth of an inch: a feed's unit in an inch program.
 const MM_PER_TENTH: f64 = 2.54;
@@ -101,15 +103,13 @@ fn units_word(units: ProgramUnits) -> &'static str {
     }
 }
 
-/// Render a stream into Klartext, posted on `date` where it is given.
-pub(crate) fn render(
-    ops: &[Op],
-    profile: &Profile,
-    program_name_: &str,
-    date: Option<&str>,
-) -> (String, RenderReport) {
-    let mut w = Writer::new(profile, values(ops, profile, program_name_, date));
-    let name = program_name(program_name_);
+/// Render a stream into Klartext, called as `title` says: one `BEGIN PGM`
+/// and `END PGM`, and the stock once, however many operations it holds.
+pub(crate) fn render(ops: &[Op], profile: &Profile, title: &Title) -> (String, RenderReport) {
+    let mut sections = values(ops, profile, title).into_iter().peekable();
+    let first = sections.peek().map(|(_, v)| v.clone()).unwrap_or_default();
+    let mut w = Writer::new(profile, first);
+    let name = program_name(title.name);
     let units = units_word(w.values.units);
     w.block(&format!("BEGIN PGM {name} {units}"));
     // The stock, drawn as it is cut, first: the control looks for it there.
@@ -125,7 +125,10 @@ pub(crate) fn render(
         w.filled(line);
     }
     w.report.op_lines.reserve(ops.len());
-    for op in ops {
+    for (i, op) in ops.iter().enumerate() {
+        if let Some((_, v)) = sections.next_if(|(start, _)| *start <= i) {
+            w.values = v;
+        }
         w.op(op);
         w.report.op_lines.push(w.report.lines);
     }
@@ -266,6 +269,10 @@ impl<'a> Writer<'a> {
                 let p = self.p;
                 self.lines(&p.end_home);
             }
+            Op::OptionalStop => {
+                self.block("M1");
+                self.lost();
+            }
             Op::ToolChange { tool, comment } => self.tool_change(*tool, comment),
             Op::PreSelect(tool) => {
                 if self.p.preselect_tool {
@@ -362,7 +369,9 @@ impl<'a> Writer<'a> {
         if !note.is_empty() {
             self.comment(&note);
         }
-        let rpm = self.rpm;
+        // At the speed of the operation it is called for.
+        let rpm = self.values.rpm;
+        self.rpm = rpm;
         self.block(&format!("TOOL CALL {tool} Z S{rpm}"));
         if by_hand {
             self.block("M0");

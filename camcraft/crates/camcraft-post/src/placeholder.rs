@@ -16,6 +16,14 @@ use crate::profile::ProgramUnits;
 /// Every placeholder, and what it is replaced with.
 pub const PLACEHOLDERS: &[(&str, &str)] = &[
     ("name", "the program's name"),
+    (
+        "number",
+        "the program's number, as its setup gives it: 1001 unless set",
+    ),
+    (
+        "number5",
+        "the program's number in five digits at least: 01001",
+    ),
     ("operation", "the operation's name"),
     ("strategy", "its strategy, as a job file names it"),
     ("tool", "the tool's number"),
@@ -38,6 +46,8 @@ pub const PLACEHOLDERS: &[(&str, &str)] = &[
 pub struct Values {
     /// The program's name.
     pub name: String,
+    /// The program's number.
+    pub number: u32,
     /// The operation's name.
     pub operation: String,
     /// Its strategy, as a job file names it.
@@ -65,6 +75,7 @@ impl Default for Values {
     fn default() -> Self {
         Self {
             name: String::new(),
+            number: camcraft_core::job::DEFAULT_NUMBER,
             operation: String::new(),
             strategy: String::new(),
             tool: 0,
@@ -86,6 +97,8 @@ impl Values {
     fn get(&self, name: &str, text: &dyn Fn(&str) -> String) -> Option<String> {
         Some(match name {
             "name" => text(&self.name),
+            "number" => self.number.to_string(),
+            "number5" => format!("{:05}", self.number),
             "operation" => text(&self.operation),
             "strategy" => text(&self.strategy),
             "tool" => self.tool.to_string(),
@@ -207,6 +220,7 @@ mod tests {
     fn values() -> Values {
         Values {
             name: "top-01-rough".into(),
+            number: 1002,
             operation: "Rough (top)".into(),
             strategy: "adaptive".into(),
             tool: 3,
@@ -232,7 +246,7 @@ mod tests {
         assert_eq!(problem(&all), None);
         assert_eq!(
             fill(&all, &v, &same),
-            "top-01-rough|Rough (top)|adaptive|3|6mm flat|18000|M4|mist|M7|inch|G20|G55|2026-11-03"
+            "top-01-rough|1002|01002|Rough (top)|adaptive|3|6mm flat|18000|M4|mist|M7|inch|G20|G55|2026-11-03"
         );
     }
 

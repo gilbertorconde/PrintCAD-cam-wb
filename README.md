@@ -177,18 +177,37 @@ panels, the drawing and the helper that runs camcraft.
 
 - **Drawn over the model.** The stock's box or cylinder, the work zero, each operation's
   toolpath (rapids dashed while it is edited), and the material left.
-- **G-code through the save dialog,** one program per operation, or every
-  program of a setup into a folder at once, for GRBL,
+- **G-code through the save dialog,** one program for the whole setup, as
+  Fusion posts one, or one program per operation (every one of a setup into
+  a folder at once), as the setup's Programs says, for GRBL,
   Masso, Centroid CNC12 (Avid), LinuxCNC, Fanuc (0i, 31i), Haas (NGC) or
   Mach3 and Mach4, or in Klartext for a Heidenhain TNC, each in millimetres
   or inches, or through a
   machine profile of your own in camcraft's TOML, which a setup carries a
-  copy of. Fanuc's and Haas's programs are tapes, `%` round them and an `O`
-  number first (every one `O1001`, or `O01001`: number each as it goes into
-  the control), and call up the next program's tool after the change (`T5`
-  after `T3 M6`), where the profile says `preselect_tool = true`. A
+  copy of. A setup's program has one header and one footer, and each
+  operation in order under a comment naming it: the tool is changed only
+  where it changes, the same tool kept turning, at the next operation's
+  speed where that is another, and the coolant changed only where it
+  changes. Between operations the tool goes up clear as the profile's
+  `safe_retract` takes it, or, with none, straight up as high as either
+  operation goes, across, and down. The work offset is the setup's, and
+  written once. Custom G-code between two operations
+  is written with the spindle stopped and the tool clear, and the next
+  starts again after it, its tool changed. A profile with
+  `optional_stop = true` stops between every two operations (`M1`), the
+  spindle stopped first. The program is named after the setup and numbered
+  as its Program number says (`@number@`, 1001 unless set); one per
+  operation is named `setup-01-operation` and numbered on from it, one a
+  program. The listing beside playback lists the setup's program whole,
+  each line followed to the operation and the move it makes.
+  Fanuc's and Haas's programs are tapes, `%` round them and an `O`
+  number first, the setup's (`O1001`, Haas's `O01001`), and call up the
+  next tool after a change (`T5` after `T3 M6`), where the profile says
+  `preselect_tool = true`. A
   Heidenhain program (`.h`) is Klartext, not G-code (`dialect =
-  "heidenhain"`): numbered blocks from `BEGIN PGM` to `END PGM`, the stock
+  "heidenhain"`): numbered blocks from `BEGIN PGM` to `END PGM`, named as
+  its file is, which the control insists on, once however many operations
+  the setup has, the stock once
   as `BLK FORM`, `TOOL CALL 3 Z S18000`, `L X+10 Y+5 R0 F1200` and `FMAX`,
   arcs by their centre (`CC`, then `C .. DR+`), a helix by its angle (`CP
   IPA+360 IZ-1`), the work offset as a preset row (`CYCL DEF 247`, G54 its
@@ -234,12 +253,14 @@ panels, the drawing and the helper that runs camcraft.
   `G154 P1` to `P99`), which its programs select. The lines a profile gives, `header`, `footer`,
   `safe_retract`, `end_home` and its own tool change, `tool_change_lines`
   (written in place of `T.. M6` or the pause, and naming `@tool@`), take
-  placeholders: `@name@` (the program), `@operation@`, `@strategy@`,
+  placeholders: `@name@` (the program), `@number@` (its number),
+  `@operation@`, `@strategy@`,
   `@tool@`, `@tool_comment@`, `@rpm@`, `@spindle@` (`M3` or `M4`),
   `@coolant@` (`flood`, `mist`, `off`), `@coolant_code@` (`M8`, `M7`, `M9`),
   `@units@`, `@units_code@` (`G21`, `G20`), `@wcs@` (`G54`…) and `@date@`
   (the day it was posted); `@@` is an `@`, and `{name}` still the program's
-  name. A placeholder that is not one makes the profile invalid: adding it
+  name. In a setup's program each operation's lines are filled with its own,
+  the header with the first's and the footer with the last's. A placeholder that is not one makes the profile invalid: adding it
   says which and on which line, and a setup carrying a copy that no longer
   loads says so in its panel. A profile
   that takes canned cycles (`drill_cycles = true`) writes each hole as one:
@@ -271,6 +292,8 @@ panels, the drawing and the helper that runs camcraft.
 ```lua
 local cam = pc.io.github.gilbertorconde.cam
 local setup = cam.setup{bodies = {"<body id>"}, margin = 3, post = "grbl"}
+local each = cam.setup{bodies = {"<body id>"}, programs = "operation", number = 2000}
+                                        -- one program an operation, O2000 on
 local disc = cam.setup{bodies = {"<body id>"}, stock = "cylinder", axis = "tool",
                        diameter = 80, length = 25}  -- or margin = 3 round the bodies
 local side = cam.setup{bodies = {"<body id>"}, tool_axis = "-y", machine_x = "+x"}
@@ -297,7 +320,8 @@ local clamps = cam.operation{setup = setup.feature, strategy = "custom-gcode",
 cam.status{id = setup.feature}          -- queued, running, ready (with its checks), failed
 cam.import_tools{text = fusion_csv}     -- a Fusion tool library, exported as CSV
 cam.add_post{text = profile_toml}       -- a machine profile of your own
-local program = cam.gcode{id = rough.feature}
+local program = cam.gcode{id = setup.feature}  -- the setup's; an operation's id gives it too
+local own = cam.gcode{id = each_op}             -- one program an operation: the operation's
 ```
 
 ## How it works

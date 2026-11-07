@@ -50,6 +50,7 @@ use crate::custom::{Concern, concern};
 use crate::op::{DrillCycles, ProgramSpec};
 use crate::profile::{Dialect, Profile, ProgramUnits};
 use crate::render::{custom_end, custom_mark};
+use crate::setup::Section;
 
 /// Millimetres in an inch.
 const MM_PER_INCH: f64 = 25.4;
@@ -1038,18 +1039,28 @@ pub fn check(
     spec: &ProgramSpec,
     profile: &Profile,
 ) -> Result<(), Problem> {
+    let steps = steps_of(text, profile, spec.before.len() + spec.after.len())?;
+    let mut c = Checker::new(&steps, spec, Tolerance::of(profile, spec.units));
+    c.wcs_word = word_of(profile, spec.wcs);
+    c.section(path)?;
+    c.phase = Phase::After;
+    c.leave()
+}
+
+/// What `text` does, read in `profile`'s dialect, its custom G-code (of
+/// which it must have `wanted` blocks) left unread.
+fn steps_of(text: &str, profile: &Profile, wanted: usize) -> Result<Vec<Step>, Problem> {
     let blocks = match profile.dialect {
         Dialect::Iso => custom_blocks(text, profile),
         Dialect::Heidenhain => crate::heidenhain::custom_blocks(text, profile),
     };
-    let wanted = spec.before.len() + spec.after.len();
     if blocks.len() != wanted {
         return Err(Problem::whole(format!(
             "{} block(s) of custom G-code are written, where the program has {wanted}",
             blocks.len()
         )));
     }
-    let steps = match profile.dialect {
+    match profile.dialect {
         Dialect::Iso => read_dwelling(
             text,
             &blocks,
@@ -1058,23 +1069,45 @@ pub fn check(
             } else {
                 1.0
             },
-        )?,
-        Dialect::Heidenhain => crate::heidenhain::read_around(text, &blocks)?,
+        ),
+        Dialect::Heidenhain => crate::heidenhain::read_around(text, &blocks),
+    }
+}
+
+/// How `profile` writes work offset `wcs`, as a problem names it.
+fn word_of(profile: &Profile, wcs: u8) -> String {
+    profile.wcs_word(wcs).unwrap_or_else(|| offset_word(wcs))
+}
+
+/// Check that `text`, read back, does what posting `sections` as one
+/// program for `profile` should ([`crate::setup::lower_setup`]): each
+/// section as [`check`] checks a program of its own, in order, with its
+/// tool, work offset, spindle and coolant in force before it cuts. Between
+/// two, the tool may keep turning, and from where one ends it goes to where
+/// the next begins at rapid, never across and down at once, and across
+/// only as high as the one before went and the next begins.
+pub fn check_setup(text: &str, sections: &[Section], profile: &Profile) -> Result<(), Problem> {
+    let Some(first) = sections.first() else {
+        return Err(Problem::whole("a program of no operations"));
     };
-    let mut c = Checker::new(&steps, spec, Tolerance::of(profile, spec.units));
-    c.wcs_word = profile
-        .wcs_word(spec.wcs)
-        .unwrap_or_else(|| offset_word(spec.wcs));
-    if let Some(d) = &spec.drill {
-        c.holes(d)?;
-    } else if let Some(first) = path.moves().first() {
-        c.arrive(first.to, first.feed.is_none())?;
-        c.phase = Phase::Cutting;
-        for (k, pair) in path.moves().windows(2).enumerate() {
-            if let [before, m] = pair {
-                c.follow(before.to, m, k + 1)?;
-            }
+    let wanted: usize = sections
+        .iter()
+        .map(|s| s.spec.before.len() + s.spec.after.len())
+        .sum();
+    let steps = steps_of(text, profile, wanted)?;
+    let mut c = Checker::new(&steps, first.spec, Tolerance::of(profile, first.spec.units));
+    for (i, s) in sections.iter().enumerate() {
+        if i > 0 {
+            c.spec = s.spec;
+            c.phase = Phase::Before;
+            c.cut = false;
+            c.linking = true;
         }
+        c.wcs_word = word_of(profile, s.spec.wcs);
+        c.section(s.path).map_err(|p| Problem {
+            what: format!("{} (operation {}): {}", s.spec.op_name, i + 1, p.what),
+            ..p
+        })?;
     }
     c.phase = Phase::After;
     c.leave()
@@ -1117,6 +1150,9 @@ struct Checker<'a> {
     ended: bool,
     /// Where each rotary was last sent, by its word.
     rotary: Vec<(char, f64)>,
+    /// Whether the tool comes from the operation before, rather than from
+    /// the program's start.
+    linking: bool,
 }
 
 impl<'a> Checker<'a> {
@@ -1140,7 +1176,25 @@ impl<'a> Checker<'a> {
             ended: false,
             rotary: Vec::new(),
             wcs_word: offset_word(spec.wcs),
+            linking: false,
         }
+    }
+
+    /// `path`, as the program's operation now under way: its holes, or
+    /// its moves, from where the tool is.
+    fn section(&mut self, path: &Toolpath) -> Result<(), Problem> {
+        if let Some(d) = &self.spec.drill {
+            self.holes(d)?;
+        } else if let Some(first) = path.moves().first() {
+            self.arrive(first.to, first.feed.is_none())?;
+            self.phase = Phase::Cutting;
+            for (k, pair) in path.moves().windows(2).enumerate() {
+                if let [before, m] = pair {
+                    self.follow(before.to, m, k + 1)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The next move, after taking in whatever comes before it; `None` at the
@@ -1390,13 +1444,53 @@ impl<'a> Checker<'a> {
 
     /// From wherever the tool is to where the path starts, one way at a time
     /// while the tool's place is not known, and across only once it is clear.
+    ///
+    /// From the operation before, where the tool is known, it goes there
+    /// at rapid, up, or across as high as that one went and this one
+    /// begins, and down only where this one begins.
     fn arrive(&mut self, to: DVec3, rapid: bool) -> Result<(), Problem> {
         loop {
+            // Already there, as the operation before can leave it.
+            if self.linking && known(&self.at).is_some_and(|at| at.distance(to) <= self.tol.at) {
+                self.high = to.z;
+                return Ok(());
+            }
             let (line, m) = self.next_move()?.ok_or_else(|| {
                 Problem::whole(format!(
                     "the program ends before reaching the path's start, {to}"
                 ))
             })?;
+            let across = moves(&m.from, &m.to, 0) || moves(&m.from, &m.to, 1);
+            let down = moves(&m.from, &m.to, 2);
+            if self.linking
+                && let (Some(a), Some(b)) = (known(&m.from), known(&m.to))
+            {
+                if across && down {
+                    return Err(Problem::at(
+                        line,
+                        "goes across and down at once between operations",
+                    ));
+                }
+                if b.distance(to) > self.tol.at {
+                    if m.feed.is_some() {
+                        return Err(Problem::at(line, "feeds between operations"));
+                    }
+                    if b.z < a.z - self.tol.at {
+                        return Err(Problem::at(
+                            line,
+                            "goes down between operations before it is over the next",
+                        ));
+                    }
+                    if across && (!self.clear() || b.z < to.z - self.tol.at) {
+                        return Err(Problem::at(
+                            line,
+                            "goes across between operations lower than they go",
+                        ));
+                    }
+                    self.at = m.to;
+                    continue;
+                }
+            }
             if m.feed.is_none() != rapid {
                 return Err(Problem::at(
                     line,
@@ -1406,8 +1500,6 @@ impl<'a> Checker<'a> {
             if !rapid {
                 self.cutting(line)?;
             }
-            let across = moves(&m.from, &m.to, 0) || moves(&m.from, &m.to, 1);
-            let down = moves(&m.from, &m.to, 2);
             if m.from.iter().any(Option::is_none) && across && down {
                 return Err(Problem::at(
                     line,

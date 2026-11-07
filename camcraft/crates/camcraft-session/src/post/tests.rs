@@ -2,6 +2,7 @@ use super::*;
 use crate::test_support::run_small;
 use crate::{load_models, parse_job, run_setup};
 use camcraft_core::job::{Coolant, SpindleDirection};
+use camcraft_post::setup::Section;
 
 #[test]
 fn program_names_are_numbered_and_file_safe() {
@@ -35,7 +36,14 @@ fn scratch(name: &str) -> PathBuf {
 fn a_posting_writes_a_program_per_operation() {
     let (job, job_dir, ran) = example();
     let dir = scratch("writes");
-    let p = plan_posting(&[(&job.setups[0], &ran)], &job_dir, &dir, None).unwrap();
+    let p = plan_posting(
+        &[(&job.setups[0], &ran)],
+        &job_dir,
+        &dir,
+        None,
+        Some(Programs::Operation),
+    )
+    .unwrap();
     assert!(!p.needs_confirming(), "{:?}", p.refused);
     let names: Vec<String> = p
         .programs
@@ -48,10 +56,88 @@ fn a_posting_writes_a_program_per_operation() {
     assert!(text.contains("G54"));
 
     // Posting again would replace them, and says so first.
-    let again = plan_posting(&[(&job.setups[0], &ran)], &job_dir, &dir, None).unwrap();
+    let again = plan_posting(
+        &[(&job.setups[0], &ran)],
+        &job_dir,
+        &dir,
+        None,
+        Some(Programs::Operation),
+    )
+    .unwrap();
     assert_eq!(again.overwrites.len(), 2);
     assert!(again.needs_confirming());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A setup posted as one program, as it is unless it says otherwise: one
+/// file named after it, every operation in it in order, numbered as the
+/// setup says; one an operation numbered on from it.
+#[test]
+fn a_setup_is_posted_as_one_program() {
+    let (mut job, job_dir, ran) = example();
+    let out = scratch("one");
+    std::fs::create_dir_all(&out).unwrap();
+    let base = include_str!("../../../camcraft-post/profiles/grbl.toml");
+    let numbered = base.replacen("\"({name})\",", "\"(O@number@ {name})\",", 1);
+    assert_ne!(numbered, base);
+    let file = out.join("numbered.toml");
+    std::fs::write(&file, numbered).unwrap();
+    let profile = Some(file.to_str().unwrap());
+    let dir = out.join("programs");
+    job.setups[0].number = 2000;
+    let p = plan_posting(&[(&job.setups[0], &ran)], &job_dir, &dir, profile, None).unwrap();
+    assert_eq!(p.programs.len(), 1);
+    let one = &p.programs[0];
+    assert_eq!(one.path, dir.join("top.nc"));
+    assert_eq!(one.op, "top");
+    assert!(one.text.starts_with("(O2000 top)\n"), "{}", one.text);
+    let rough = one.text.find("(rough - ").unwrap();
+    let finish = one.text.find("(finish - ").unwrap();
+    assert!(rough < finish);
+    assert_eq!(one.text.matches("M30").count(), 1);
+
+    let each = plan_posting(
+        &[(&job.setups[0], &ran)],
+        &job_dir,
+        &dir,
+        profile,
+        Some(Programs::Operation),
+    )
+    .unwrap();
+    let firsts: Vec<&str> = each
+        .programs
+        .iter()
+        .map(|g| g.text.lines().next().unwrap())
+        .collect();
+    assert_eq!(firsts, ["(O2000 top-01-rough)", "(O2001 top-02-finish)"]);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// Each line of a setup's program is of an operation and a move of it, in
+/// order: the header of the first, and each operation's own moves counted
+/// as the operation's.
+#[test]
+fn a_setup_program_says_whose_each_instruction_is() {
+    let (job, _, ran) = example();
+    let profile = load_profile("masso", None).unwrap();
+    let setup = &job.setups[0];
+    let title = Title {
+        name: "top",
+        number: 1,
+        date: None,
+    };
+    let p = setup_program(setup, &ran.result, &profile, &title).unwrap();
+    assert_eq!(p.made.len(), p.report.op_lines.len());
+    assert!(p.made.windows(2).all(|w| w[0] <= w[1]));
+    assert_eq!(p.made.first(), Some(&(0, 0)));
+    let last = ran.result.operations.len() - 1;
+    assert_eq!(
+        p.made.last(),
+        Some(&(last, ran.result.operations[last].path.len()))
+    );
+    for (k, op) in ran.result.operations.iter().enumerate() {
+        assert!(p.made.contains(&(k, op.path.len())), "{}", op.name);
+    }
 }
 
 /// Two setups whose names come to the same file name, as "flip 1" and
@@ -67,6 +153,7 @@ fn two_programs_for_one_file_are_refused() {
         &[(&job.setups[0], &ran), (&other, &ran)],
         &job_dir,
         &dir,
+        None,
         None,
     )
     .unwrap_err()
@@ -85,7 +172,14 @@ fn a_refused_setup_is_named_with_its_failures() {
     ran.result.operations[0].sim.rapid_contacts = 1;
     ran.checks.groups[1].findings[0].level = crate::checks::Level::Fail;
     let dir = scratch("refused");
-    let p = plan_posting(&[(&job.setups[0], &ran)], &job_dir, &dir, None).unwrap();
+    let p = plan_posting(
+        &[(&job.setups[0], &ran)],
+        &job_dir,
+        &dir,
+        None,
+        Some(Programs::Operation),
+    )
+    .unwrap();
     assert_eq!(p.refused.len(), 1);
     assert_eq!(p.refused[0].0, "top");
     assert!(!p.refused[0].1.is_empty());
@@ -98,7 +192,14 @@ fn a_refused_setup_is_named_with_its_failures() {
 fn a_bad_profile_writes_nothing() {
     let (job, job_dir, ran) = example();
     let dir = scratch("bad-profile");
-    let err = plan_posting(&[(&job.setups[0], &ran)], &job_dir, &dir, Some("no-such")).unwrap_err();
+    let err = plan_posting(
+        &[(&job.setups[0], &ran)],
+        &job_dir,
+        &dir,
+        Some("no-such"),
+        None,
+    )
+    .unwrap_err();
     assert!(err.to_string().contains("setup 'top'"), "{err}");
     assert!(!dir.exists());
 }
@@ -262,6 +363,27 @@ fn reads_back_for_every_post(job: &camcraft_core::job::Job, index: usize, ran: &
             }
             moves += op.path.len();
         }
+        // And all of them as one program.
+        let title = Title {
+            name: &setup.name,
+            number: setup.number,
+            date: None,
+        };
+        let joined = setup_program(setup, &ran.result, &profile, &title).unwrap();
+        let specs = setup_specs(setup, &ran.result, &profile).unwrap();
+        let sections: Vec<Section> = specs
+            .iter()
+            .map(|(k, spec)| Section {
+                path: &ran.result.operations[*k].path,
+                spec,
+            })
+            .collect();
+        if let Err(p) = camcraft_post::readback::check_setup(&joined.text, &sections, &profile) {
+            panic!(
+                "{} posted as one for {name} does not read back: {p}",
+                setup.name
+            );
+        }
     }
     moves
 }
@@ -387,10 +509,24 @@ fn custom_gcode_is_posted_beside_its_neighbours_and_travel_is_kept() {
     assert_eq!(blocks[2].1, [CustomGcode::new("signal", "M64 P1")]);
 
     let out = scratch("custom");
-    let p = plan_posting(&[(&job.setups[0], &ran)], &dir, &out, None).unwrap();
+    let p = plan_posting(
+        &[(&job.setups[0], &ran)],
+        &dir,
+        &out,
+        None,
+        Some(Programs::Operation),
+    )
+    .unwrap();
     assert!(p.refused.is_empty(), "{:?}", p.refused);
     assert_eq!(p.programs.len(), 2, "none of its own");
     let finish = &p.programs[1].text;
+    // And as one program, the custom G-code between the two operations.
+    let one = plan_posting(&[(&job.setups[0], &ran)], &dir, &out, None, None).unwrap();
+    let text = &one.programs[0].text;
+    let at = |w: &str| text.find(w).unwrap_or_else(|| panic!("{w} in {text}"));
+    assert!(at("(rough - ") < at("(custom gcode: flip)"));
+    assert!(at("(custom gcode: flip)") < at("(finish - "));
+    assert!(at("(finish - ") < at("(custom gcode: signal)"));
     // Masso numbers its blocks, the custom ones among them.
     assert!(
         finish.contains("(custom gcode: flip)\nN20 M0 (turn T2 round)\n"),
@@ -431,6 +567,7 @@ fn custom_gcode_is_posted_beside_its_neighbours_and_travel_is_kept() {
         &dir,
         &out.join("programs"),
         Some(file.to_str().unwrap()),
+        None,
     )
     .unwrap();
     let (_, why) = &p.refused[0];
@@ -455,6 +592,7 @@ fn custom_gcode_is_posted_beside_its_neighbours_and_travel_is_kept() {
             &dir,
             &out.join("programs"),
             Some(file.to_str().unwrap()),
+            None,
         )
         .unwrap()
     };
