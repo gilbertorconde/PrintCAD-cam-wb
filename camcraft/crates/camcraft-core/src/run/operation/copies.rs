@@ -66,11 +66,16 @@ pub(super) fn each_copy(
 ) -> Result<Option<Paths>, RunError> {
     let op = work.op;
     let pitch = stock.field().pitch();
+    let mut rest = None;
     let planned = match op.strategy {
         StrategySpec::Adaptive {
             direction,
             flat_areas,
-        } => Planned::Adaptive(Adaptive::new(work, direction, flat_areas, limit)?),
+            rest: asked,
+        } => {
+            rest = asked;
+            Planned::Adaptive(Adaptive::new(work, direction, flat_areas, limit)?)
+        }
         StrategySpec::PocketClearing {
             min_ring_length,
             flat_areas,
@@ -115,6 +120,27 @@ pub(super) fn each_copy(
         Planned::Adaptive(_) => Some(Stock::from_blocks(blocks, stock.floor(), pitch)?),
         Planned::Clearing(_) => None,
     };
+    // What the copies start from: the material as it stands, for pocket
+    // clearing and rest machining; else the setup's blocks, so adaptive
+    // clearing's copies see only what each other cut, and the original is
+    // what it is alone.
+    let start = match (&fresh, rest) {
+        (Some(f), None) => f,
+        _ => stock,
+    };
+    let adjustment = rest.map_or(0.0, |r| r.adjustment.max(0.0));
+    // Where the tool reaches at each level, for the adjustment: what is
+    // left there is the rest it would take.
+    let reach: Vec<(f64, Region)> = match &planned {
+        Planned::Adaptive(a) if adjustment > 0.0 => heights
+            .iter()
+            .filter_map(|&z| {
+                let r = a.levels.allowed(z)?.offset(work.tool.cutter_radius(), arc);
+                Some((z, r))
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
     let mut cut: Option<Stock> = None;
     let mut made: Vec<Option<Worked>> = all.iter().map(|_| None).collect();
     for (w, wave) in waves.iter().enumerate() {
@@ -126,7 +152,7 @@ pub(super) fn each_copy(
         );
         let pad = DVec2::splat(work.tool.max_radius() + 2.0 * pitch);
         let (lo, hi) = (lo - pad, hi + pad);
-        let now = cut.as_ref().unwrap_or(stock);
+        let now = cut.as_ref().unwrap_or(start);
         let field = &window(now.field(), lo, hi)?;
         let was = match &fresh {
             Some(f) => Some(window(f.field(), lo, hi)?),
@@ -181,7 +207,17 @@ pub(super) fn each_copy(
                 let turned = c.mirrored();
                 let (path, report) = match &planned {
                     Planned::Adaptive(a) => {
-                        let (p, r) = a.clear(op, &|z| Ok(here(z)), turned)?;
+                        let uncut = |z: f64| {
+                            let m = here(z);
+                            match reach.iter().find(|(h, _)| (h - z).abs() < 1e-9) {
+                                Some((_, r)) if adjustment > 0.0 => {
+                                    thin_left(m, r, adjustment, arc)
+                                }
+                                _ => Ok(m),
+                            }
+                        };
+                        let (p, r) =
+                            a.clear(op, &|z| uncut(z).map_err(StrategyError::from), turned)?;
                         (p, Report::Adaptive(r))
                     }
                     Planned::Clearing(cl) => {
@@ -202,7 +238,7 @@ pub(super) fn each_copy(
         let last = w + 1 == waves.len();
         for (k, m) in done {
             if !last {
-                let stock = cut.get_or_insert_with(|| stock.clone());
+                let stock = cut.get_or_insert_with(|| start.clone());
                 cut_in(stock, &m.moves, work.tool);
             }
             if let Some(slot) = made.get_mut(k) {
@@ -298,6 +334,28 @@ fn waves(footprints: &[(DVec2, DVec2)]) -> Vec<Vec<usize>> {
         }
     }
     out
+}
+
+/// `material` less each piece of what of it `reach` takes that is thinner
+/// than `adjustment` everywhere: rest machining's adjustment, so a sliver
+/// left on a wall is not gone round for nothing, while a corner thicker than
+/// it is cleared whole, its load as it is.
+fn thin_left(
+    material: Region,
+    reach: &Region,
+    adjustment: f64,
+    arc: f64,
+) -> Result<Region, camcraft_geom::contour::RegionError> {
+    let thin: Vec<Region> = material
+        .intersection(reach)?
+        .pieces()
+        .into_iter()
+        .filter(|p| p.offset(-adjustment / 2.0, arc).is_empty())
+        .collect();
+    if thin.is_empty() {
+        return Ok(material);
+    }
+    material.difference(&Region::union_all(&thin)?)
 }
 
 /// The cells of `field` over `lo`..`hi`, at least one, on its own grid.

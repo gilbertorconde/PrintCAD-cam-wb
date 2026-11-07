@@ -194,7 +194,9 @@ pub(super) fn run_operation(
     }
     // A pattern of a strategy the material steers is worked out copy by
     // copy, each against the material where it is.
-    let copied = if op.transform.repeats() {
+    // So is an adaptive clearing that rest machines, alone the one copy.
+    let rests = matches!(op.strategy, StrategySpec::Adaptive { rest: Some(_), .. });
+    let copied = if op.transform.repeats() || rests {
         each_copy(work, limit, stock, &mut warnings)?
     } else {
         None
@@ -258,6 +260,7 @@ pub(super) fn run_operation(
             StrategySpec::Adaptive {
                 direction,
                 flat_areas,
+                ..
             } => adaptive_paths(work, direction, flat_areas, limit, &mut warnings)?,
             StrategySpec::Profile { .. } | StrategySpec::Pocket { .. } => {
                 planar_paths(work, found, &mut warnings)?

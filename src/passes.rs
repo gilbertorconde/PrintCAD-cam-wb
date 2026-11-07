@@ -5,7 +5,8 @@
 
 use camcraft_core::job::{
     ChamferSide, ContourOrder, FaceDirection, Finishing, Operation, PassOrder, RadialDirection,
-    SlotPattern, StrategySpec, TabShape, Tabs, ThreadHand, ToolKind, ToolSpec, TraceDirection,
+    Rest, RestSource, SlotPattern, StrategySpec, TabShape, Tabs, ThreadHand, ToolKind, ToolSpec,
+    TraceDirection,
 };
 use printcad_bench_sdk::api::*;
 use printcad_bench_sdk::serde_json::{self, Value};
@@ -79,6 +80,12 @@ pub struct PassesData {
     pub thread_diameter: Opt,
     #[serde(default = "one_mm")]
     pub thread_passes: f64,
+    /// Adaptive clearing's rest machining: only what the operations before
+    /// it left, rest thinner than the adjustment taken as cleared.
+    #[serde(default)]
+    pub rest: bool,
+    #[serde(default)]
+    pub rest_adjustment: f64,
     pub tabs: bool,
     pub tab_shape: TabShape,
     pub tab_width: f64,
@@ -123,6 +130,8 @@ impl Default for PassesData {
             thread_pitch: one_mm(),
             thread_diameter: Opt::default(),
             thread_passes: 1.0,
+            rest: false,
+            rest_adjustment: 0.0,
             tabs: false,
             tab_shape: tabs.shape,
             tab_width: tabs.width,
@@ -286,6 +295,13 @@ impl PassesData {
                 self.thread_diameter = Opt::of(diameter);
                 self.thread_passes = f64::from(radial_passes);
             }
+            StrategySpec::Adaptive { rest, .. } => {
+                // Off, the adjustment keeps what it was, for when it is on.
+                self.rest = rest.is_some();
+                if let Some(r) = rest {
+                    self.rest_adjustment = r.adjustment;
+                }
+            }
             _ => {}
         }
         if let StrategySpec::MorphedSpiral { centre, .. } = *s {
@@ -405,6 +421,12 @@ impl PassesData {
                 *diameter = self.thread_diameter.get();
                 *radial_passes = self.thread_passes.round().clamp(1.0, 20.0) as u32;
             }
+            StrategySpec::Adaptive { rest, .. } => {
+                *rest = self.rest.then_some(Rest {
+                    source: RestSource::FromPreviousOperations,
+                    adjustment: self.rest_adjustment,
+                });
+            }
             _ => {}
         }
         let uses = op.strategy.uses();
@@ -474,6 +496,12 @@ impl PassesData {
             matches!(s, StrategySpec::Engrave { .. } | StrategySpec::Slot { .. }),
             "depth",
             "Depth",
+            Dim::Length,
+        );
+        add(
+            matches!(s, StrategySpec::Adaptive { .. }) && self.rest,
+            "rest_adjustment",
+            "Rest adjustment",
             Dim::Length,
         );
         let chamfer = matches!(s, StrategySpec::Chamfer { .. });
@@ -683,7 +711,31 @@ pub fn strategy_rows(data: &OperationData, tool: Option<&ToolSpec>, feature: &st
             on: *f,
         });
     }
+    if let StrategySpec::Adaptive { .. } = s {
+        rows.push(Widget::Toggle {
+            id: "passes/rest".into(),
+            label: "Rest machining, from previous operations".into(),
+            on: p.rest,
+        });
+        if p.rest {
+            rows.push(length(
+                "passes/rest_adjustment",
+                "Rest adjustment",
+                p.rest_adjustment,
+            ));
+            rows.push(Widget::Text {
+                text: "Clears only what the operations before it in the setup left. \
+                       Rest thinner than the adjustment is left alone."
+                    .into(),
+                mono: false,
+            });
+        }
+    }
     if let StrategySpec::PocketClearing { .. } = s {
+        rows.push(Widget::Text {
+            text: "Pocket clearing always clears what the operations before it left.".into(),
+            mono: false,
+        });
         rows.push(length(
             "passes/min_ring_length",
             "Shortest ring",
@@ -1218,6 +1270,7 @@ fn put_right(p: &mut PassesData) {
     p.thread_passes = p.thread_passes.round().clamp(1.0, 20.0);
     p.tip_offset = p.tip_offset.max(0.0);
     p.boss_width = p.boss_width.max(0.0);
+    p.rest_adjustment = p.rest_adjustment.max(0.0);
 }
 
 /// A widget of the passes' rows changed: `id` without its `passes/`. Whether it
@@ -1399,6 +1452,45 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// Rest machining, ticked, reaches an adaptive clearing with its
+    /// adjustment and comes back from it; unticked, it is off and the
+    /// adjustment waits.
+    #[test]
+    fn rest_machining_reaches_an_adaptive_clearing() {
+        let mut adaptive = op("adaptive");
+        assert!(matches!(
+            adaptive.operation("").strategy,
+            StrategySpec::Adaptive { rest: None, .. }
+        ));
+        let tick = |on| PanelEvent::Toggle {
+            id: "passes/rest".into(),
+            on,
+        };
+        assert!(passes_event(&mut adaptive, "rest", &tick(true), None));
+        let number = PanelEvent::Number {
+            id: "passes/rest_adjustment".into(),
+            value: 0.3,
+        };
+        assert!(passes_event(
+            &mut adaptive,
+            "rest_adjustment",
+            &number,
+            None
+        ));
+        let cut = adaptive.operation("");
+        let StrategySpec::Adaptive { rest: Some(r), .. } = cut.strategy else {
+            panic!("{:?}", cut.strategy);
+        };
+        assert_eq!(r.adjustment, 0.3);
+        assert_eq!(PassesData::of(&cut), adaptive.passes);
+        assert!(passes_event(&mut adaptive, "rest", &tick(false), None));
+        assert!(matches!(
+            adaptive.operation("").strategy,
+            StrategySpec::Adaptive { rest: None, .. }
+        ));
+        assert_eq!(adaptive.passes.rest_adjustment, 0.3);
     }
 
     /// Chip breaking and tapping reach the operation and come back from it,

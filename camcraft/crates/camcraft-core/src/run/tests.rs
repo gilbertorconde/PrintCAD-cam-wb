@@ -1175,6 +1175,7 @@ fn adaptive_job() -> Job {
     rough.strategy = StrategySpec::Adaptive {
         direction: CutDirection::Climb,
         flat_areas: true,
+        rest: None,
     };
     rough.passes.stepover = 0.6;
     job
@@ -1237,6 +1238,7 @@ fn adaptive_goes_down_a_helix_where_it_cannot_come_from_the_side() {
     op.strategy = StrategySpec::Adaptive {
         direction: crate::job::CutDirection::Climb,
         flat_areas: true,
+        rest: None,
     };
     op.passes.stepover = 0.6;
     let bodies: Bodies<'_> = [("dome", &body)].into_iter().collect();
@@ -1305,6 +1307,7 @@ fn faced_and_cleared(stock: crate::job::StockSpec) -> (SetupResult, [f64; 2]) {
     clear.strategy = StrategySpec::Adaptive {
         direction: CutDirection::Climb,
         flat_areas: false,
+        rest: None,
     };
     clear.passes.stepover = 0.6;
     clear.passes.stock_to_leave = Default::default();
@@ -2075,15 +2078,19 @@ fn adaptive() -> StrategySpec {
     StrategySpec::Adaptive {
         direction: crate::job::CutDirection::Climb,
         flat_areas: true,
+        rest: None,
     }
 }
 
-/// Three adaptive pockets in a row 26 apart, the first over the block's
-/// edge, the last where an operation before already cleared: each copy is
-/// worked out against the material where it is. The middle one, all in the
-/// block, goes down a helix where the first came in from the side, so is no
-/// copy of it and never takes the tool's whole width; the last finds nothing
-/// to clear, where a copy of the first would cut air.
+/// Three adaptive pockets in a row 26 apart, rest machining, the first over
+/// the block's edge, the last where an operation before already cleared:
+/// each copy is worked out against the material where it is. The middle
+/// one, all in the block, goes down a helix where the first came in from the
+/// side, so is no copy of it and never takes the tool's whole width; the
+/// last finds nothing to clear, where a copy of the first would cut air.
+/// Not rest machining, the copies clear the blocks, less what each other
+/// cut: the last clears its square again, and the original is as it is
+/// alone.
 #[test]
 fn a_pattern_of_adaptive_clearing_clears_the_material_where_each_copy_is() {
     use crate::job::{Linear, Pattern};
@@ -2097,9 +2104,14 @@ fn a_pattern_of_adaptive_clearing_clears_the_material_where_each_copy_is() {
         }),
         ..Pattern::default()
     };
+    let resting = StrategySpec::Adaptive {
+        direction: crate::job::CutDirection::Climb,
+        flat_areas: true,
+        rest: Some(crate::job::Rest::default()),
+    };
     let earlier = (12.0, Pattern::default());
-    let patterned = squares_in_a_block(&[earlier, (-40.0, rows)], adaptive());
-    let alone = squares_in_a_block(&[earlier, (-40.0, Pattern::default())], adaptive());
+    let patterned = squares_in_a_block(&[earlier, (-40.0, rows)], resting);
+    let alone = squares_in_a_block(&[earlier, (-40.0, Pattern::default())], resting);
     let before = patterned.keyframes[1].unpack().unwrap();
     let op = &patterned.operations[1];
     assert!(result_is_clean(&patterned), "{:?}", patterned.warnings());
@@ -2170,6 +2182,16 @@ fn a_pattern_of_adaptive_clearing_clears_the_material_where_each_copy_is() {
         "{:?}",
         op.warnings
     );
+
+    let blocks = squares_in_a_block(&[earlier, (-40.0, rows)], adaptive());
+    let unpatterned = squares_in_a_block(&[earlier, (-40.0, Pattern::default())], adaptive());
+    let op = &blocks.operations[1];
+    assert!(result_is_clean(&blocks), "{:?}", blocks.warnings());
+    assert_eq!(
+        cuts_near(&op.path, -40.0),
+        cuts_near(&unpatterned.operations[1].path, -40.0)
+    );
+    assert!(cuts_near(&op.path, 12.0).len() * 2 > cuts_near(&op.path, -14.0).len());
 }
 
 fn result_is_clean(result: &SetupResult) -> bool {
@@ -2273,4 +2295,111 @@ fn a_pattern_of_pocket_clearing_skips_what_is_cleared() {
         near(14.0),
         near(-12.0)
     );
+}
+
+/// The plate of [`squares_in_a_block`], cleared in its 20 mm square by
+/// adaptive clearing with the 6 mm flat kept inside it, then by a 2 mm flat
+/// kept inside it, rest machining as `rest` says.
+fn cleared_again(rest: Option<crate::job::Rest>) -> SetupResult {
+    use crate::job::{Containment, Curve, Segment, StockSpec};
+    let body = Body::derived(synthetic::cuboid(
+        DVec3::new(-40.0, -15.0, 0.0),
+        DVec3::new(40.0, 15.0, 1.0),
+    ));
+    let mut job: Job = toml::from_str(JOB).unwrap();
+    job.setups[0].operations.retain(|op| op.name == "rough");
+    job.stocks[0].spec = StockSpec::AroundModels {
+        models: vec![],
+        margin: [0.0, 0.0, 5.0],
+        below: 0.0,
+    };
+    job.tools.insert("small".into(), flat(2.0));
+    let mut big = job.setups[0].operations.remove(0);
+    big.strategy = adaptive();
+    big.passes.stepover = 0.6;
+    big.passes.stock_to_leave = Default::default();
+    big.boundary.kind = Boundary::Selection;
+    big.boundary.containment = Containment::Inside;
+    big.heights.bottom = Some(Height {
+        reference: HeightRef::ModelTop,
+        offset: 0.0,
+    });
+    let corner = |x: f64, y: f64| [x, y, 6.0];
+    big.selection.curves = vec![Curve {
+        start: corner(-10.0, -10.0),
+        segments: [(10.0, -10.0), (10.0, 10.0), (-10.0, 10.0), (-10.0, -10.0)]
+            .into_iter()
+            .map(|(x, y)| Segment::Line { to: corner(x, y) })
+            .collect(),
+    }];
+    let mut small = big.clone();
+    small.name = "small".into();
+    small.tool = Some("small".into());
+    small.passes.stepover = 0.2;
+    small.strategy = StrategySpec::Adaptive {
+        direction: crate::job::CutDirection::Climb,
+        flat_areas: true,
+        rest,
+    };
+    job.setups[0].operations = vec![big, small];
+    let bodies: Bodies<'_> = [("dome", &body)].into_iter().collect();
+    run_setup(&job, 0, &bodies).unwrap()
+}
+
+/// How far `op` cuts.
+fn cut_length(op: &OperationResult) -> f64 {
+    op.path
+        .moves()
+        .windows(2)
+        .filter(|w| w[1].role == crate::path::toolpath::MoveRole::Cut)
+        .map(|w| w[0].to.distance(w[1].to))
+        .sum()
+}
+
+/// A small adaptive clearing after a big one, rest machining: it clears the
+/// corners the big tool could not reach, not the whole square again, and
+/// takes what is there; left to clear the stock, it cuts the square over.
+/// What is thinner than the adjustment is left alone.
+#[test]
+fn rest_machining_clears_only_what_the_big_tool_left() {
+    use crate::job::Rest;
+    let whole = cleared_again(None);
+    let rest = cleared_again(Some(Rest::default()));
+    let adjusted = cleared_again(Some(Rest {
+        adjustment: 1.5,
+        ..Rest::default()
+    }));
+    for r in [&whole, &rest, &adjusted] {
+        assert!(result_is_clean(r), "{:?}", r.warnings());
+    }
+    let (again, corners) = (&whole.operations[1], &rest.operations[1]);
+    let (all, some) = (cut_length(again), cut_length(corners));
+    assert!(
+        some > 0.0 && some < 0.25 * all,
+        "rest {some} mm against {all}"
+    );
+    // The corners: a 3 mm radius left where a 1 mm one fits, at each of the
+    // square's four, two levels down. Each corner is (3² − π·3²/4) less the
+    // same at 1 mm, about 1.9 mm² less 0.2, at most 5 mm deep.
+    assert!(
+        corners.sim.removed_mm3 > 4.0 * 1.0 * 4.0,
+        "{}",
+        corners.sim.removed_mm3
+    );
+    assert!(
+        corners.sim.removed_mm3 < 4.0 * 2.0 * 5.0,
+        "{}",
+        corners.sim.removed_mm3
+    );
+    // Every cut near a corner, none down the middle of a side.
+    for m in corners.path.moves() {
+        if m.role == crate::path::toolpath::MoveRole::Cut {
+            let p = m.to.truncate().abs();
+            assert!(p.x > 5.0 && p.y > 5.0, "a rest cut at {}", m.to);
+        }
+    }
+    // A corner left by the 6 mm flat is 3 (√2 − 1), 1.24 mm, across at its
+    // thickest: thinner than 1.5, so taken as cleared.
+    let thin = cut_length(&adjusted.operations[1]);
+    assert!(thin < 0.5 * some, "adjusted {thin} mm against {some}");
 }

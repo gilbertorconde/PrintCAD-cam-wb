@@ -598,6 +598,9 @@ impl Operation {
             positive(&field("width"), width)?;
             at_least_zero(&field("tip_offset"), tip_offset)?;
         }
+        if let StrategySpec::Adaptive { rest: Some(r), .. } = self.strategy {
+            at_least_zero(&field("rest.adjustment"), r.adjustment)?;
+        }
         if let StrategySpec::Bore { pitch, .. } = self.strategy {
             positive(&field("pitch"), pitch)?;
         }

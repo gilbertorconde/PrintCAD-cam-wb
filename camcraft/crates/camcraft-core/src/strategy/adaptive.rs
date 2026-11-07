@@ -293,6 +293,14 @@ impl AdaptiveLevels {
         })
     }
 
+    /// Where the tool's centre may be at level `z`, one of [`Self::heights`].
+    pub fn allowed(&self, z: f64) -> Option<&Region> {
+        self.allowed
+            .iter()
+            .find(|(at, _)| (at - z).abs() < 1e-9)
+            .map(|(_, r)| r)
+    }
+
     /// Every level the material is asked for at, flat ones included.
     pub fn heights(&self) -> Vec<f64> {
         self.allowed.iter().map(|(z, _)| *z).collect()

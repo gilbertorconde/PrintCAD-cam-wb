@@ -216,9 +216,21 @@ material at each level as an `Uncut` closure, the blocks' for
 `ClearingLevels` (likewise, its material a `Standing` closure, the
 stock's grid for `pocket_clearing` as before), and each report has `and`.
 Patterned, an adaptive clearing's material is the blocks less where the
-grid stands lower than it did at the start, taken the tolerance wider,
-so it reads what the operations before it cut, which alone it does not;
-a copy that finds nothing is a warning.
+grid stands lower than where its copies start from, taken the tolerance
+wider; a copy that finds nothing is a warning.
+
+And rest machining, Fusion's, on adaptive clearing.
+`StrategySpec::Adaptive` has `rest` (`job::Rest`: `source`, a
+`RestSource`, only from previous operations so far, and `adjustment`, in
+mm, at least zero; none, off, the default). On, the operation is worked
+out as a pattern's one copy is, its material the blocks less what the
+operations before it cut, read from the grid as it stands; off, a
+pattern's copies start from the blocks, so they see only what each other
+cut and the original is what it is alone. Each piece of what is left
+within the tool's reach at a level (`AdaptiveLevels::allowed`, grown by
+its radius) that is thinner than the adjustment everywhere is taken as
+cleared. Pocket clearing already reads the material as it stands, so has
+no such choice.
 
 And a machine's own blocks, its travel, and Custom G-code. In
 `camcraft-post`, `placeholder` fills `@name@` placeholders (the program,
