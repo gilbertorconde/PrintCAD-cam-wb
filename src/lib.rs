@@ -1039,7 +1039,9 @@ impl Bench for Cam {
                             "post",
                             ParamKind::String,
                             false,
-                            "grbl, masso, masso-inch, centroid-avid, centroid-avid-inch, linuxcnc or linuxcnc-inch",
+                            "grbl, masso, masso-inch, centroid-avid, centroid-avid-inch, \
+                             linuxcnc, linuxcnc-inch, fanuc, fanuc-inch, haas, haas-inch, \
+                             mach, mach-inch, heidenhain or heidenhain-inch",
                         ),
                         param(
                             "wcs",

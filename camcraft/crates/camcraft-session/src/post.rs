@@ -10,7 +10,8 @@
 use std::path::{Path, PathBuf};
 
 use camcraft_core::job::Setup;
-use camcraft_core::run::{Made, OperationResult, StrategyDetail};
+use camcraft_core::run::{Made, OperationResult, SetupResult, StrategyDetail};
+use camcraft_core::setup::bounds_all;
 use camcraft_core::setup::frame::Frame;
 use camcraft_post::op::{CustomGcode, DrillCycles, LowerError, ProgramSpec, extents, lower};
 use camcraft_post::profile::{Placement, Profile, TravelCheck};
@@ -119,9 +120,30 @@ pub fn program_spec(
         tilt: (z != glam::DVec3::Z && (frame.turn.square().is_none() || !rotary.is_empty()))
             .then_some(z),
         rotary,
+        next_tool: None,
+        stock: None,
         before: Vec::new(),
         after: Vec::new(),
     })
+}
+
+/// For each of a setup's operations, as run, the tool the program after its
+/// own changes to: the next operation's with a program, if one has.
+pub fn next_tools(ops: &[OperationResult]) -> Vec<Option<u32>> {
+    (0..ops.len())
+        .map(|k| {
+            ops.iter()
+                .skip(k + 1)
+                .find(|op| op.made.has_paths())
+                .map(|op| op.tool_number)
+        })
+        .collect()
+}
+
+/// A setup's stock as a box, its lowest and highest corners in the setup's
+/// frame, the programs' coordinates: for a control that draws it.
+pub fn stock_box(result: &SetupResult) -> Option<(DVec3, DVec3)> {
+    bounds_all(&result.stocks).map(|b| (b.min, b.max))
 }
 
 /// For each of a setup's operations, as run (`ops`), the custom G-code
@@ -279,6 +301,8 @@ pub fn plan_posting(
             out.refused.push((setup.name.clone(), why));
         }
         let custom = custom_gcode(setup, &ran.result.operations);
+        let next = next_tools(&ran.result.operations);
+        let stock = stock_box(&ran.result);
         // An operation turned off or left out of the run has no program.
         let made = ran.result.operations.iter().enumerate();
         for (k, op) in made.filter(|(_, op)| op.made.has_paths()) {
@@ -289,6 +313,8 @@ pub fn plan_posting(
                 spec.before.clone_from(before);
                 spec.after.clone_from(after);
             }
+            spec.next_tool = next.get(k).copied().flatten();
+            spec.stock = stock;
             let (text, report) = program_with(op, &spec, &loaded, &name).map_err(in_setup)?;
             let path = dir.join(format!("{name}.{}", loaded.extension));
             let whose = format!("setup '{}' operation '{}'", setup.name, op.name);

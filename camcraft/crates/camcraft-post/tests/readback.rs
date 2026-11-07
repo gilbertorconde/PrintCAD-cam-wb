@@ -301,6 +301,87 @@ fn faults_are_caught() {
             "G90 G94 G17 G41",
             "G41 is not understood",
         ),
+        // Mach told arc centres are absolute.
+        (
+            "mach",
+            Mm,
+            "G90 G94 G91.1",
+            "G90 G94 G90.1",
+            "not a whole number",
+        ),
+        // Haas's smoothing tolerance with no smoothing.
+        ("haas", Mm, "G90 G94 G17", "G90 G94 G17 E0.01", "E word"),
+        // Klartext: an arc the wrong way round, its centre elsewhere.
+        (
+            "heidenhain",
+            Mm,
+            "C X+12 Y+11.5 DR-",
+            "C X+12 Y+11.5 DR+",
+            "strays",
+        ),
+        ("heidenhain", Mm, "CC X+12 Y+9.5", "CC X+11 Y+9.5", "strays"),
+        // A helix the wrong way, and turning against its DR.
+        (
+            "heidenhain",
+            Mm,
+            "IPA+180 IZ-0.5 DR+ F400",
+            "IPA-180 IZ-0.5 DR- F400",
+            "strays",
+        ),
+        (
+            "heidenhain",
+            Mm,
+            "IPA+180 IZ-0.5 DR+ F400",
+            "IPA+180 IZ-0.5 DR- F400",
+            "IPA and DR turn different ways",
+        ),
+        // A cut made a rapid, the wrong feed, in tenths of an inch.
+        (
+            "heidenhain",
+            Mm,
+            "L X+10 R0 F1200",
+            "L X+10 R0 FMAX",
+            "a rapid where the path cuts",
+        ),
+        (
+            "heidenhain-inch",
+            Inch,
+            "L X+0.3937 R0 F472.4",
+            "L X+0.3937 R0 F47.2",
+            "feeds at 119.888",
+        ),
+        // The wrong tool, the wrong preset, inches read as millimetres.
+        (
+            "heidenhain",
+            Mm,
+            "TOOL CALL 3 Z",
+            "TOOL CALL 4 Z",
+            "before tool 3 is in",
+        ),
+        ("heidenhain", Mm, "Q339=+1", "Q339=+2", "G54 is selected"),
+        (
+            "heidenhain-inch",
+            Inch,
+            "BEGIN PGM readback INCH",
+            "BEGIN PGM readback MM",
+            "on its way to the path's start",
+        ),
+        // Not raised before the change; the spindle not started; no end.
+        (
+            "heidenhain",
+            Mm,
+            "4 L Z+0 R0 FMAX M91\n",
+            "",
+            "goes across at a height not known",
+        ),
+        ("heidenhain", Mm, "8 M3\n", "", "before the spindle turns"),
+        (
+            "heidenhain",
+            Mm,
+            "29 END PGM readback MM\n",
+            "",
+            "no END PGM",
+        ),
     ];
     for &(profile, units, from, to, said) in faults {
         let (text, path, spec, profile) = broken(profile, units, from, to);
@@ -661,4 +742,103 @@ fn custom_gcode_reads_back_and_cannot_hide_a_move() {
     let moved = lines.join("\n") + "\n";
     let p = check(&moved, &path, &unread, &profile).unwrap_err();
     assert!(p.what.contains("before tool 3 is in"), "{p}\n{moved}");
+}
+
+/// Faults in Klartext's drilling cycles: back only to the set-up clearance
+/// between holes, pecks too deep, a hole drilled past its bottom or not to
+/// it, no pause at the bottom, a tap with its hand against the spindle's.
+#[test]
+fn heidenhain_cycle_faults_are_caught() {
+    let mut profile = Profile::builtin("heidenhain").unwrap().unwrap();
+    profile.drill_cycles = true;
+    let faults: &[(ProgramSpec, &str, &str, &str)] = &[
+        (
+            drilling(Some(2.0), None),
+            "Q204=+15",
+            "Q204=+2",
+            "below the clearance height",
+        ),
+        (
+            drilling(Some(2.0), None),
+            "Q202=+2 ",
+            "Q202=+5 ",
+            "pecks deeper",
+        ),
+        (chip_breaking(), "Q202=+2 ", "Q202=+4 ", "pecks deeper"),
+        (
+            drilling(None, None),
+            "Q201=-6.5",
+            "Q201=-7",
+            "past its bottom",
+        ),
+        (
+            drilling(None, None),
+            "Q201=-6.5",
+            "Q201=-6",
+            "before hole 1 is drilled to its bottom",
+        ),
+        (
+            drilling(None, Some(0.5)),
+            "Q211=+0.5",
+            "Q211=+0",
+            "no pause of 0.5 s",
+        ),
+        (
+            tapping(ThreadHand::Right),
+            "Q239=+1.25",
+            "Q239=-1.25",
+            "without the spindle turning M4",
+        ),
+        (
+            tapping(ThreadHand::Right),
+            "Q239=+1.25",
+            "Q239=+1.4",
+            "drills at 700.000",
+        ),
+        (
+            drilling(None, None),
+            "L X+30 Y+10 R0 FMAX M99",
+            "L X+31 Y+10 R0 FMAX M99",
+            "where hole 2 is",
+        ),
+    ];
+    for (spec, from, to, said) in faults {
+        let text = post(&Toolpath::new(), spec, &profile);
+        assert_eq!(text.matches(from).count(), 1, "{from:?}:\n{text}");
+        check(&text, &Toolpath::new(), spec, &profile).unwrap();
+        let text = text.replace(from, to);
+        match check(&text, &Toolpath::new(), spec, &profile) {
+            Ok(()) => panic!("{from:?} made {to:?} was not caught:\n{text}"),
+            Err(p) => assert!(p.to_string().contains(said), "{p}\n{text}"),
+        }
+    }
+}
+
+/// Fanuc's and Haas's work offsets past G59, `G54.1 P..` and `G154 P..`,
+/// are selected and read back as the setup's; another P is caught.
+#[test]
+fn extended_work_offsets_read_back() {
+    for (name, wcs, word, other) in [
+        ("fanuc", 61, "G54.1 P2", "G54.1 P3"),
+        ("fanuc-inch", 107, "G54.1 P48", "G54.1 P47"),
+        ("haas", 60, "G154 P1", "G154 P2"),
+        ("haas-inch", 158, "G154 P99", "G154 P98"),
+    ] {
+        let profile = Profile::builtin(name).unwrap().unwrap();
+        let spec = ProgramSpec {
+            wcs,
+            extended_offsets: u8::try_from(profile.extended_offsets.len()).unwrap(),
+            units: profile.units,
+            ..spec()
+        };
+        let text = post(&fixture(), &spec, &profile);
+        assert_eq!(text.matches(&format!("\n{word}\n")).count(), 1, "{text}");
+        check(&text, &fixture(), &spec, &profile).unwrap();
+        let wrong = text.replace(&format!("\n{word}\n"), &format!("\n{other}\n"));
+        let p = check(&wrong, &fixture(), &spec, &profile).unwrap_err();
+        assert!(
+            p.to_string().contains(&format!("{word} is selected")),
+            "{p}"
+        );
+    }
 }

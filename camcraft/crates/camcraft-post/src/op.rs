@@ -64,6 +64,15 @@ pub enum Op {
     Units(ProgramUnits),
     /// Select a work offset, 54 for `G54`.
     WorkOffset(u8),
+    /// The stock, a box from its lowest corner to its highest in the
+    /// program's coordinates, in millimetres: for a control that draws the
+    /// part as it cuts it (Heidenhain's `BLK FORM`). Nothing moves.
+    Stock {
+        /// The lowest corner.
+        low: DVec3,
+        /// The highest corner.
+        high: DVec3,
+    },
     /// Change to a tool.
     ToolChange {
         /// Tool number.
@@ -71,6 +80,9 @@ pub enum Op {
         /// Description for the operator.
         comment: String,
     },
+    /// Call up the tool the next program changes to, so the changer has it
+    /// ready, where the profile does (`preselect_tool`).
+    PreSelect(u32),
     /// Start the spindle.
     SpindleOn {
         /// Speed in rev/min.
@@ -213,6 +225,13 @@ pub struct ProgramSpec {
     /// Where the machine's rotaries go before it cuts: empty for a machine
     /// without them, whose part is fixtured tilted by hand.
     pub rotary: Vec<RotaryAt>,
+    /// The tool the program after this one changes to, if one does: called
+    /// up after the change where the profile does (`preselect_tool`).
+    pub next_tool: Option<u32>,
+    /// The stock, its lowest and highest corners in the program's
+    /// coordinates, in millimetres, where it is known: for a control that
+    /// draws the part as it cuts it.
+    pub stock: Option<(DVec3, DVec3)>,
     /// Custom G-code written before the operation's own start: the Custom
     /// G-code operations just before it in its setup.
     pub before: Vec<CustomGcode>,
@@ -259,6 +278,8 @@ impl Default for ProgramSpec {
             taps: false,
             tilt: None,
             rotary: Vec::new(),
+            next_tool: None,
+            stock: None,
             before: Vec::new(),
             after: Vec::new(),
         }
@@ -353,6 +374,9 @@ pub fn lower_counted(
     // would print it twice in every file.
     let mut out = Vec::with_capacity(path.len() + 16);
     out.push(Op::Units(spec.units));
+    if let Some((low, high)) = spec.stock {
+        out.push(Op::Stock { low, high });
+    }
     // Custom G-code may have turned the coolant on; the operation's start
     // stops the spindle itself.
     out.extend(spec.before.iter().cloned().map(Op::Custom));
@@ -374,6 +398,9 @@ pub fn lower_counted(
         tool: spec.tool,
         comment: spec.tool_comment.clone(),
     });
+    if let Some(next) = spec.next_tool.filter(|n| *n != spec.tool) {
+        out.push(Op::PreSelect(next));
+    }
     out.push(Op::WorkOffset(spec.wcs));
     if !spec.rotary.is_empty() {
         out.push(Op::Rotary(spec.rotary.clone()));
