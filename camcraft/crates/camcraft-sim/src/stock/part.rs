@@ -82,6 +82,23 @@ impl PartSurface {
         self.field.sample(x, y)
     }
 
+    /// The same part moved up or down by `dz` at the middle of each column,
+    /// as the stock it is cut from is when that is probed to be uneven
+    /// ([`Stock::warped`](super::Stock::warped)).
+    #[must_use]
+    pub fn warped(mut self, dz: impl Fn(DVec2) -> f64) -> Self {
+        for wy in 0..self.field.ny() {
+            for wx in 0..self.field.nx() {
+                let (Some(h), Some(p)) = (self.field.get(wx, wy), self.field.position(wx, wy))
+                else {
+                    continue;
+                };
+                self.field.set(wx, wy, h + dz(p));
+            }
+        }
+        self
+    }
+
     /// Judge gouges allowing `reach` across as well as down: see the type's docs.
     #[must_use]
     pub fn reaching(mut self, reach: f64) -> Self {

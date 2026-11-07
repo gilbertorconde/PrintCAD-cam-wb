@@ -1779,3 +1779,206 @@ fn what_a_setup_left_is_kept_for_the_next() {
     let why = answer(&broken).unwrap_err();
     assert!(why.contains("carries on from"), "{why}");
 }
+
+/// The hinge jig probed over its stock's top, on LinuxCNC and GRBL: a
+/// G38.2 a point, no spindle, LinuxCNC logging to a file named after the
+/// operation. Masso's probing is not known, so it is a failed check that
+/// names the posts that probe.
+fn probe_job(post: &str) -> Request {
+    let job = JOB
+        .replace("post = \"grbl\"", &format!("post = \"{post}\""))
+        .replace(
+            "[tools.flat-6]",
+            "[tools.probe]\nkind = \"probe\"\ndiameter = 2.0\nnumber = 9\n\n[tools.flat-6]",
+        )
+        .replace(
+            "name = \"rough\"\nstrategy = \"pocket-clearing\"\ntool = \"flat-6\"\n\
+             passes = { stepdown = 3.0, stepover = 3.0 }",
+            "name = \"Probe grid\"\nstrategy = \"probe\"\ntool = \"probe\"\n\
+             x_count = 4\ny_count = 3",
+        );
+    Request {
+        version: VERSION,
+        job,
+        shapes: BTreeMap::from([(
+            "part".to_string(),
+            Shape {
+                text: native("hinge_jig.step"),
+                placement: IDENTITY,
+            },
+        )]),
+        max_points: 0,
+        ..Request::default()
+    }
+}
+
+#[test]
+fn a_probe_grid_posts_on_the_controllers_that_probe() {
+    let run = answer(&probe_job("linuxcnc")).unwrap();
+    for f in run.findings.iter().filter(|f| f.level == Level::Fail) {
+        eprintln!("{f:?}");
+    }
+    assert!(run.passed);
+    let op = &run.operations[0];
+    assert!(
+        op.summary.contains("12 point(s) probed, 4 x 3"),
+        "{}",
+        op.summary
+    );
+    let text = &op.program.as_ref().unwrap().text;
+    assert!(text.contains("(PROBEOPEN probe-grid.txt)"), "{text}");
+    assert!(text.contains("(PROBECLOSE)"), "{text}");
+    assert_eq!(text.matches("G38.2").count(), 12, "{text}");
+    assert!(
+        !text.lines().any(|l| l.ends_with(" M3")),
+        "a probe is not turned: {text}"
+    );
+
+    let run = answer(&probe_job("grbl")).unwrap();
+    assert!(run.passed);
+    let text = &run.operations[0].program.as_ref().unwrap().text;
+    assert_eq!(text.matches("G38.2").count(), 12, "{text}");
+    assert!(!text.contains("PROBEOPEN"), "{text}");
+
+    let refused = answer(&probe_job("masso")).unwrap();
+    assert!(!refused.passed);
+    let said = &refused.findings[0];
+    assert!(said.text.contains("cannot probe"), "{said:?}");
+    assert!(
+        said.text.contains("LinuxCNC") && said.text.contains("GRBL"),
+        "{said:?}"
+    );
+}
+
+/// The hinge jig roughed with its depths corrected to probe results in a
+/// LinuxCNC log the job names by its path, read by the helper each run:
+/// the roughing follows them, and still verifies. A file that is not there
+/// is said.
+#[test]
+fn depths_are_corrected_to_a_probe_log_named_by_its_path() {
+    let dir = std::env::temp_dir().join(format!("cam-helper-probe-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = dir.join("probe.txt");
+    // Two by two over the jig, 0.2 mm higher at the back: X Y Z A B C U V W.
+    let mut text = String::new();
+    for (x, y, z) in [
+        (-10.0, -10.0, 0.0),
+        (200.0, -10.0, 0.0),
+        (200.0, 200.0, 0.2),
+        (-10.0, 200.0, 0.2),
+    ] {
+        text.push_str(&format!("{x:.6} {y:.6} {z:.6} 0 0 0 0 0 0\n"));
+    }
+    std::fs::write(&log, text).unwrap();
+    let corrected = |file: &str| Request {
+        job: JOB.replace(
+            "programs = \"operation\"",
+            &format!(
+                "programs = \"operation\"\nz_correction = {{ file = \"{file}\", segment = 2.0 }}"
+            ),
+        ),
+        ..probe_job("linuxcnc")
+    };
+    let mut request = corrected(&log.display().to_string());
+    request.job = request
+        .job
+        .replace("post = \"grbl\"", "post = \"linuxcnc\"");
+    let run = answer(&request).unwrap();
+    for f in run.findings.iter().filter(|f| f.level == Level::Fail) {
+        eprintln!("{f:?}");
+    }
+    assert!(
+        run.notes
+            .iter()
+            .any(|n| n.contains("corrected to the probed surface: 2 x 2")),
+        "{:?}",
+        run.notes
+    );
+    assert!(run.passed);
+    assert!(run.operations[0].program.is_some());
+
+    // A probe in the corrected setup is left as it is, and its rapids are
+    // not taken to go through a part the surface has moved.
+    let probing = probe_job("linuxcnc");
+    let run = answer(&Request {
+        job: probing.job.replace(
+            "programs = \"operation\"",
+            &format!(
+                "programs = \"operation\"\nz_correction = {{ file = \"{}\" }}",
+                log.display()
+            ),
+        ),
+        ..probing
+    })
+    .unwrap();
+    for f in run.findings.iter().filter(|f| f.level == Level::Fail) {
+        eprintln!("{f:?}");
+    }
+    assert!(run.passed);
+
+    // The sheet lists the probe and the results the depths follow, and the
+    // probe takes as long as its moves.
+    let layout = run.layout.as_ref().unwrap();
+    assert!(
+        layout
+            .probe
+            .as_deref()
+            .is_some_and(|p| p.contains("probe.txt: 2 x 2")),
+        "{layout:?}"
+    );
+    assert!(
+        run.tools.iter().any(|t| t.kind == "probe"),
+        "{:?}",
+        run.tools
+    );
+    let probe = &run.operations[0];
+    let notes = &probe.cutting.as_ref().unwrap().notes;
+    assert!(
+        notes.iter().any(|n| n == "points logged to probe-grid.txt"),
+        "{notes:?}"
+    );
+    assert!(probe.seconds > 0.0);
+    assert!((run.machining.moves - probe.seconds).abs() < 1e-6);
+
+    // In one program with the roughing it corrects, it fails: the roughing
+    // would follow the results loaded before, not what it probes.
+    let joined = probing_rough(&log.display().to_string());
+    let run = answer(&joined).unwrap();
+    assert!(!run.passed);
+    let said = run.findings.iter().find(|f| f.code == "CC112").unwrap();
+    assert_eq!(said.level, Level::Fail, "{said:?}");
+    assert!(
+        said.text.contains("Probe grid probes in the same program"),
+        "{said:?}"
+    );
+    // One program an operation, it passes.
+    let apart = Request {
+        job: joined
+            .job
+            .replace("programs = \"setup\"", "programs = \"operation\""),
+        ..joined
+    };
+    let run = answer(&apart).unwrap();
+    assert!(
+        run.findings.iter().all(|f| f.level != Level::Fail),
+        "{:?}",
+        run.findings
+    );
+
+    let missing = dir.join("never-probed.txt");
+    let e = answer(&corrected(&missing.display().to_string())).unwrap_err();
+    assert!(e.contains("cannot read the probe results"), "{e}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The hinge jig probed, then roughed, in one program, its depths
+/// corrected to the probe log at `file`.
+fn probing_rough(file: &str) -> Request {
+    let mut request = probe_job("linuxcnc");
+    request.job = request.job.replace(
+        "programs = \"operation\"",
+        &format!("programs = \"setup\"\nz_correction = {{ file = \"{file}\" }}"),
+    ) + "\n[[setup.operation]]\nname = \"rough\"\nstrategy = \"pocket-clearing\"\n\
+           tool = \"flat-6\"\npasses = { stepdown = 3.0, stepover = 3.0 }\n";
+    request
+}

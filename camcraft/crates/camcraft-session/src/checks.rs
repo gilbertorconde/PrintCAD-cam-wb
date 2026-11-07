@@ -23,8 +23,9 @@
 use camcraft_core::cutter::allowance::{Allowance, EffectiveTool};
 use camcraft_core::cutter::dropcutter::{DropCutter, DropTest};
 use camcraft_core::cutter::tool::ToolProfile;
-use camcraft_core::job::{Job, Piece};
+use camcraft_core::job::{Job, Piece, Programs, Setup};
 use camcraft_core::path::toolpath::{MoveRole, PLUNGE_RATIO, Toolpath};
+use camcraft_core::probe::ProbeMap;
 use camcraft_core::run::{Made, OperationResult, StrategyDetail};
 use camcraft_core::strategy::parallel::ParallelReport;
 use camcraft_geom::mesh::TriMesh;
@@ -125,6 +126,8 @@ impl Finding {
 ///
 /// `part` is the part as the setup machined it, in the setup's frame; `setup` is
 /// its index in `job`; `model_warnings` are the models' own, reported as they are.
+// Each is a different part of what was run; bundling them would only hide which.
+#[allow(clippy::too_many_arguments)]
 pub fn check(
     job: &Job,
     setup: usize,
@@ -133,6 +136,7 @@ pub fn check(
     verify: &VerifyReport,
     verify_budget: f64,
     model_warnings: &[String],
+    probed: Option<&ProbeMap>,
 ) -> Checks {
     let mut groups = Vec::with_capacity(operations.len() + 1);
     groups.push(Group {
@@ -141,7 +145,16 @@ pub fn check(
             .setups
             .get(setup)
             .map_or_else(|| "setup".to_string(), |s| format!("setup {}", s.name)),
-        findings: sorted(setup_findings(verify, verify_budget, model_warnings)),
+        findings: sorted(
+            setup_findings(verify, verify_budget, model_warnings)
+                .into_iter()
+                .chain(
+                    job.setups
+                        .get(setup)
+                        .and_then(|s| joined_probe(s, operations, probed)),
+                )
+                .collect(),
+        ),
     });
     let ops = job.setups.get(setup).map(|s| &s.operations);
     let cutter = DropCutter::new(part);
@@ -162,7 +175,13 @@ pub fn check(
                 findings: sorted(operation_findings(
                     op,
                     tool.as_ref(),
-                    &cutter,
+                    // A probe's path is not corrected: it touches the
+                    // surface wherever it is, from above the part as
+                    // modelled.
+                    (
+                        &cutter,
+                        probed.filter(|_| !matches!(op.detail, StrategyDetail::Probe(_))),
+                    ),
                     job.tolerance,
                 )),
             }
@@ -291,6 +310,44 @@ fn holder_findings(op: &OperationResult, out: &mut Vec<Finding>) {
     }
 }
 
+/// CC112: a setup corrected to probe results, posted as one program with a
+/// probe in it and cuts corrected to its results. The program would probe
+/// and then cut to the results loaded before it ran, not to what it probed:
+/// right only if nothing moved since, and a probe for nothing at best. So it
+/// fails, as a program that cuts the wrong depths would; Save anyway is
+/// still there for one who means it. `None` for a setup not corrected.
+fn joined_probe(
+    setup: &Setup,
+    operations: &[OperationResult],
+    probed: Option<&ProbeMap>,
+) -> Option<Finding> {
+    probed?;
+    let is_probe = |op: &&OperationResult| matches!(op.detail, StrategyDetail::Probe(_));
+    let made = || operations.iter().filter(|op| op.made.has_paths());
+    let probe = made().find(is_probe);
+    let cuts = made().filter(|op| !is_probe(op)).count();
+    Some(match probe {
+        Some(p) if setup.programs == Programs::Setup && cuts > 0 => finding(
+            Level::Fail,
+            "CC112",
+            format!(
+                "{} probes in the same program as the cuts corrected to probe results",
+                p.name
+            ),
+            "the cuts follow the results loaded before it ran, not what it probes: post one \
+             program per operation, or put the probe in a setup of its own, and load what it \
+             probed before posting the cuts"
+                .into(),
+        ),
+        _ => finding(
+            Level::Pass,
+            "CC112",
+            "no probe shares a program with the cuts corrected to probe results".into(),
+            String::new(),
+        ),
+    })
+}
+
 fn setup_findings(verify: &VerifyReport, budget: f64, model_warnings: &[String]) -> Vec<Finding> {
     let mut out = Vec::new();
     out.push(if verify.gouged == 0 {
@@ -337,7 +394,7 @@ fn setup_findings(verify: &VerifyReport, budget: f64, model_warnings: &[String])
 fn operation_findings(
     op: &OperationResult,
     tool: Option<&EffectiveTool>,
-    cutter: &DropCutter<'_>,
+    (cutter, probed): (&DropCutter<'_>, Option<&ProbeMap>),
     tolerance: f64,
 ) -> Vec<Finding> {
     let path = &op.path;
@@ -373,7 +430,13 @@ fn operation_findings(
 
     // CC102: the cutter dropped along every rapid, onto the part itself.
     match tool {
-        Some(tool) => out.push(rapids_through_part(path, start, tool, cutter, tolerance)),
+        Some(tool) => out.push(rapids_through_part(
+            path,
+            start,
+            tool,
+            (cutter, probed),
+            tolerance,
+        )),
         None => out.push(finding(
             Level::Fail,
             "CC102",
@@ -611,7 +674,8 @@ fn operation_findings(
         | StrategyDetail::Holes(_)
         | StrategyDetail::Engrave(_)
         | StrategyDetail::VCarve(_)
-        | StrategyDetail::CustomGcode => {}
+        | StrategyDetail::CustomGcode
+        | StrategyDetail::Probe(_) => {}
     }
     if op.links.suspicious_plunges > 0 {
         out.push(finding(
@@ -628,7 +692,8 @@ fn operation_findings(
 }
 
 /// CC102. The cutter, lowered onto the part at points along each rapid, must sit
-/// at or below the rapid.
+/// at or below the rapid. On a setup corrected to a probed surface, the part
+/// is where the surface puts it, as the path is.
 ///
 /// Points are spaced `2 * sqrt(2 R t)` apart for a cutter of radius `R` and a
 /// tolerance `t`. The cutter's discs at neighbouring points then overlap so that
@@ -638,7 +703,7 @@ fn rapids_through_part(
     path: &Toolpath,
     start: DVec3,
     tool: &EffectiveTool,
-    cutter: &DropCutter<'_>,
+    part: (&DropCutter<'_>, Option<&ProbeMap>),
     tolerance: f64,
 ) -> Finding {
     let r = tool.max_radius();
@@ -654,7 +719,7 @@ fn rapids_through_part(
     let mut at = start;
     for (i, m) in path.moves().iter().enumerate() {
         if m.role == MoveRole::Rapid {
-            let over = rapid_depth(at, m.to, tool, cutter, spacing);
+            let over = rapid_depth(at, m.to, tool, part, spacing);
             if over > 1e-3 {
                 hits += 1;
                 deepest = deepest.max(over);
@@ -691,7 +756,7 @@ fn rapid_depth(
     a: DVec3,
     b: DVec3,
     tool: &impl DropTest,
-    cutter: &DropCutter<'_>,
+    (cutter, probed): (&DropCutter<'_>, Option<&ProbeMap>),
     spacing: f64,
 ) -> f64 {
     let length = (b.truncate() - a.truncate()).length();
@@ -702,7 +767,8 @@ fn rapid_depth(
     (0..=steps)
         .filter_map(|k| {
             let p = a.lerp(b, f64::from(k) / f64::from(steps));
-            cutter.drop_at(tool, p.x, p.y).map(|z| z - p.z)
+            let lift = probed.map_or(0.0, |m| m.height(p.truncate()));
+            cutter.drop_at(tool, p.x, p.y).map(|z| z + lift - p.z)
         })
         .fold(0.0, f64::max)
 }

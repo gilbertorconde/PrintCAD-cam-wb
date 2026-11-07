@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{Operation, PointRef, is_default};
+use super::{LengthUnit, Operation, PointRef, is_default};
 use crate::setup::frame::Orientation;
 
 /// How a part is held and machined from one side.
@@ -46,9 +46,81 @@ pub struct Setup {
     /// next.
     #[serde(default = "default_number", skip_serializing_if = "is_default_number")]
     pub number: u32,
+    /// Every cut's depth corrected to a probed surface, when it is given:
+    /// a warped board's, or a single point's, for the work zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub z_correction: Option<ZCorrection>,
     /// Operations, in the order they run.
     #[serde(default, rename = "operation")]
     pub operations: Vec<Operation>,
+}
+
+/// A setup's cut depths corrected to a probed surface: every move of every
+/// operation but a probe's moved up or down by the surface's height there,
+/// as [`crate::probe::correct`] does, and the stock's top and the part taken
+/// to follow it, so the simulation and the checks see the setup as it will
+/// cut.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ZCorrection {
+    /// The probe results: x, y and z of each point probed, in the program's
+    /// coordinates and `units`, as the controller recorded them. Read from
+    /// `file` when there are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub points: Vec<[f64; 3]>,
+    /// The file the results were read from, or are to be: a LinuxCNC probe
+    /// log or a CSV of x, y and z ([`crate::probe::parse`]). Relative to the
+    /// job's folder, or absolute.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// The units the results are in: the program's.
+    #[serde(default = "millimetres", skip_serializing_if = "is_millimetres")]
+    pub units: LengthUnit,
+    /// The longest piece a corrected move is split into, seen from above, in
+    /// millimetres: shorter follows the surface more closely between the
+    /// probed points, in a longer program.
+    #[serde(
+        default = "default_segment",
+        skip_serializing_if = "is_default_segment"
+    )]
+    pub segment: f64,
+}
+
+impl ZCorrection {
+    /// The results as a map, in millimetres; `None` until they are read.
+    pub fn map(&self) -> Option<Result<crate::probe::ProbeMap, crate::probe::ProbeMapError>> {
+        if self.points.is_empty() {
+            return None;
+        }
+        let scale = match self.units {
+            LengthUnit::Mm => 1.0,
+            LengthUnit::Inch => 25.4,
+        };
+        Some(crate::probe::ProbeMap::from_points(&self.points, scale))
+    }
+}
+
+fn millimetres() -> LengthUnit {
+    LengthUnit::Mm
+}
+
+// Serde's `skip_serializing_if` hands the field by reference.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_millimetres(u: &LengthUnit) -> bool {
+    *u == LengthUnit::Mm
+}
+
+/// A millimetre: a board's warp is smooth over that.
+pub const DEFAULT_SEGMENT: f64 = 1.0;
+
+fn default_segment() -> f64 {
+    DEFAULT_SEGMENT
+}
+
+// Serde's `skip_serializing_if` hands the field by reference.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_default_segment(v: &f64) -> bool {
+    (*v - DEFAULT_SEGMENT).abs() < f64::EPSILON
 }
 
 /// How a setup's operations are posted.
@@ -81,6 +153,7 @@ impl Setup {
             origin: Origin::default(),
             programs: Programs::default(),
             number: DEFAULT_NUMBER,
+            z_correction: None,
             operations: Vec::new(),
         }
     }

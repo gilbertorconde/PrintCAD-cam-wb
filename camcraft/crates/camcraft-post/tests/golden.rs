@@ -690,6 +690,45 @@ fn a_setup_stops_between_operations_where_asked() {
     check_setup_against(&p, &sections, "masso-setup-stop");
 }
 
+/// A probe grid on LinuxCNC, its points logged to a file by `PROBEOPEN`, and
+/// on GRBL, which reports them over the serial line: `G38.2` down from over
+/// each point to 3 mm below where it should touch, at the probe's feed,
+/// back up at rapid, the spindle never started. Then on LinuxCNC as the
+/// first operation of a setup, the engraving after it, whose spindle starts
+/// once the probe is put away.
+#[test]
+fn a_probe_grid_is_stable() {
+    let (path, probe) = common::probing(Some("probe.txt"));
+    let linuxcnc = Profile::builtin("linuxcnc").unwrap().unwrap();
+    check_against(&linuxcnc, &path, &probe, "linuxcnc-probe");
+    let (path, probe) = common::probing(None);
+    let grbl = Profile::builtin("grbl").unwrap().unwrap();
+    check_against(&grbl, &path, &probe, "grbl-probe");
+
+    let (path, probe) = common::probing(Some("probe.txt"));
+    let engraving = (
+        engraving(),
+        ProgramSpec {
+            op_name: "engrave".into(),
+            strategy: "engrave".into(),
+            rpm: 12000,
+            coolant: camcraft_core::job::Coolant::Off,
+            ..spec()
+        },
+    );
+    let sections = [
+        Section {
+            path: &path,
+            spec: &probe,
+        },
+        Section {
+            path: &engraving.0,
+            spec: &engraving.1,
+        },
+    ];
+    check_setup_against(&linuxcnc, &sections, "linuxcnc-setup-probe");
+}
+
 /// Every builtin profile must have a golden file. Adding a profile without one
 /// would leave it untested by exactly the test meant to cover it.
 #[test]

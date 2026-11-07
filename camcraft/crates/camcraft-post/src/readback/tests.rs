@@ -42,6 +42,7 @@ fn comments_are_not_words() {
             to: at(1.0, 2.0, 0.0),
             feed: None,
             arc: None,
+            probe: false,
         }]
     );
 }

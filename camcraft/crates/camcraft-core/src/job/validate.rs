@@ -184,6 +184,32 @@ impl Job {
         {
             return Err(JobError::BadWorkOffsetPosition(name.clone()));
         }
+        if let Some(z) = &setup.z_correction {
+            let bad_map = |why: String| JobError::BadProbeMap {
+                setup: name.clone(),
+                why,
+            };
+            if !is_positive(z.segment) {
+                return Err(bad(
+                    format!("{name}.z_correction.segment"),
+                    z.segment,
+                    "greater than zero",
+                ));
+            }
+            match (z.map(), &z.file) {
+                (Some(Ok(_)), _) => {}
+                (Some(Err(e)), _) => return Err(bad_map(format!("are no map: {e}"))),
+                (None, Some(file)) => {
+                    return Err(bad_map(format!("were never read from {file}")));
+                }
+                (None, None) => {
+                    return Err(bad_map(
+                        "are missing: probe the stock and load the file the controller wrote"
+                            .into(),
+                    ));
+                }
+            }
+        }
         if setup.models.is_empty() {
             return Err(JobError::NoModels(name.clone()));
         }
@@ -359,7 +385,9 @@ impl Operation {
         let (uses, h) = (self.strategy.uses(), &self.heights);
         // The retract height is where a full retraction goes, and where a
         // strategy that stays down goes no higher than.
-        let retract = uses.stay_down || self.linking.retraction == Retraction::Full;
+        let retract = uses.stay_down
+            || self.linking.retraction == Retraction::Full
+            || matches!(self.strategy, StrategySpec::Probe { .. });
         let used = [
             ("clearance", Some(h.clearance)),
             ("retract", retract.then_some(h.retract)),
@@ -612,6 +640,27 @@ impl Operation {
         }
         if let StrategySpec::Bore { pitch, .. } = self.strategy {
             positive(&field("pitch"), pitch)?;
+        }
+        if let StrategySpec::Probe {
+            x_count,
+            y_count,
+            x_spacing,
+            y_spacing,
+            inset,
+            probe_feed,
+            max_depth,
+        } = self.strategy
+        {
+            for (name, count) in [("x_count", x_count), ("y_count", y_count)] {
+                if count == Some(0) {
+                    return Err(bad(field(name), 0.0, "at least one"));
+                }
+            }
+            positive(&field("x_spacing"), x_spacing)?;
+            positive(&field("y_spacing"), y_spacing)?;
+            at_least_zero(&field("inset"), inset)?;
+            positive(&field("probe_feed"), probe_feed)?;
+            positive(&field("max_depth"), max_depth)?;
         }
         if let StrategySpec::Circular { boss_width, .. } = self.strategy {
             at_least_zero(&field("boss_width"), boss_width)?;

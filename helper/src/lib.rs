@@ -21,19 +21,19 @@ use cam_protocol::{
 };
 use camcraft_core::job::{HeightContext, Job, Operation, Outline, Programs};
 use camcraft_core::path::toolpath::{MoveRole, Toolpath};
-use camcraft_core::run::Made;
+use camcraft_core::run::{Made, StrategyDetail};
 use camcraft_core::run::{PLUNGE_RATIO, Stage};
 use camcraft_core::setup::frame::Frame;
 use camcraft_core::setup::{Bodies, Prepared, bounds_all, features, prepare_from};
 use camcraft_geom::mesh::Aabb;
 use camcraft_import::native::load_native;
 use camcraft_post::op::{Op, lower_counted, tilt_notes};
-use camcraft_post::profile::{Profile, Rapid};
+use camcraft_post::profile::{ProbeStyle, Profile, Rapid};
 use camcraft_post::render::{Title, render_program};
 use camcraft_session::checks::Level as CheckLevel;
 use camcraft_session::{
     Model, Models, Ran, custom_gcode, load_profile, next_tools, parse_job, program_spec,
-    run_setup_from, setup_program, setup_program_name, travel_check,
+    read_probe_results, run_setup_from, setup_program, setup_program_name, travel_check,
 };
 use camcraft_sim::stock::{Axis, Block};
 use glam::{DAffine3, DMat4, DVec2, DVec3};
@@ -126,7 +126,10 @@ pub(crate) fn execute(
 ) -> Result<Executed, String> {
     speaks(request)?;
     let started = Instant::now();
-    let job = parse_job(&request.job, "the setup").map_err(|e| e.to_string())?;
+    let mut job = parse_job(&request.job, "the setup").map_err(|e| e.to_string())?;
+    // A script can point a setup at a probe result file by its path, which
+    // the package in its sandbox cannot read: read here, each run.
+    read_probe_results(&mut job, std::path::Path::new("")).map_err(|e| e.to_string())?;
     let setup = job.setups.first().ok_or("the job has no setup")?;
     let ops = setup.operations.len() as u64;
     // Reading the solids, laying out, each operation, verifying, checking,
@@ -294,6 +297,11 @@ pub(crate) fn execute(
                 .get(k)
                 .map_or(0, |o| o.gcode.lines().count());
             format!("{lines} line(s) of custom G-code")
+        } else if let StrategyDetail::Probe(r) = &op.detail {
+            format!(
+                "{} point(s) probed, {} x {}, each up to {} mm below the top",
+                op.passes, r.columns, r.rows, r.max_depth
+            )
         } else {
             format!(
                 "{} passes, {} links stayed down, removed {:.0} mm³",
@@ -309,8 +317,8 @@ pub(crate) fn execute(
                 .iter()
                 .cloned()
                 .chain(
-                    op.made
-                        .has_paths()
+                    // A probe is not turned.
+                    (op.made.has_paths() && op.rpm > 0)
                         .then(|| profile.spindle_problem(op.rpm))
                         .flatten(),
                 )
@@ -326,7 +334,7 @@ pub(crate) fn execute(
                 .operations
                 .get(k)
                 .filter(|_| op.made.has_paths())
-                .and_then(|spec| cutting(spec, op, &drawn)),
+                .and_then(|spec| cutting(spec, op, &drawn, &profile)),
             marks: marks(&ran, k, op, &drawn, elapsed),
             outlines: setup.operations.get(k).and_then(|spec| {
                 let uses = spec.strategy.uses();
@@ -408,6 +416,7 @@ pub(crate) fn execute(
         tilt: tilt.unwrap_or_default(),
         post: profile.name.clone(),
         date: date.clone(),
+        probe: probe_said(setup, &ran),
     });
     let stock = stock_box
         .map(|b| corners(&frame, b))
@@ -475,8 +484,21 @@ fn cutting(
     spec: &Operation,
     op: &camcraft_core::run::OperationResult,
     drawn: &Drawn,
+    profile: &Profile,
 ) -> Option<Cutting> {
     let uses = spec.strategy.uses();
+    let mut notes = strategy_notes(spec);
+    // Where the operator finds what it probed.
+    if matches!(op.detail, StrategyDetail::Probe(_)) {
+        notes.push(match profile.probe {
+            ProbeStyle::G38Logged => format!(
+                "points logged to {}",
+                camcraft_session::probe_log_name(&op.name)
+            ),
+            ProbeStyle::G38 => "points reported by the controller: keep the sender's log".into(),
+            ProbeStyle::Cannot => "this post cannot probe".into(),
+        });
+    }
     let leave = spec.stock_to_leave();
     Some(Cutting {
         strategy: op.strategy.to_string(),
@@ -491,7 +513,7 @@ fn cutting(
         stock_to_leave: (uses.stock_to_leave != camcraft_core::job::Leave::None)
             .then_some([leave.radial, leave.axial]),
         z: drawn.z,
-        notes: strategy_notes(spec),
+        notes,
     })
 }
 
@@ -533,6 +555,30 @@ fn strategy_notes(spec: &Operation) -> Vec<String> {
             Some(b) => format!("pecks of {} mm, backing off {}", mm(*peck), mm(*b)),
             None => format!("pecks of {} mm", mm(*peck)),
         }),
+        StrategySpec::Probe {
+            x_count,
+            y_count,
+            x_spacing,
+            y_spacing,
+            probe_feed,
+            max_depth,
+            ..
+        } => {
+            let way = |count: &Option<u32>, spacing: f64, what: &str| match count {
+                Some(n) => format!("{n} {what}"),
+                None => format!("{what} {} mm apart at most", mm(spacing)),
+            };
+            out.push(format!(
+                "probe grid: {}, {}",
+                way(x_count, *x_spacing, "columns"),
+                way(y_count, *y_spacing, "rows")
+            ));
+            out.push(format!(
+                "G38.2 at {} mm/min, up to {} mm below the top",
+                mm(*probe_feed),
+                mm(*max_depth)
+            ));
+        }
         StrategySpec::Adaptive {
             rest: Some(rest), ..
         } => out.push(if rest.adjustment > 0.0 {
@@ -626,6 +672,24 @@ fn tool_uses(
     out
 }
 
+/// What the setup sheet says of the probe results a setup's depths are
+/// corrected to: their file and their grid; `None` for a setup not
+/// corrected.
+fn probe_said(setup: &camcraft_core::job::Setup, ran: &Ran) -> Option<String> {
+    let z = setup.z_correction.as_ref()?;
+    let file = z.file.as_deref().unwrap_or("probe results");
+    Some(match &ran.result.probe_map {
+        Some(map) => {
+            let (columns, rows) = map.size();
+            let (low, high) = map.heights();
+            format!(
+                "{file}: {columns} x {rows} points, {low:.3} to {high:.3} mm from the work zero"
+            )
+        }
+        None => file.to_string(),
+    })
+}
+
 /// A tool's kind, as a job file names it.
 fn tool_kind(kind: camcraft_core::job::ToolKind) -> &'static str {
     use camcraft_core::job::ToolKind;
@@ -636,6 +700,7 @@ fn tool_kind(kind: camcraft_core::job::ToolKind) -> &'static str {
         ToolKind::Cone => "cone",
         ToolKind::Drill => "drill",
         ToolKind::ThreadMill => "thread-mill",
+        ToolKind::Probe => "probe",
     }
 }
 

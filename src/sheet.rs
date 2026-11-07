@@ -780,6 +780,7 @@ mod tests {
                 tilt: Vec::new(),
                 post: "GRBL".into(),
                 date: "2026-11-07".into(),
+                probe: None,
             }),
             ..Run::default()
         }

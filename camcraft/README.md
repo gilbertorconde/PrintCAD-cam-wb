@@ -488,6 +488,71 @@ it (`Prepared::carried`); `run_prepared_planned` then starts from it
 carried into the setup's frame. `setup::affine_of` makes a turn and a move
 an affine map. In `camcraft-session`, `run_setup_from` runs a setup so.
 
+And probing, and cut depths corrected to what was probed. In
+`camcraft-core`, `ToolKind::Probe` is a touch probe, its ball `diameter`
+across, built as a ball; it is not turned (an operation's `rpm` is 0),
+probes only, and only it probes (`Operation::cannot_use`). A Fusion
+library's probe imports as one. `StrategySpec::Probe` (`x_count`,
+`y_count`, `x_spacing` and `y_spacing`, 10 mm; `inset`, 2 mm;
+`probe_feed`, 50 mm/min; `max_depth`, 3 mm) is a grid over its boundary's
+box (the stock's footprint unless kept to less), `inset` in from it, so
+many columns and rows or as few as keep them no further apart than the
+spacing (`probe::grid_lines`); `probe::probe_path` touches each, back and
+forth along the rows, from the retract height down to the top as a
+`Plunge` at the probe feed and back up at rapid. `run_prepared_planned`
+makes it apart from the cutting operations (`run::probe`), cuts nothing
+with it, and refuses heights that are not clearance above retract above
+top (`StrategyError::ProbeHeights`); `StrategyDetail::Probe` reports its
+grid (`probe::ProbeReport`). A `Setup` has `z_correction`
+(`job::ZCorrection`: the probed `points`, or a `file` to read them from,
+their `units` and a `segment`, 1 mm). `probe::parse` reads a LinuxCNC
+probe log (x y z and the other axes a line) or a CSV of x, y, z, a
+heading and comments passed over and anything else refused;
+`probe::ProbeMap` makes them a grid in any order (columns and rows within
+0.01 mm one), refusing points that are not one (`ProbeMapError`), and
+interpolates it bilinearly, outside it at its nearest edge, a grid of one
+column or row level across it. `probe::correct` moves every move by the
+map: a straight feeding move split no longer than the segment seen from
+above, an arc cut into chords and split likewise unless the map is level
+under it, when it stays an arc, and a rapid at its end; it counts the
+points outside the map. With a correction, an operation is planned as
+before, against the stock as modelled, and once every one is, each is
+corrected (but a probe) and cut again, in order, into a stock whose top is
+moved by the map (`Stock::warped`, in `camcraft-sim`); the keyframes are
+that stock's, the part is moved too (`PartSurface::warped`) before it is
+verified, a drill's holes for its cycles (`probe::correct_holes`), and an
+operation that goes outside the map says how far. A kept operation is
+worked out again. The holder is watched again on the corrected paths, against the part
+moved likewise (`cut_kept`), and a setup that carries on from an earlier
+one's material starts the corrected pass from that material, moved.
+`SetupResult::probe_map` is the map, and in `camcraft-session` the CC102
+check lowers the cutter onto the part where the map puts it (but for a
+probe's own rapids, which are not corrected), CC112 fails a probe posted
+in one program with the cuts corrected to probe results, which would
+follow what was probed before, not what it probes; `read_probe_results` reads a setup's `file` relative to
+the job (`SessionError::ProbeIo`), and the run's notes say what the map
+is. `JobError::BadProbeMap` refuses results that are no map, or missing.
+In `camcraft-post`, a profile's `probe` (`ProbeStyle`) says how its
+controller probes: `"g38.2"` (`G38.2`, the point reported by the
+controller, as GRBL does over its serial line), `"g38.2-probeopen"`
+(`G38.2`, each point logged by the controller to the file `(PROBEOPEN
+name)` opens, until `(PROBECLOSE)`, as LinuxCNC does) or `"none"`, the
+default, which a Heidenhain profile must be. GRBL's profile probes, and
+LinuxCNC's log. `ProgramSpec::probe` (`op::Probing`: `depth`, and the
+`log` file) makes lowering write each plunge as `Op::Probe`, `depth`
+below where the path expects to touch, between `Op::ProbeOpen` and
+`Op::ProbeClose`, and no spindle or coolant, in a program of its own or
+a setup's. `readback` reads `G38.2` (`Motion::probe`), and `check` takes
+a probe's plunge as a straight-down `G38.2` from above it to below it at
+its feed, the spindle stopped, and the move after it from where it
+touched, which is not known, straight up. In `camcraft-session`,
+`program_spec` posts a probe operation as its profile probes, its log
+named after the operation (`probe_log_name`), and refuses one for a
+profile that cannot (`LowerError::CannotProbe`, naming those that can,
+`Profile::builtin_probing`). Golden programs: `linuxcnc-probe.nc`,
+`grbl-probe.nc` and `linuxcnc-setup-probe.nc`, the probe before an
+engraving in one program.
+
 And one test: ogeom is 0.11.1 here, which printCAD's shapes need, and it
 meshes `round_edge_loose_fit.step`'s seam that 0.11.0 drew off the torus, so
 `a_loose_fit_is_refused_for_ogeoms_seam` became

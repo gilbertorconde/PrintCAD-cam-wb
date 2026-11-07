@@ -35,6 +35,7 @@
 pub mod cutter;
 pub mod job;
 pub mod path;
+pub mod probe;
 /// The material at any point in a finished job, for showing and for playback.
 pub mod replay;
 pub mod run;

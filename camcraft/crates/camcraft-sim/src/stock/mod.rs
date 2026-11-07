@@ -453,6 +453,27 @@ impl Stock {
         Ok(HeightMap::covering(min, max, pitch, floor)?)
     }
 
+    /// The same stock with its top moved up or down by `dz` at the middle of
+    /// each column that has material, as a surface probed to be uneven
+    /// says it is: never below the floor. Where there is no material there
+    /// is still none.
+    #[must_use]
+    pub fn warped(mut self, dz: impl Fn(DVec2) -> f64) -> Self {
+        let floor = self.floor;
+        for iy in 0..self.field.ny() {
+            for ix in 0..self.field.nx() {
+                let (Some(h), Some(p)) = (self.field.get(ix, iy), self.field.position(ix, iy))
+                else {
+                    continue;
+                };
+                if h > floor {
+                    self.field.set(ix, iy, (h + dz(p)).max(floor));
+                }
+            }
+        }
+        self
+    }
+
     /// The material height field.
     pub fn field(&self) -> &HeightMap {
         &self.field

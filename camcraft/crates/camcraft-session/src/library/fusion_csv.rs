@@ -238,6 +238,7 @@ impl Row<'_> {
             "chamfer mill" | "spot drill" => ToolKind::Cone,
             "drill" => ToolKind::Drill,
             "thread mill" => ToolKind::ThreadMill,
+            "probe" => ToolKind::Probe,
             "" => return Err("no tool type".into()),
             other => return Err(format!("'{other}' tools are not supported yet")),
         };

@@ -317,6 +317,9 @@ impl<'a> Writer<'a> {
             // spindle itself: a profile in it may not ask for these
             // (`Profile::validate`).
             Op::RigidMode { .. } | Op::RigidTap { .. } => {}
+            // Never asked of Klartext: a Heidenhain profile cannot probe
+            // (`Profile::validate`), so a probe operation is refused first.
+            Op::Probe { .. } | Op::ProbeOpen(_) | Op::ProbeClose => {}
             Op::CycleEnd => {
                 // Each cycle returns to the clearance height; where across is
                 // where the last hole was.
@@ -1195,6 +1198,7 @@ impl Reader {
             to,
             feed,
             arc,
+            probe: false,
         }));
         self.at = to;
     }

@@ -478,6 +478,51 @@ fn rigid_tapping_faults_are_caught() {
     }
 }
 
+/// A probe grid reads back on the posts that probe, in both units, and a
+/// probe's faults are caught: a probing move that stops short of where
+/// the path expects to touch, one in the wrong place, a cut where it
+/// probes, a probe where it cuts, and the spindle turning.
+#[test]
+fn a_probe_grid_reads_back_and_its_faults_are_caught() {
+    for name in ["linuxcnc", "linuxcnc-inch", "grbl"] {
+        let profile = Profile::builtin(name).unwrap().unwrap();
+        let (path, spec) = common::probing(Some("probe.txt"));
+        let spec = ProgramSpec {
+            units: profile.units,
+            ..spec
+        };
+        reads_back(&path, &spec, &profile, name);
+    }
+    let profile = Profile::builtin("grbl").unwrap().unwrap();
+    let (path, probe) = common::probing(None);
+    let text = post(&path, &probe, &profile);
+    check(&text, &path, &probe, &profile).unwrap();
+    let faults = [
+        ("G38.2 Z-3 F50", "G38.2 Z0.5 F50", "not from above"),
+        ("G38.2 Z-3 F50", "G38.2 X1 Z-3 F50", "not straight down"),
+        (
+            "G38.2 Z-3 F50",
+            "G1 Z-3 F50",
+            "a move where the path probes",
+        ),
+        ("G38.2 Z-3 F50", "G38.2 Z-3 F500", "probes at"),
+        ("G54\n", "G54\nS1000 M3\n", "spindle not stopped"),
+    ];
+    for (from, to, said) in faults {
+        let broken = text.replacen(from, to, 1);
+        assert_ne!(broken, text, "{from:?} is not in the program:\n{text}");
+        let p = check(&broken, &path, &probe, &profile).unwrap_err();
+        assert!(p.what.contains(said), "{to:?} is said as {p}, not {said:?}");
+    }
+    // A probing move where the path cuts.
+    let cut = fixture();
+    let text = post(&cut, &spec(), &profile);
+    let broken = text.replacen("G1 Z1 F250", "G38.2 Z1 F250", 1);
+    assert_ne!(broken, text);
+    let p = check(&broken, &cut, &spec(), &profile).unwrap_err();
+    assert!(p.what.contains("probes where the path does not"), "{p}");
+}
+
 /// The fixture posted for `profile`, with one fault put in: `from` (which
 /// must be there, once, as written) replaced by `to`.
 fn broken(

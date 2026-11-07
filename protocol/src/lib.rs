@@ -16,7 +16,7 @@ pub const HELPER: &str = "camcraft-helper";
 
 /// Bumped whenever a request or response changes shape, so a package never
 /// reads an answer from a helper of another build.
-pub const VERSION: u32 = 8;
+pub const VERSION: u32 = 9;
 
 /// One setup to run.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -164,8 +164,8 @@ pub struct ToolUse {
     pub name: String,
     /// Its number in the program.
     pub number: u32,
-    /// Its kind, as a job file names it: `flat`, `ball`, `bullnose`, `cone`
-    /// or `drill`.
+    /// Its kind, as a job file names it: `flat`, `ball`, `bullnose`, `cone`,
+    /// `drill`, `thread-mill` or `probe`.
     pub kind: String,
     /// Its diameter, and a bull-nose's corner radius, in millimetres.
     pub diameter: f64,
@@ -242,6 +242,10 @@ pub struct Layout {
     pub post: String,
     /// The day it ran, `2026-11-07`, in UTC.
     pub date: String,
+    /// The probe results its depths are corrected to: their file, grid and
+    /// heights; `None` when they are not.
+    #[serde(default)]
+    pub probe: Option<String>,
 }
 
 /// A round bar of stock, in the document's coordinates.

@@ -281,6 +281,21 @@ impl StrategySpec {
                 bottom: None,
                 ..cuts_loops
             },
+            // A grid over what it is kept to, each point touched from the
+            // retract height: the top is where it expects to touch.
+            StrategySpec::Probe { .. } => Uses {
+                stepover: false,
+                feed: false,
+                stock_to_leave: Leave::None,
+                depths: Depths::None,
+                links: Links::Own,
+                stay_down: false,
+                reach: Reach::Tools(0),
+                ramp: false,
+                top: Some(HeightRef::StockTop),
+                bottom: None,
+                ..cuts_loops
+            },
             // Its picks are the edges it chamfers, each from its own height,
             // the edge's: no top or bottom. It cuts to size.
             StrategySpec::Chamfer { .. } => Uses {

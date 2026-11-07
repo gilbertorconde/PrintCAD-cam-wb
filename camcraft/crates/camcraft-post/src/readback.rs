@@ -44,7 +44,7 @@ use std::f64::consts::TAU;
 use std::fmt;
 
 use camcraft_core::job::{Coolant, LAST_WCS, SpindleDirection};
-use camcraft_core::path::toolpath::{Move, MoveKind, Toolpath};
+use camcraft_core::path::toolpath::{Move, MoveKind, MoveRole, Toolpath};
 use glam::{DVec2, DVec3, dvec3};
 
 use crate::custom::{Concern, concern};
@@ -167,6 +167,9 @@ pub struct Motion {
     pub feed: Option<f64>,
     /// The arc it turns, or `None` for a straight move.
     pub arc: Option<Turn>,
+    /// Whether it is a probing move (`G38.2`): it stops where the probe
+    /// touches, somewhere short of `to`, which it was sent to.
+    pub probe: bool,
 }
 
 /// An arc or a helix, about an axis square to the plane it turns in.
@@ -423,7 +426,8 @@ impl Block {
                     if exact
                         && ((591.0..=593.0).contains(&tenths)
                             || (540.5..541.5).contains(&tenths)
-                            || (330.5..331.5).contains(&tenths))
+                            || (330.5..331.5).contains(&tenths)
+                            || (381.5..382.5).contains(&tenths))
                     {
                         b.g.push(whole('G', tenths)?);
                     } else {
@@ -476,6 +480,10 @@ const CYCLES: [u32; 6] = [73, 74, 81, 82, 83, 84];
 
 /// `G33.1`, rigid tapping, as a G code is kept here: a whole number.
 const RIGID_TAP: u32 = 331;
+
+/// `G38.2`, the straight probe that stops where it touches, and stops the
+/// program if it never does, as a G code is kept here.
+const PROBE: u32 = 382;
 
 /// How far `G73` backs off between pecks, in millimetres. The standard says
 /// only "a small distance", and a controller backs off as far as it is set to;
@@ -573,14 +581,14 @@ impl Reader {
         let b = Block::gather(words)?;
         let motions =
             b.g.iter()
-                .filter(|&&g| matches!(g, 0..=3 | 80 | RIGID_TAP) || CYCLES.contains(&g))
+                .filter(|&&g| matches!(g, 0..=3 | 80 | RIGID_TAP | PROBE) || CYCLES.contains(&g))
                 .count();
         if motions > 1 {
             return Err("two motions in one block".into());
         }
         for &g in &b.g {
             match g {
-                0..=3 | RIGID_TAP => self.motion = Some(g),
+                0..=3 | RIGID_TAP | PROBE => self.motion = Some(g),
                 g if CYCLES.contains(&g) => self.motion = Some(g),
                 80 => {
                     self.motion = None;
@@ -756,6 +764,7 @@ impl Reader {
                 }
                 Some(g @ (2 | 3)) => self.arc_to(&b, g == 3)?,
                 Some(RIGID_TAP) => self.rigid_tap(&b)?,
+                Some(PROBE) => self.probe(&b)?,
                 Some(g) if cycling => self.drill(&b, g)?,
                 _ => return Err("axis words with no motion in force".into()),
             }
@@ -805,6 +814,7 @@ impl Reader {
             to,
             feed,
             arc,
+            probe: false,
         }));
         self.at = to;
     }
@@ -952,6 +962,32 @@ impl Reader {
         let feed = pitch * self.scale()? * speed;
         self.go(to, Some(feed), None);
         self.go(from, Some(feed), None);
+        Ok(())
+    }
+
+    /// `G38.2`: towards where the axis words say at the feed, stopping where
+    /// the probe touches. Where that is is not known; it is taken as where
+    /// it was sent, its furthest, which only a move that says its own Z
+    /// leaves.
+    fn probe(&mut self, b: &Block) -> Result<(), String> {
+        let feed = self.feed.ok_or("G38.2 with no feed")?;
+        if self.absolute != Some(true) {
+            return Err("G38.2 in incremental mode is not understood".into());
+        }
+        let from = self.at;
+        known(&from).ok_or("G38.2 from where is not known")?;
+        let to = self.target(&b.axes)?;
+        if to == from {
+            return Err("G38.2 to where the tool already is".into());
+        }
+        self.push(Action::Move(Motion {
+            from,
+            to,
+            feed: Some(feed),
+            arc: None,
+            probe: true,
+        }));
+        self.at = to;
         Ok(())
     }
 
@@ -1235,6 +1271,9 @@ struct Checker<'a> {
     /// Whether the tool comes from the operation before, rather than from
     /// the program's start.
     linking: bool,
+    /// Whether the move before was a probe's touch, from which the tool
+    /// leaves from where it touched, which is not known.
+    touched: bool,
 }
 
 impl<'a> Checker<'a> {
@@ -1260,6 +1299,7 @@ impl<'a> Checker<'a> {
             wcs_word: offset_word(spec.wcs),
             rigid: false,
             linking: false,
+            touched: false,
         }
     }
 
@@ -1506,7 +1546,12 @@ impl<'a> Checker<'a> {
         if self.cut {
             return Ok(());
         }
-        if self.spindle != Spindle::On(self.spec.rpm, self.spec.spin) {
+        // A probe is not turned: its stylus would be wound round it.
+        if self.spec.probe.is_some() {
+            if self.spindle != Spindle::Off {
+                return Err(Problem::at(line, "probes with the spindle not stopped"));
+            }
+        } else if self.spindle != Spindle::On(self.spec.rpm, self.spec.spin) {
             return Err(Problem::at(
                 line,
                 format!(
@@ -1552,6 +1597,9 @@ impl<'a> Checker<'a> {
                     "the program ends before reaching the path's start, {to}"
                 ))
             })?;
+            if m.probe {
+                return Err(Problem::at(line, "probes before reaching the path's start"));
+            }
             let across = moves(&m.from, &m.to, 0) || moves(&m.from, &m.to, 1);
             let down = moves(&m.from, &m.to, 2);
             if self.linking
@@ -1622,6 +1670,12 @@ impl<'a> Checker<'a> {
     /// the same feed, along the same curve. An arc may be written as straight
     /// moves along it.
     fn follow(&mut self, from: DVec3, m: &Move, k: usize) -> Result<(), Problem> {
+        if self.spec.probe.is_some() && m.role == MoveRole::Plunge {
+            return self.touch(m, k);
+        }
+        if std::mem::take(&mut self.touched) {
+            return self.leave_touch(m, k);
+        }
         let source = match m.kind {
             MoveKind::Arc(a) => Some(a),
             MoveKind::Linear => None,
@@ -1672,6 +1726,9 @@ impl<'a> Checker<'a> {
                     m.to
                 ))
             })?;
+            if g.probe {
+                return Err(Problem::at(line, "probes where the path does not"));
+            }
             let Some((_, end)) = g.ends() else {
                 return Err(Problem::at(
                     line,
@@ -1731,6 +1788,87 @@ impl<'a> Checker<'a> {
                 ));
             }
         }
+        self.high = self.high.max(m.to.z);
+        Ok(())
+    }
+
+    /// Move `k` of a probe operation's path, a touch down to `m`'s end: a
+    /// probing move straight down from over it, at its feed, that goes on
+    /// below it, so it touches the surface even where that is lower than
+    /// the path expects. Where it stops is taken as where the path expects
+    /// it to touch: the next move must say its own Z, as going up does.
+    fn touch(&mut self, m: &Move, k: usize) -> Result<(), Problem> {
+        let tol = self.tol.at;
+        let (line, g) = self.next_move()?.ok_or_else(|| {
+            Problem::whole(format!("the program ends before probe {k} of the path"))
+        })?;
+        if !g.probe {
+            return Err(Problem::at(line, "a move where the path probes"));
+        }
+        self.cutting(line)?;
+        let Some((a, b)) = g.ends() else {
+            return Err(Problem::at(line, "probes from where is not known"));
+        };
+        let over = |p: DVec3| p.truncate().distance(m.to.truncate()) <= tol;
+        if !over(a) || !over(b) {
+            return Err(Problem::at(
+                line,
+                format!("probes from {a} to {b}, not straight down at {}", m.to),
+            ));
+        }
+        if a.z < m.to.z + tol || b.z > m.to.z - tol {
+            return Err(Problem::at(
+                line,
+                format!(
+                    "probes from {:.3} to {:.3}, not from above {:.3} to below it",
+                    a.z, b.z, m.to.z
+                ),
+            ));
+        }
+        if let Some(f) = m.feed
+            && g.feed.is_some_and(|got| (got - f).abs() > self.tol.feed)
+        {
+            return Err(Problem::at(
+                line,
+                format!(
+                    "probes at {:?} mm/min where the path goes at {f:.3}",
+                    g.feed
+                ),
+            ));
+        }
+        self.at = [Some(m.to.x), Some(m.to.y), Some(m.to.z)];
+        self.high = self.high.max(m.to.z);
+        self.touched = true;
+        Ok(())
+    }
+
+    /// Move `k` of a probe operation's path, the one after a touch: straight
+    /// up from where the probe stopped, which is not known, to `m`'s end, as
+    /// the path goes.
+    fn leave_touch(&mut self, m: &Move, k: usize) -> Result<(), Problem> {
+        let tol = self.tol.at;
+        let (line, g) = self.next_move()?.ok_or_else(|| {
+            Problem::whole(format!("the program ends before move {k} of the path"))
+        })?;
+        let Some((a, b)) = g.ends() else {
+            return Err(Problem::at(line, "loses its place after a probe"));
+        };
+        if g.probe || g.feed.is_some() != m.feed.is_some() {
+            return Err(Problem::at(
+                line,
+                "leaves a probe's touch other than as the path does",
+            ));
+        }
+        if a.truncate().distance(b.truncate()) > tol || b.z < a.z || b.distance(m.to) > tol {
+            return Err(Problem::at(
+                line,
+                format!(
+                    "goes to {b} from a probe's touch, where the path goes straight up to {}",
+                    m.to
+                ),
+            ));
+        }
+        self.at = g.to;
         self.high = self.high.max(m.to.z);
         Ok(())
     }

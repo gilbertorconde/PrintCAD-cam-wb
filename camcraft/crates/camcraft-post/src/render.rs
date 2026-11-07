@@ -400,6 +400,23 @@ impl<'a> Writer<'a> {
                 self.lost();
             }
             Op::CycleEnd => self.raw("G80"),
+            Op::Probe { to, feed } => {
+                let f = self.p.feed_in(*feed, self.inches);
+                // Taken to be where it was sent, its furthest: where it
+                // touched is not known, but the next move leaves it
+                // straight up, saying its Z whatever this was.
+                self.motion_block("G38.2", *to, Some(f));
+            }
+            Op::ProbeOpen(name) => {
+                let (open, close) = (&self.p.comment.0, &self.p.comment.1);
+                let s = format!("{open}PROBEOPEN {name}{close}");
+                self.raw(&s);
+            }
+            Op::ProbeClose => {
+                let (open, close) = (&self.p.comment.0, &self.p.comment.1);
+                let s = format!("{open}PROBECLOSE{close}");
+                self.raw(&s);
+            }
             Op::Raw(text) => {
                 // Passed through untouched, by definition. Modal state is unknown
                 // afterwards, so nothing may be suppressed against it.

@@ -73,5 +73,6 @@ pub(crate) fn recheck(
         &ran.result.verify,
         ran.result.verify_budget,
         &[],
+        None,
     )
 }

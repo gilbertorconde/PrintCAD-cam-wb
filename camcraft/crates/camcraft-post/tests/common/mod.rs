@@ -86,9 +86,34 @@ pub fn spec() -> ProgramSpec {
         rotary: Vec::new(),
         next_tool: None,
         stock: None,
+        probe: None,
         before: Vec::new(),
         after: Vec::new(),
     }
+}
+
+/// A probe touching a grid three across and two deep, 20 mm by 10 mm, at
+/// the top of the stock, 0, from 5 mm above it, at 50 mm/min; each touch
+/// going on 3 mm below, its points logged to `log` where the controller
+/// keeps a file. No spindle and no coolant.
+pub fn probing(log: Option<&str>) -> (Toolpath, ProgramSpec) {
+    let path =
+        camcraft_core::probe::probe_path(&[0.0, 10.0, 20.0], &[0.0, 10.0], (15.0, 5.0, 0.0), 50.0)
+            .unwrap();
+    let spec = ProgramSpec {
+        op_name: "probe".into(),
+        strategy: "probe".into(),
+        tool: 9,
+        tool_comment: "2mm touch probe".into(),
+        rpm: 0,
+        coolant: Coolant::Off,
+        probe: Some(camcraft_post::op::Probing {
+            depth: 3.0,
+            log: log.map(str::to_string),
+        }),
+        ..spec()
+    };
+    (path, spec)
 }
 
 /// Three holes, drilled as canned cycles on a controller that takes them: across

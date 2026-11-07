@@ -13,12 +13,14 @@
 
 use std::path::{Path, PathBuf};
 
-use camcraft_core::job::{Programs, Setup};
+use camcraft_core::job::{Coolant, Programs, Setup};
 use camcraft_core::run::{Made, OperationResult, SetupResult, StrategyDetail};
 use camcraft_core::setup::bounds_all;
 use camcraft_core::setup::frame::Frame;
-use camcraft_post::op::{CustomGcode, DrillCycles, LowerError, ProgramSpec, extents, lower};
-use camcraft_post::profile::{Placement, Profile, TapStyle, TravelCheck};
+use camcraft_post::op::{
+    CustomGcode, DrillCycles, LowerError, Probing, ProgramSpec, extents, lower,
+};
+use camcraft_post::profile::{Placement, ProbeStyle, Profile, TapStyle, TravelCheck};
 use camcraft_post::render::{RenderReport, Title, render, render_program};
 use camcraft_post::setup::{Joining, Section, lower_setup};
 use glam::DVec3;
@@ -110,6 +112,25 @@ pub fn program_spec(
             can: Profile::builtin_tapping().join(", "),
         });
     }
+    let probe = match &op.detail {
+        StrategyDetail::Probe(r) => Some(match profile.probe {
+            ProbeStyle::Cannot => {
+                return Err(LowerError::CannotProbe {
+                    machine: profile.name.clone(),
+                    can: Profile::builtin_probing().join(", "),
+                });
+            }
+            ProbeStyle::G38 => Probing {
+                depth: r.max_depth,
+                log: None,
+            },
+            ProbeStyle::G38Logged => Probing {
+                depth: r.max_depth,
+                log: Some(probe_log_name(&op.name)),
+            },
+        }),
+        _ => None,
+    };
     let rotary = match &profile.rotary {
         Some(r) => r.position(z, x)?,
         None => Vec::new(),
@@ -123,7 +144,12 @@ pub fn program_spec(
         extended_offsets: u8::try_from(profile.extended_offsets.len()).unwrap_or(u8::MAX),
         rpm: op.rpm,
         spin: op.spindle,
-        coolant: op.coolant,
+        // Nothing is cut to cool where it probes.
+        coolant: if probe.is_some() {
+            Coolant::Off
+        } else {
+            op.coolant
+        },
         units: profile.units,
         // Holes as cycles where the machine takes them; a tap however it
         // taps, cycles or not.
@@ -150,9 +176,32 @@ pub fn program_spec(
         rotary,
         next_tool: None,
         stock: None,
+        probe,
         before: Vec::new(),
         after: Vec::new(),
     })
+}
+
+/// The file a controller that logs what it probes writes a probe
+/// operation's points to: the operation's name, as a file name, with
+/// `.txt`. Only letters, digits, `-` and `_` are kept, the rest made `-`, so
+/// the name cannot end the comment it is written in.
+pub fn probe_log_name(op: &str) -> String {
+    let mut name: String = op
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if name.trim_matches('-').is_empty() {
+        name = "probe".into();
+    }
+    format!("{name}.txt")
 }
 
 /// For each of a setup's operations, as run, the tool the program after its

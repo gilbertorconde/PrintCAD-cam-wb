@@ -128,6 +128,14 @@ pub enum JobError {
         /// The offset.
         wcs: u8,
     },
+    /// A setup that corrects Z from probe results it cannot use.
+    #[error("setup '{setup}': its probe results {why}")]
+    BadProbeMap {
+        /// Which setup.
+        setup: String,
+        /// What is wrong with them.
+        why: String,
+    },
     /// A work offset's position that is not a number.
     #[error("setup '{0}': where its work offset is must be numbers")]
     BadWorkOffsetPosition(String),
