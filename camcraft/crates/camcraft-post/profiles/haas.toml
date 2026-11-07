@@ -37,8 +37,11 @@ length_offset  = true
 preselect_tool = true
 # Haas takes G81, G82, G83, G73, G84 and G74, returning with G98. Off until they
 # have been dry-run on the machine; off, a drilling operation is posted as plain
-# moves instead, and tapping is refused.
+# moves instead.
 drill_cycles = false
+# Tapping is G84 (G74 left-hand), which a Haas mill taps rigidly by itself,
+# timing Z to the spindle's position: no M29.
+tap = "g84"
 
 # Work offsets past G59: Haas's G154 P1 to P99, a setup's offsets after G59.
 extended_offsets = [

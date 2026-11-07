@@ -16,11 +16,18 @@ comment   = ["(", ")"]
 arc_style     = "ij"
 tool_change   = "m6"
 length_offset = true
-# LinuxCNC takes G81, G82 and G83. Off until they have been dry-run on the
-# machine; off, a drilling operation is posted as plain moves instead.
-# On, chip breaking is G73 and tapping G84 (G74 left-hand); off, tapping is
-# refused, as no plain move keeps the feed to the spindle as it reverses.
-drill_cycles = false
+# LinuxCNC is the reference for these cycles (its G-code reference, 2.8 and
+# 2.9): G81, G82 with its dwell in seconds, G83, and G73, which backs off
+# 0.254 mm to break the chip, all returning to where they began with G98.
+drill_cycles = true
+# Tapping is rigid tapping, G33.1 Z.. K<pitch>: synchronized with the spindle
+# down and back, which reverses itself at the bottom, a hole at a time. It
+# needs a spindle encoder with an index; without one it waits at the top of
+# the first hole for the index and never goes down. LinuxCNC's G84 and G74 are
+# for a floating tap holder and do not keep the feed to the spindle, so they
+# are not written. A left-hand tap is started M4; the reference does not say
+# G33.1 taps that way, so air-cut one first.
+tap = "g33.1"
 
 # Work offsets past G59: a setup may use LinuxCNC's G59.1 to G59.3.
 extended_offsets = ["G59.1", "G59.2", "G59.3"]

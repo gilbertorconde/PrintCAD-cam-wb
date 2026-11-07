@@ -32,9 +32,12 @@ length_offset  = true
 preselect_tool = true
 # Fanuc takes G81, G82, G83, G73, G84 and G74, returning with G98. Off until
 # they have been dry-run on the machine; off, a drilling operation is posted as
-# plain moves instead, and tapping is refused. A Fanuc that taps rigidly wants
-# M29 S.. before G84, which is not written: check the machine's tapping first.
+# plain moves instead.
 drill_cycles = false
+# Tapping is rigid: M29 S<speed> just before the G84 (G74 left-hand), with no
+# move between, as a Fanuc invokes it unless parameter 5200#0 makes G84 rigid
+# by itself (then M29 is harmless) or 5210 names another M code.
+tap = "m29"
 # A pause, G82's P, in milliseconds, as Fanuc reads it without a point.
 dwell_milliseconds = true
 

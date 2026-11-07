@@ -136,6 +136,7 @@ fn holes_are_cycles_only_where_the_profile_takes_them() {
         feed: 200.0,
     });
     let mut profile = load_profile("masso", None).unwrap();
+    profile.drill_cycles = false;
     let (moves, _) = program(&op, 54, &ran.result.frame, &profile, "01-holes").unwrap();
     assert!(!moves.contains("G83"), "{moves}");
     profile.drill_cycles = true;
@@ -144,10 +145,11 @@ fn holes_are_cycles_only_where_the_profile_takes_them() {
     assert!(cycles.contains("G80"), "{cycles}");
 }
 
-/// A tapping operation is posted as its cycle, for a profile that takes
-/// cycles, and refused as moves for one that does not.
+/// A tapping operation is posted as the machine taps: its cycle for one
+/// that takes cycles, rigid tapping for LinuxCNC; and refused for one that
+/// cannot tap, saying which machines can.
 #[test]
-fn a_tap_is_posted_only_as_its_cycle() {
+fn a_tap_is_posted_only_as_the_machine_taps() {
     use camcraft_core::job::ThreadHand;
     use camcraft_core::strategy::drilling::{DrillReport, Hole, Tap};
     let ran = run_small();
@@ -173,14 +175,34 @@ fn a_tap_is_posted_only_as_its_cycle() {
     });
     let mut profile = load_profile("masso", None).unwrap();
     let refused = program(&op, 54, &ran.result.frame, &profile, "01-threads").unwrap_err();
+    let said = refused.to_string();
+    assert!(said.starts_with("Masso cannot tap"), "{said}");
     assert!(
-        refused.to_string().contains("drill_cycles = true"),
-        "{refused}"
+        said.contains(
+            "(Centroid CNC12 (Avid CNC), LinuxCNC, Fanuc, Haas (NGC), Heidenhain TNC (Klartext))"
+        ),
+        "{said}"
     );
     profile.drill_cycles = true;
+    profile.tap = None;
     let (cycles, _) = program(&op, 54, &ran.result.frame, &profile, "01-threads").unwrap();
     assert!(cycles.contains("S400 M4"), "{cycles}");
     assert!(cycles.contains("G74 X3. Y4. Z0. R7. F600."), "{cycles}");
+
+    let linuxcnc = load_profile("linuxcnc", None).unwrap();
+    let (rigid, _) = program(&op, 54, &ran.result.frame, &linuxcnc, "01-threads").unwrap();
+    assert!(rigid.contains("S400 M4"), "{rigid}");
+    assert!(rigid.contains("\nZ7\nG33.1 Z0 K1.5\n"), "{rigid}");
+    assert!(!rigid.contains("G74"), "{rigid}");
+    let avid = load_profile("centroid-avid", None).unwrap();
+    let (cycle, _) = program(&op, 54, &ran.result.frame, &avid, "01-threads").unwrap();
+    assert!(cycle.contains("G74 X3 Y4 Z0 R7 F600"), "{cycle}");
+    let fanuc = load_profile("fanuc", None).unwrap();
+    let (m29, _) = program(&op, 54, &ran.result.frame, &fanuc, "01-threads").unwrap();
+    assert!(
+        m29.contains("\nM29 S400\nG74 X3. Y4. Z0. R7. F600.\n"),
+        "{m29}"
+    );
 }
 
 /// A tool's spindle direction and coolant reach the program.

@@ -306,6 +306,10 @@ impl<'a> Writer<'a> {
                 dwell,
                 feed,
             } => self.cycle(*kind, *at, *depth, *retract, *peck, *dwell, *feed),
+            // Klartext taps only with cycle 207, which keeps the feed to the
+            // spindle itself: a profile in it may not ask for these
+            // (`Profile::validate`).
+            Op::RigidMode { .. } | Op::RigidTap { .. } => {}
             Op::CycleEnd => {
                 // Each cycle returns to the clearance height; where across is
                 // where the last hole was.

@@ -624,11 +624,9 @@ fn each_line_counts_the_moves_of_the_instruction_that_wrote_it() {
     );
 }
 
-/// One of the sled base's holes, picked by its top and bottom rims, tapped
-/// left-hand. For a post without the tapping cycle the run is shown but fails,
-/// saying why, and has no program; for one with it, it passes, a G74 a hole.
-#[test]
-fn a_tap_posts_only_where_the_post_has_the_cycle() {
+/// A job tapping one of the sled base's holes, picked by its top and bottom
+/// rims, left-hand, posted for `post`.
+fn tapping_job(post: &str) -> Request {
     let job = r#"
 version = 1
 tolerance = 0.1
@@ -666,9 +664,9 @@ selection = { edges = [
     { model = "sled", index = 100, at = [228.11, 195.25, 1.016] },
 ] }
 "#;
-    let request = |post: Option<String>| Request {
+    Request {
         version: VERSION,
-        job: job.into(),
+        job: job.replace("post = \"grbl\"", &format!("post = \"{post}\"")),
         shapes: BTreeMap::from([(
             "sled".to_string(),
             Shape {
@@ -677,25 +675,33 @@ selection = { edges = [
             },
         )]),
         max_points: 0,
-        post,
+        post: None,
         read: None,
-    };
-    let refused = answer(&request(None)).unwrap();
+    }
+}
+
+/// The tap, for a post without a tapping cycle: the run is shown but fails,
+/// saying the machine cannot tap and which can, and has no program; for one
+/// of the post's own with the cycle, it passes, a G74 a hole.
+#[test]
+fn a_tap_posts_only_where_the_post_has_the_cycle() {
+    let refused = answer(&tapping_job("grbl")).unwrap();
     assert!(!refused.passed);
     let said = &refused.findings[0];
     assert_eq!((said.level, said.operation), (Level::Fail, Some(0)));
-    assert!(said.text.contains("tapping cycle"), "{said:?}");
+    assert!(said.text.contains("GRBL cannot tap"), "{said:?}");
+    assert!(said.text.contains("LinuxCNC"), "{said:?}");
     let op = &refused.operations[0];
     assert!(op.program.is_none());
     assert!(op.cut_mm > 0.0, "its path is still shown");
 
     let grbl = include_str!("../../camcraft/crates/camcraft-post/profiles/grbl.toml");
-    let cycles = grbl.replacen(
-        "extension = \"nc\"",
-        "extension = \"nc\"\ndrill_cycles = true",
-        1,
-    );
-    let run = answer(&request(Some(cycles))).unwrap();
+    let cycles = grbl.replacen("tap = \"none\"", "tap = \"g84\"", 1);
+    let run = answer(&Request {
+        post: Some(cycles),
+        ..tapping_job("grbl")
+    })
+    .unwrap();
     for f in run.findings.iter().filter(|f| f.level == Level::Fail) {
         eprintln!("{f:?}");
     }
@@ -713,6 +719,51 @@ selection = { edges = [
         "0.8 mm a turn at 600: {}",
         taps[0]
     );
+}
+
+/// The tap on each built-in post: one whose controller taps writes a
+/// program and passes, LinuxCNC tapping with G33.1, CNC12 and Haas with
+/// their cycle, Fanuc with it after M29, Heidenhain with cycle 207; the
+/// others fail, saying so.
+#[test]
+fn a_tap_on_a_builtin_post_writes_a_program_where_it_can() {
+    for (post, word) in [
+        ("linuxcnc", Some("G33.1 Z")),
+        ("linuxcnc-inch", Some("G33.1 Z")),
+        ("centroid-avid", Some("G74 X")),
+        ("centroid-avid-inch", Some("G74 X")),
+        ("fanuc", Some("G74 X")),
+        ("haas-inch", Some("G74 X")),
+        ("heidenhain", Some("CYCL DEF 207")),
+        ("mach", None),
+        ("masso", None),
+        ("masso-inch", None),
+        ("grbl", None),
+    ] {
+        let run = answer(&tapping_job(post)).unwrap();
+        let program = run.operations[0].program.as_ref();
+        match word {
+            Some(word) => {
+                for f in run.findings.iter().filter(|f| f.level == Level::Fail) {
+                    eprintln!("{post}: {f:?}");
+                }
+                assert!(run.passed, "{post}");
+                let text = &program.unwrap().text;
+                assert!(text.contains("M4"), "{post}: {text}");
+                let taps = text.lines().filter(|l| l.contains(word)).count();
+                assert_eq!(taps, 1, "{post}: {text}");
+            }
+            None => {
+                assert!(!run.passed, "{post}");
+                assert!(program.is_none(), "{post}");
+                assert!(
+                    run.findings.iter().any(|f| f.text.contains("cannot tap")),
+                    "{post}: {:?}",
+                    run.findings
+                );
+            }
+        }
+    }
 }
 
 /// Round stock comes back as a cylinder, in the model's coordinates, inside

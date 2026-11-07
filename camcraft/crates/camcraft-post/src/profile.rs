@@ -96,6 +96,33 @@ pub enum Dialect {
     Heidenhain,
 }
 
+/// How a tap is written: what the controller taps with, if anything. A tap
+/// must go one pitch a turn all the way, as the spindle slows, stops and
+/// reverses at the bottom, and only the controller can keep the feed to the
+/// spindle through that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub enum TapStyle {
+    /// The tapping cycles, `G84`, and `G74` for a left-hand thread, fed at
+    /// the pitch times the spindle's speed, as a run of canned cycles; in
+    /// Klartext, `CYCL DEF 207`. `"cycle"` says the same.
+    #[serde(rename = "g84", alias = "cycle")]
+    Cycle,
+    /// The tapping cycles in rigid mode, as Fanuc taps rigidly: `M29
+    /// S<speed>` just before the run of `G84` or `G74`, with no move
+    /// between, and `G80` after.
+    #[serde(rename = "m29")]
+    M29,
+    /// Rigid tapping, `G33.1 Z.. K<pitch>`, as LinuxCNC has it: down
+    /// synchronized with the spindle from where the tool is, the spindle
+    /// reversed at the bottom, and back up to where it started. A hole at a
+    /// time, the tool put over it at its R plane first.
+    #[serde(rename = "g33.1")]
+    G331,
+    /// The controller cannot tap: a tapping operation is a failed check.
+    #[serde(rename = "none")]
+    Cannot,
+}
+
 /// How arc centres are written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -276,9 +303,8 @@ pub struct Profile {
     pub length_offset: bool,
     /// Whether the controller takes canned drilling cycles (`G81`, `G82`, `G83`,
     /// `G73`, `G84`, `G74`, `G80`). Off, a drilling operation is posted as its
-    /// moves, and a tapping one not at all ([`LowerError::TapsAsMoves`]).
-    ///
-    /// [`LowerError::TapsAsMoves`]: crate::op::LowerError::TapsAsMoves
+    /// moves; a tapping one is posted as [`tap`](Self::tap) says, and never as
+    /// moves.
     #[serde(default)]
     pub drill_cycles: bool,
     /// Whether the tool the next program changes to is called up to the
@@ -291,6 +317,10 @@ pub struct Profile {
     /// Fanuc reads it in `G4` and `G82`; otherwise in seconds.
     #[serde(default)]
     pub dwell_milliseconds: bool,
+    /// How it taps ([`TapStyle`]), whether or not it takes the other cycles.
+    /// Absent, with the other cycles, as `G84` and `G74`; else not at all.
+    #[serde(default)]
+    pub tap: Option<TapStyle>,
     /// The slowest and fastest the spindle turns, in rev/min. A tool asked to
     /// turn outside them is warned about. Absent, any speed goes.
     #[serde(default)]
@@ -529,6 +559,16 @@ impl Profile {
                 reason: why,
             });
         }
+        if self.dialect == Dialect::Heidenhain
+            && matches!(self.tapping(), TapStyle::M29 | TapStyle::G331)
+        {
+            return Err(ProfileError::BadValue {
+                field: "tap",
+                reason: "Klartext taps with its tapping cycle, CYCL DEF 207: tap = \"cycle\" \
+                         or \"none\""
+                    .into(),
+            });
+        }
         if self.dialect == Dialect::Heidenhain {
             // Every block is numbered, from 0 by ones, the program's first
             // line `BEGIN PGM`: the control reads nothing else.
@@ -580,6 +620,27 @@ impl Profile {
             ("end_home", &self.end_home),
             ("footer", &self.footer),
         ]
+    }
+
+    /// How this machine taps: as its `tap` says, else with the other cycles
+    /// where it takes them, else not at all.
+    pub fn tapping(&self) -> TapStyle {
+        match self.tap {
+            Some(style) => style,
+            None if self.drill_cycles => TapStyle::Cycle,
+            None => TapStyle::Cannot,
+        }
+    }
+
+    /// The built-in machines that tap, by name, each once whatever its
+    /// units: what to post a tap for instead of one that cannot.
+    pub fn builtin_tapping() -> Vec<String> {
+        BUILTIN
+            .iter()
+            .filter_map(|(_, text)| Self::from_toml(text).ok())
+            .filter(|p| p.units == ProgramUnits::Mm && p.tapping() != TapStyle::Cannot)
+            .map(|p| p.name)
+            .collect()
     }
 
     /// The first `G53` move of the profile's own blocks that goes past its
@@ -780,6 +841,19 @@ impl Profile {
         }
     }
 
+    /// Format a tap's pitch, in millimetres, for a `K` word, in inches if
+    /// `inches`: to three more places than an axis word, as the feed a tap is
+    /// fed at keeps three more than a feed, since the tap follows it every
+    /// turn.
+    pub fn pitch(&self, mm: f64, inches: bool) -> String {
+        let (v, places) = if inches {
+            (mm / MM_PER_INCH, self.format.inch_axis_decimals)
+        } else {
+            (mm, self.format.axis_decimals)
+        };
+        self.number(v, places.saturating_add(3))
+    }
+
     /// Format a value for a feed word.
     pub fn feed(&self, v: f64) -> String {
         self.number(v, self.format.feed_decimals)
@@ -975,6 +1049,92 @@ mod tests {
             e.to_string().contains("outside the machine's travel"),
             "{e}"
         );
+    }
+
+    /// Each built-in machine taps as its controller does: LinuxCNC rigidly
+    /// with G33.1, Fanuc in M29's rigid mode, CNC12 and Haas with their
+    /// tapping cycles, Heidenhain with cycle 207; Masso, GRBL and Mach not at
+    /// all; and the ones that tap are named once each.
+    #[test]
+    fn each_builtin_taps_as_its_controller_does() {
+        for (name, want) in [
+            ("linuxcnc", TapStyle::G331),
+            ("linuxcnc-inch", TapStyle::G331),
+            ("centroid-avid", TapStyle::Cycle),
+            ("centroid-avid-inch", TapStyle::Cycle),
+            ("masso", TapStyle::Cannot),
+            ("masso-inch", TapStyle::Cannot),
+            ("grbl", TapStyle::Cannot),
+            ("fanuc", TapStyle::M29),
+            ("fanuc-inch", TapStyle::M29),
+            ("haas", TapStyle::Cycle),
+            ("haas-inch", TapStyle::Cycle),
+            ("heidenhain", TapStyle::Cycle),
+            ("heidenhain-inch", TapStyle::Cycle),
+            ("mach", TapStyle::Cannot),
+            ("mach-inch", TapStyle::Cannot),
+        ] {
+            let p = Profile::builtin(name).unwrap().unwrap();
+            assert_eq!(p.tapping(), want, "{name}");
+        }
+        assert_eq!(
+            Profile::builtin_tapping(),
+            vec![
+                "Centroid CNC12 (Avid CNC)",
+                "LinuxCNC",
+                "Fanuc",
+                "Haas (NGC)",
+                "Heidenhain TNC (Klartext)"
+            ]
+        );
+        // Klartext has no G33.1 nor M29.
+        let text = include_str!("../profiles/heidenhain.toml");
+        for form in ["g33.1", "m29"] {
+            let e =
+                Profile::from_toml(&text.replace("tap = \"cycle\"", &format!("tap = \"{form}\"")))
+                    .unwrap_err();
+            assert!(
+                matches!(e, ProfileError::BadValue { field: "tap", .. }),
+                "{form}: {e}"
+            );
+        }
+    }
+
+    /// Without `tap`, a profile taps with its other cycles or not at all, as
+    /// it always did; with it, as it says, whatever its cycles; and a form
+    /// that is not one is refused.
+    #[test]
+    fn tap_names_the_form() {
+        let mut p = grbl_with("").unwrap();
+        p.tap = None;
+        assert_eq!(p.tapping(), TapStyle::Cannot);
+        p.drill_cycles = true;
+        assert_eq!(p.tapping(), TapStyle::Cycle);
+        // GRBL's own file says it cannot; a copy for grblHAL could say more.
+        let grbl = include_str!("../profiles/grbl.toml");
+        for (form, want) in [
+            ("g84", TapStyle::Cycle),
+            ("g33.1", TapStyle::G331),
+            ("m29", TapStyle::M29),
+            ("cycle", TapStyle::Cycle),
+            ("none", TapStyle::Cannot),
+        ] {
+            let text = grbl.replace("tap = \"none\"", &format!("tap = \"{form}\""));
+            let p = Profile::from_toml(&text).unwrap();
+            assert_eq!((p.tapping(), p.drill_cycles), (want, false), "{form}");
+        }
+        let bad = grbl.replace("tap = \"none\"", "tap = \"g84.2\"");
+        assert!(Profile::from_toml(&bad).is_err());
+    }
+
+    /// A pitch keeps three more places than an axis word, in either units.
+    #[test]
+    fn a_pitch_is_written_finely() {
+        let p = Profile::builtin("linuxcnc").unwrap().unwrap();
+        assert_eq!(p.pitch(1.25, false), "1.25");
+        assert_eq!(p.pitch(25.4 / 13.0, true), "0.0769231");
+        let masso = Profile::builtin("masso").unwrap().unwrap();
+        assert_eq!(masso.pitch(1.0, false), "1.");
     }
 
     /// A speed outside the machine's range is a problem; inside it, or with no

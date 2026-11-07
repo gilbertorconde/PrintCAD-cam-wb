@@ -8,7 +8,7 @@ use camcraft_core::path::toolpath::Arc;
 use camcraft_core::path::toolpath::{MoveRole, Toolpath};
 use camcraft_core::strategy::drilling::{Hole, Tap};
 use camcraft_post::op::{DrillCycles, ProgramSpec};
-use camcraft_post::profile::ProgramUnits;
+use camcraft_post::profile::{ProgramUnits, TapStyle};
 use glam::{DVec3, dvec2, dvec3};
 
 /// A path exercising every move role the engine currently produces, plus the
@@ -113,6 +113,7 @@ pub fn drilling(peck: Option<f64>, dwell: Option<f64>) -> ProgramSpec {
             chip_break: None,
             dwell,
             tap: None,
+            tap_style: TapStyle::Cycle,
             feed: 250.0,
             clearance: 20.0,
         }),
@@ -145,6 +146,16 @@ pub fn tapping(hand: ThreadHand) -> ProgramSpec {
     if let Some(d) = &mut spec.drill {
         d.tap = Some(tap);
         d.feed = tap.feed(500.0);
+    }
+    spec
+}
+
+/// The three holes tapped as [`tapping`] does, by rigid tapping (`G33.1`)
+/// a hole at a time.
+pub fn rigid_tapping(hand: ThreadHand) -> ProgramSpec {
+    let mut spec = tapping(hand);
+    if let Some(d) = &mut spec.drill {
+        d.tap_style = TapStyle::G331;
     }
     spec
 }

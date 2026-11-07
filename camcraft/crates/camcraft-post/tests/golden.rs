@@ -258,15 +258,11 @@ fn heidenhain_writes_arcs_and_helices() {
     assert!(blocks("CP") >= 1, "no helix: {text}");
 }
 
-fn masso_with_cycles() -> Profile {
-    let mut p = Profile::builtin("masso").unwrap().unwrap();
-    p.drill_cycles = true;
-    p
-}
-
+/// Masso takes the cycles, its G82's pause in milliseconds; it does not
+/// tap.
 #[test]
 fn drilling_cycles_are_stable() {
-    let p = masso_with_cycles();
+    let p = Profile::builtin("masso").unwrap().unwrap();
     check_against(&p, &Toolpath::new(), &drilling(None, None), "masso-drill");
     check_against(
         &p,
@@ -281,17 +277,45 @@ fn drilling_cycles_are_stable() {
         "masso-dwell",
     );
     check_against(&p, &Toolpath::new(), &chip_breaking(), "masso-chip-break");
+}
+
+/// Each built-in machine that taps, tapping as a session posts it for that
+/// machine: LinuxCNC rigidly, `G33.1` a hole at a time, CNC12 and Haas
+/// with `G84` and `G74`, Fanuc with them after `M29 S..` (Heidenhain's
+/// cycle 207 is in its own drilling goldens); and LinuxCNC's other cycles,
+/// now it takes them.
+#[test]
+fn builtin_tapping_is_stable() {
+    for (name, hand, file) in [
+        ("linuxcnc", ThreadHand::Right, "linuxcnc-tap"),
+        ("linuxcnc-inch", ThreadHand::Left, "linuxcnc-inch-tap-left"),
+        ("centroid-avid", ThreadHand::Right, "centroid-avid-tap"),
+        (
+            "centroid-avid-inch",
+            ThreadHand::Left,
+            "centroid-avid-inch-tap-left",
+        ),
+        ("fanuc", ThreadHand::Right, "fanuc-tap"),
+        ("fanuc-inch", ThreadHand::Left, "fanuc-inch-tap-left"),
+        ("haas", ThreadHand::Right, "haas-tap"),
+        ("haas-inch", ThreadHand::Left, "haas-inch-tap-left"),
+    ] {
+        let p = Profile::builtin(name).unwrap().unwrap();
+        let mut spec = ProgramSpec {
+            units: p.units,
+            ..tapping(hand)
+        };
+        if let Some(d) = &mut spec.drill {
+            d.tap_style = p.tapping();
+        }
+        check_against(&p, &Toolpath::new(), &spec, file);
+    }
+    let p = Profile::builtin("linuxcnc").unwrap().unwrap();
     check_against(
         &p,
         &Toolpath::new(),
-        &tapping(ThreadHand::Right),
-        "masso-tap",
-    );
-    check_against(
-        &p,
-        &Toolpath::new(),
-        &tapping(ThreadHand::Left),
-        "masso-tap-left",
+        &chip_breaking(),
+        "linuxcnc-chip-break",
     );
 }
 

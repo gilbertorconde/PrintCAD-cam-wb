@@ -318,6 +318,25 @@ impl<'a> Writer<'a> {
                 self.level_plane();
                 self.cycle(*kind, *at, *depth, *retract, *peck, *dwell, *feed);
             }
+            Op::RigidTap { depth, pitch } => {
+                self.level_plane();
+                let s = format!(
+                    "G33.1 Z{} K{}",
+                    self.p.length(*depth, self.inches),
+                    self.p.pitch(*pitch, self.inches)
+                );
+                self.raw(&s);
+                self.report.motion_blocks += 1;
+                // It comes back to where it started, which is where the
+                // machine was told it is; but its motion mode is its own,
+                // so the next move says its own.
+                self.motion = None;
+                self.raised = false;
+            }
+            Op::RigidMode { rpm } => {
+                let s = format!("M29 S{rpm}");
+                self.raw(&s);
+            }
             Op::CycleStart => {
                 self.raw("G98");
                 // The cycles move the machine: nothing is suppressed against

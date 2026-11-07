@@ -1222,9 +1222,12 @@ impl Bench for Cam {
                          M2, M30) is a failed check; a subprogram call a warning."
                             .into(),
                         "Drilling: peck backs out between pecks, and with chip_break only that \
-                         far (G73); pitch, mm a turn, taps each hole instead (G84, or G74 with \
-                         hand = left), fed at the pitch times the spindle's speed, and posted \
-                         only by a post with drill cycles."
+                         far (G73); pitch, mm a turn, taps each hole instead (hand = left for a \
+                         left-hand thread), fed at the pitch times the spindle's speed: posted \
+                         only for a machine that taps: LinuxCNC (G33.1), Fanuc (M29, G84, G74), \
+                         Haas and Centroid CNC12 (G84, G74), Heidenhain (cycle 207), or a post \
+                         of your own with tap = \"g84\", \"m29\" or \"g33.1\"; on Masso, GRBL \
+                         and Mach it is a failed check."
                             .into(),
                     ],
                     see_also: vec![id(TOOLS), id(RUN)],
