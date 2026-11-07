@@ -13,8 +13,8 @@ use std::collections::BTreeMap;
 use camcraft_core::job::{
     Along, BarAxis, Boundary, BoxOf, Containment, Curve, Depths, FeatureRef, FixedBox,
     FixedCylinder, Height, HeightRef, Heights, Job, Leave, MachiningBoundary, ModelDef, Operation,
-    Origin, Outline, Place, PointRef, Preset, Selection, Setup, Snap, StockDef, StockSpec,
-    StockToLeave, StrategySpec, ToolSpec,
+    Origin, Outline, Place, PointRef, Preset, Programs, Selection, Setup, Snap, StockDef,
+    StockSpec, StockToLeave, StrategySpec, ToolSpec,
 };
 use camcraft_core::setup::frame::{Axis, Direction, Orientation};
 use printcad_bench_sdk::serde_json;
@@ -303,6 +303,13 @@ pub struct SetupData {
     pub wcs_y: f64,
     #[serde(default)]
     pub wcs_z: f64,
+    /// Whether it is posted as one program, or one an operation.
+    #[serde(default)]
+    pub programs: Programs,
+    /// Its program's number, for a control that files programs by number;
+    /// each program of a setup posted one an operation takes the next.
+    #[serde(default = "program_number")]
+    pub program_number: f64,
     /// Chordal tolerance, millimetres.
     pub tolerance: f64,
     /// The tools its operations cut with, by name: copies, never links to the
@@ -351,6 +358,8 @@ impl SetupData {
             wcs_x: 0.0,
             wcs_y: 0.0,
             wcs_z: 0.0,
+            programs: Programs::Setup,
+            program_number: program_number(),
             tolerance,
             tools: BTreeMap::new(),
         }
@@ -619,6 +628,9 @@ impl SetupData {
                 .all(|v| v.is_finite())
         {
             return Some("Where the work offset is on the machine must be numbers.".into());
+        }
+        if !(1.0..=99_999.0).contains(&self.program_number) {
+            return Some("The program number must be 1 to 99999.".into());
         }
         match (self.tool_axis, &self.axis_pick) {
             (ToolAxis::Face, None) => {
@@ -1048,6 +1060,10 @@ fn one() -> f64 {
     1.0
 }
 
+fn program_number() -> f64 {
+    f64::from(camcraft_core::job::DEFAULT_NUMBER)
+}
+
 /// Whether `a` points the way its document axis does.
 fn is_positive(a: Axis) -> bool {
     matches!(a, Axis::PosX | Axis::PosY | Axis::PosZ)
@@ -1229,6 +1245,8 @@ pub fn job(
     camcraft.work_offset = setup
         .wcs_known
         .then_some([setup.wcs_x, setup.wcs_y, setup.wcs_z]);
+    camcraft.programs = setup.programs;
+    camcraft.number = setup.program_number.round().clamp(1.0, 99_999.0) as u32;
     camcraft.post = setup.post.clone();
     camcraft.orientation = setup.orientation(model_of);
     let offset = [setup.offset_x, setup.offset_y, setup.offset_z];
