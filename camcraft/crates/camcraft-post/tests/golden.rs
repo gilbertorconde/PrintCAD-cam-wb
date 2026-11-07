@@ -33,7 +33,7 @@ use camcraft_post::readback;
 use camcraft_post::render::{Title, render, render_dated, render_program};
 use camcraft_post::setup::{Joining, Section, lower_setup};
 use common::{
-    chip_breaking, drilling, engraving, fixture, milled_holes, setup, slot, spec, tapping,
+    chip_breaking, dogboned, drilling, engraving, fixture, milled_holes, setup, slot, spec, tapping,
 };
 use glam::dvec3;
 
@@ -433,6 +433,29 @@ fn a_slot_writes_its_arcs_as_arcs_at_every_level() {
     assert!(
         arcs.iter().all(|l| l.contains("G3") && l.contains('J')),
         "{arcs:?}"
+    );
+}
+
+/// A mortise's corners relieved: at each level, out from each corner of
+/// the ring along the diagonal by the tool's radius times √2 − 1, and back,
+/// as straight cuts at the level's height.
+#[test]
+fn dogbones_are_cut_at_every_level() {
+    let p = Profile::builtin("grbl").unwrap().unwrap();
+    let spec = ProgramSpec {
+        strategy: "profile".into(),
+        ..spec()
+    };
+    check_against(&p, &dogboned(), &spec, "grbl-dogbone");
+    let ops = lower(&dogboned(), &spec).unwrap();
+    let (text, _) = render(&ops, &p, "golden");
+    // 3 (√2 − 1) along each axis, from (10, -6): the relief's end.
+    let reach = 10.0 + 3.0 * (2f64.sqrt() - 1.0) / 2f64.sqrt();
+    let end = format!("X{reach:.3}");
+    assert_eq!(
+        text.lines().filter(|l| l.contains(&end)).count(),
+        4,
+        "{text}"
     );
 }
 

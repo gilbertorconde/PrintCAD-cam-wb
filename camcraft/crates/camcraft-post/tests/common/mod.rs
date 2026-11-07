@@ -385,3 +385,46 @@ pub fn setup() -> Vec<(Toolpath, ProgramSpec)> {
         ),
     ]
 }
+
+/// A mortise 26 by 18 mm cut by a 6 mm tool, inside, in two levels, its
+/// square corners relieved by dogbones: the centre's ring 20 by 12,
+/// anticlockwise with the walls on its right, out into each corner and back
+/// at each level.
+pub fn dogboned() -> Toolpath {
+    use camcraft_core::job::{Relief, ReliefStyle};
+    use camcraft_core::path::relief::{Edge, Kept, corners, relieve};
+    let ring = [
+        dvec2(-10.0, -6.0),
+        dvec2(10.0, -6.0),
+        dvec2(10.0, 6.0),
+        dvec2(-10.0, 6.0),
+    ];
+    let edges: Vec<Edge> = (0..4)
+        .map(|i| {
+            let (from, to) = (ring[i], ring[(i + 1) % 4]);
+            let along = (to - from).normalize();
+            Edge {
+                from,
+                to,
+                start: along,
+                end: along,
+                length: from.distance(to),
+            }
+        })
+        .collect();
+    let relief = Relief {
+        style: ReliefStyle::Dogbone,
+        sharper_than: None,
+    };
+    let found = corners(&edges, true, Kept::Right, 3.0, &relief, 0.01);
+    let mut t = Toolpath::new();
+    for z in [-1.5, -3.0] {
+        t.feed_to(ring[0].extend(z), MoveRole::Link, 800.0).unwrap();
+        for p in ring.iter().cycle().skip(1).take(4) {
+            t.feed_to(p.extend(z), MoveRole::Cut, 800.0).unwrap();
+        }
+    }
+    let (relieved, count) = relieve(&t, &found).unwrap();
+    assert_eq!(count, 8);
+    linked(&relieved)
+}

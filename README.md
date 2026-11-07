@@ -130,6 +130,21 @@ panels, the drawing and the helper that runs camcraft.
   reach, not the whole area again. Its adjustment leaves rest thinner than
   it alone, so it does not go round a sliver for nothing. Pocket clearing
   always clears only what is left.
+- **Corner relief.** A 2D profile, pocket or slot can cut out each inside
+  corner its tool leaves round, the tool's radius across, so a square part,
+  a tenon or another sheet's tab, fits it. A dogbone goes into the corner
+  halfway between its walls, as far as takes the tool's side to the
+  corner's point: a round notch reaching it, about four tenths of the
+  tool's radius at a square corner. A T-bone goes on along one wall into
+  the other, the tool's radius at a square corner: the wall nearer the
+  setup's X, or its Y, or the longer or the shorter wall, so the notch is
+  hidden in the one that shows least. Only corners sharper than an angle,
+  when one is given; corners the tool goes round, a curve's chords, and
+  any already square within the tolerance are left. Every corner is
+  relieved at every level and every pass round it, ramped or not, climbing
+  or not, with leads and tabs, and in every copy of a pattern; the
+  simulation cuts the notches, and the checks take what they cut past the
+  part as meant, not as a gouge.
 - **Picking in the view,** as camcraft's: a pick row in the panel arms it,
   and while it is armed, hovering shows what a click takes. An operation
   takes faces, and edges by the loop they go round at their height (an edge
@@ -179,6 +194,14 @@ panels, the drawing and the helper that runs camcraft.
   depends on the machine it is opened on.
 - **Status in the tree.** Each setup and operation shows how its run went:
   running (with how far), done, warnings, failed, or out of date.
+- **Turned off.** An operation, or a whole setup, can be turned off without
+  deleting it: Turn off in its menu in the tree, Runs in its panel, or
+  `enable` by script. An operation off stays in its setup but is not run,
+  simulated, checked or posted, and the operations after it cut the
+  material as if it were not there; a setup off is not run at all. Its
+  icon is struck through, its badge says it is off, and turned off from the
+  tree it is hidden, so it shows greyed and nothing of it is drawn; Turn on
+  brings it back.
 - **Checked against the material.** Every setup is simulated: a gouge, a rapid
   through material and the other failures camcraft checks for are listed in
   the setup's and the operation's panels, and a setup that fails is not

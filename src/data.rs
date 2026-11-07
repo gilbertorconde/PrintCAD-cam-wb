@@ -316,6 +316,10 @@ pub struct SetupData {
     /// library, so the setup cuts what was verified after the library changes.
     #[serde(default)]
     pub tools: BTreeMap<String, ToolSpec>,
+    /// Whether it runs. One turned off keeps its operations, but none of
+    /// them is worked out, simulated, checked or posted.
+    #[serde(default = "yes")]
+    pub enabled: bool,
 }
 
 impl SetupData {
@@ -362,6 +366,7 @@ impl SetupData {
             program_number: program_number(),
             tolerance,
             tools: BTreeMap::new(),
+            enabled: true,
         }
     }
 
@@ -1048,6 +1053,10 @@ impl OperationData {
 }
 
 /// Whether `v` is a number more than zero (NaN is not).
+fn yes() -> bool {
+    true
+}
+
 fn two() -> f64 {
     2.0
 }

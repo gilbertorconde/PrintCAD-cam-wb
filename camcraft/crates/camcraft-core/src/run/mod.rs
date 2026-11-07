@@ -199,9 +199,10 @@ pub fn run_prepared_planned(
     progress(Stage::Verifying);
     let budget = job.tolerance + sim_pitch;
     let part = cut_past(
+        job,
         setup,
         PartSurface::from_mesh(mesh, lo, hi, sim_pitch)?,
-        &keyframes,
+        (&operations, &keyframes),
     )?;
     let part = Arc::new(part.reaching(budget));
     let verify = stock.verify(&part, budget, LEFTOVER_LIMIT);
@@ -223,14 +224,16 @@ pub fn run_prepared_planned(
 
 /// The part as the setup's operations mean to leave it: cut past where one with
 /// negative stock to leave cut, which is then no gouge there, and nowhere else;
-/// and cut into where an engraving or a V-carving cut, as deep as it cut,
-/// since what they cut is drawn on the part, not modelled in it. Where each cut
-/// is the material it took down, between the stock before it and after
-/// (`keyframes`).
+/// cut into where an engraving or a V-carving cut, as deep as it cut, since
+/// what they cut is drawn on the part, not modelled in it; and cut into where
+/// a corner's relief cut past the corner, as it is meant to. Where each cut is
+/// the material it took down, between the stock before it and after
+/// (`keyframes`); where its reliefs are, its result's (`operations`).
 fn cut_past(
+    job: &Job,
     setup: &Setup,
     mut part: PartSurface,
-    keyframes: &[Arc<PackedStock>],
+    (operations, keyframes): (&[OperationResult], &[Arc<PackedStock>]),
 ) -> Result<PartSurface, RunError> {
     for (i, op) in setup.operations.iter().enumerate() {
         let leave = op.stock_to_leave();
@@ -238,7 +241,8 @@ fn cut_past(
         let uses = op.strategy.uses();
         // A thread's groove, past the wall it is cut in, is meant too.
         let into = uses.traces || uses.carves || matches!(op.strategy, StrategySpec::Thread { .. });
-        if !op.enabled || (radial == 0.0 && axial == 0.0 && !into) {
+        let reliefs = operations.get(i).map_or(&[][..], |r| r.reliefs.as_slice());
+        if !op.enabled || (radial == 0.0 && axial == 0.0 && !into && reliefs.is_empty()) {
             continue;
         }
         let (Some(before), Some(after)) = (keyframes.get(i), keyframes.get(i + 1)) else {
@@ -252,9 +256,29 @@ fn cut_past(
         };
         part = if into {
             part.cut_into(lowered)
-        } else {
+        } else if radial > 0.0 || axial > 0.0 {
             part.cut_past(radial, axial, |ix, iy| lowered(ix, iy).is_some())
+        } else {
+            part
         };
+        if reliefs.is_empty() {
+            continue;
+        }
+        // What the tool cut beside each relief, past where it reaches from
+        // the corner itself: a cell's width either way, as the grid has it.
+        let reach = job.tool_for(op).map_or(0.0, |t| t.diameter / 2.0) + leave.radial;
+        let pitch = before.pitch();
+        let relieved = |p: glam::DVec2| {
+            reliefs.iter().any(|&[at, end]| {
+                let along = end - at;
+                let t = (p - at).dot(along) / along.length_squared().max(1e-12);
+                let nearest = at + along * t.clamp(0.0, 1.0);
+                p.distance(nearest) <= reach + pitch && p.distance(at) > reach - pitch
+            })
+        };
+        part = part.cut_into(|ix, iy| {
+            lowered(ix, iy).filter(|_| before.position(ix, iy).is_some_and(relieved))
+        });
     }
     Ok(part)
 }

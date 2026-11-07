@@ -40,6 +40,11 @@ pub struct Passes {
     /// ([`Uses::finishing`](super::Uses::finishing)).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finishing: Option<Finishing>,
+    /// Inside corners cut out past where a round tool reaches, so a square
+    /// part fits them: dogbones or T-bones; none when not given
+    /// ([`Uses::relief`](super::Uses::relief), [`crate::path::relief`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relief: Option<Relief>,
 }
 
 impl Default for Passes {
@@ -53,8 +58,43 @@ impl Default for Passes {
             rpm: None,
             tabs: None,
             finishing: None,
+            relief: None,
         }
     }
+}
+
+/// Corner relief: each inside corner the tool leaves round, the tool's
+/// radius across, cut out to its sharp point, so a square part, a tenon or
+/// another sheet's tab, fits it. What router users call dogbones.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Relief {
+    /// Which way the tool goes into the corner.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub style: ReliefStyle,
+    /// Only corners sharper than this, in degrees, between the walls that
+    /// meet there; every corner when not given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sharper_than: Option<f64>,
+}
+
+/// Which way a corner's relief goes into it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReliefStyle {
+    /// Into the corner, halfway between its walls: a round notch reaching
+    /// its point.
+    #[default]
+    Dogbone,
+    /// On along whichever wall runs nearer the setup's X, into the other:
+    /// a T-bone, its notch hidden in one wall.
+    TBoneX,
+    /// On along whichever wall runs nearer the setup's Y.
+    TBoneY,
+    /// On along the longer wall, into the shorter.
+    TBoneLong,
+    /// On along the shorter wall, into the longer.
+    TBoneShort,
 }
 
 /// A pocket's finishing passes along its walls: Fusion's 2D pocket's.
@@ -186,6 +226,11 @@ impl Operation {
             feed: f.feed.unwrap_or(self.passes.feed),
             repeat: f.repeat,
         })
+    }
+
+    /// Its corner relief, when it is asked for and its strategy has it.
+    pub fn relief(&self) -> Option<Relief> {
+        self.passes.relief.filter(|_| self.strategy.uses().relief)
     }
 
     /// The deepest each of its levels may be, when it cuts in levels: its own,

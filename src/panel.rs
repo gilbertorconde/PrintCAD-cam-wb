@@ -16,7 +16,7 @@ use crate::data::{
     ToolAxis, Zero,
 };
 use crate::linking::{linking_event, linking_group};
-use crate::passes::{finishing_group, passes_event, strategy_rows, tabs_group};
+use crate::passes::{finishing_group, passes_event, relief_group, strategy_rows, tabs_group};
 use crate::pattern::{pattern_event, pattern_group};
 use crate::picking::Slot;
 use crate::runs::State;
@@ -510,6 +510,17 @@ pub fn setup_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
     let mut panel = vec![Widget::Heading {
         text: node.name.clone(),
     }];
+    panel.push(Widget::Toggle {
+        id: "enabled".into(),
+        label: "Runs".into(),
+        on: setup.enabled,
+    });
+    if !setup.enabled {
+        panel.push(note(
+            NoteKind::Info,
+            "Turned off: none of its operations is run, simulated, checked or posted.",
+        ));
+    }
     panel.push(group(
         "Bodies",
         vec![
@@ -1021,6 +1032,10 @@ pub fn setup_event(cam: &mut Cam, id: &str, event: PanelEvent) {
                 }
             }
         }
+        PanelEvent::Toggle { id: t, on } if t == "enabled" => {
+            setup.enabled = on;
+            cam.write_setup(id, &setup);
+        }
         PanelEvent::Toggle { id: t, on } if t == "wcs_known" => {
             setup.wcs_known = on;
             cam.write_setup(id, &setup);
@@ -1035,6 +1050,8 @@ pub fn setup_event(cam: &mut Cam, id: &str, event: PanelEvent) {
         PanelEvent::Button { id: b } if b == "save_all" => {
             let programs: Result<Vec<_>, String> = operations_of(id)
                 .iter()
+                // One turned off has no program, and is left out.
+                .filter(|(_, data)| data.operation.enabled)
                 .filter_map(|(op, _)| match cam.program_of(&op.id, false) {
                     Err(e) if e.ends_with("made no toolpath.") => None,
                     other => Some(other),
@@ -1611,6 +1628,7 @@ pub fn operation_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
     passes.extend(strategy_rows(&data, spec, id));
     panel.push(group("Passes", passes));
     panel.extend(tabs_group(&data, id));
+    panel.extend(relief_group(&data, id));
     panel.extend(finishing_group(&data, spec, id));
 
     // What it machines.

@@ -5,8 +5,8 @@
 
 use camcraft_core::job::{
     ChamferSide, ContourOrder, FaceDirection, Finishing, Operation, PassOrder, RadialDirection,
-    Rest, RestSource, SlotPattern, StrategySpec, TabShape, Tabs, ThreadHand, ToolKind, ToolSpec,
-    TraceDirection,
+    Relief, ReliefStyle, Rest, RestSource, SlotPattern, StrategySpec, TabShape, Tabs, ThreadHand,
+    ToolKind, ToolSpec, TraceDirection,
 };
 use printcad_bench_sdk::api::*;
 use printcad_bench_sdk::serde_json::{self, Value};
@@ -96,6 +96,14 @@ pub struct PassesData {
     pub finishing_stepover: Opt,
     pub finishing_feed: Opt,
     pub finishing_repeat: bool,
+    /// Inside corners relieved, dogbones or T-bones, and only those sharper
+    /// than an angle, in degrees, when one is given.
+    #[serde(default)]
+    pub relief: bool,
+    #[serde(default)]
+    pub relief_style: ReliefStyle,
+    #[serde(default = "obtuse")]
+    pub relief_angle: Opt,
 }
 
 impl Default for PassesData {
@@ -142,6 +150,9 @@ impl Default for PassesData {
             finishing_stepover: Opt::of(finishing.stepover),
             finishing_feed: Opt::of(finishing.feed),
             finishing_repeat: finishing.repeat,
+            relief: false,
+            relief_style: ReliefStyle::default(),
+            relief_angle: obtuse(),
         };
         for name in [
             "radial",
@@ -163,6 +174,15 @@ impl Default for PassesData {
 /// An engraving's depth in a document from before it had one: camcraft's.
 fn half() -> f64 {
     0.5
+}
+
+/// The angle corner relief starts from when one is first given: every
+/// corner sharper than the walls of a 45° chamfer's.
+fn obtuse() -> Opt {
+    Opt {
+        value: 120.0,
+        given: false,
+    }
 }
 
 /// A chamfer's tip offset in a document from before it had one: camcraft's.
@@ -201,6 +221,13 @@ impl PassesData {
             out.finishing_stepover = Opt::of(f.stepover);
             out.finishing_feed = Opt::of(f.feed);
             out.finishing_repeat = f.repeat;
+        }
+        if let Some(r) = p.relief {
+            out.relief = true;
+            out.relief_style = r.style;
+            if let Some(a) = r.sharper_than {
+                out.relief_angle = Opt::of(Some(a));
+            }
         }
         out
     }
@@ -445,6 +472,10 @@ impl PassesData {
             feed: self.finishing_feed.get(),
             repeat: self.finishing_repeat,
         });
+        p.relief = (uses.relief && self.relief).then_some(Relief {
+            style: self.relief_style,
+            sharper_than: self.relief_angle.get(),
+        });
     }
 
     /// The numbers formulas may drive, by pointer into the operation's data,
@@ -567,6 +598,12 @@ impl PassesData {
                 Dim::Length,
             ),
             (
+                uses.relief && self.relief && self.relief_angle.given,
+                "relief_angle",
+                "Relieve corners sharper than",
+                Dim::Angle,
+            ),
+            (
                 finishing && self.finishing_stepover.given,
                 "finishing_stepover",
                 "Finishing stepover",
@@ -631,6 +668,13 @@ const SLOT_PATTERNS: [(SlotPattern, &str); 2] = [
 const CHAMFER_SIDES: [(ChamferSide, &str); 2] = [
     (ChamferSide::Auto, "Away from the material"),
     (ChamferSide::Flipped, "Flipped: the other side"),
+];
+const RELIEF_STYLES: [(ReliefStyle, &str); 5] = [
+    (ReliefStyle::Dogbone, "Dogbone: into the corner"),
+    (ReliefStyle::TBoneX, "T-bone along X"),
+    (ReliefStyle::TBoneY, "T-bone along Y"),
+    (ReliefStyle::TBoneLong, "T-bone along the longer wall"),
+    (ReliefStyle::TBoneShort, "T-bone along the shorter wall"),
 ];
 const TAB_SHAPES: [(TabShape, &str); 2] = [
     (TabShape::Rectangular, "Rectangular"),
@@ -1139,6 +1183,50 @@ pub fn tabs_group(data: &OperationData, feature: &str) -> Option<Widget> {
     Some(group("Tabs", rows))
 }
 
+/// The Corners group, for a strategy that can relieve them.
+pub fn relief_group(data: &OperationData, feature: &str) -> Option<Widget> {
+    if !data.strategy().uses().relief {
+        return None;
+    }
+    let p = &data.passes;
+    let mut rows = vec![Widget::Toggle {
+        id: "passes/relief".into(),
+        label: "Relieve inside corners, so a square part fits".into(),
+        on: p.relief,
+    }];
+    if p.relief {
+        rows.push(pick(
+            "passes/relief_style",
+            "Style",
+            &RELIEF_STYLES,
+            p.relief_style,
+        ));
+        optional_row(
+            &mut rows,
+            "passes",
+            "relief_angle",
+            "Corners sharper than",
+            "every corner",
+            p.relief_angle,
+            Dim::Angle,
+            feature,
+        );
+        let how = match p.relief_style {
+            ReliefStyle::Dogbone => "out into it, halfway between its walls",
+            _ => "on along one wall, into the other",
+        };
+        rows.push(Widget::Text {
+            text: format!(
+                "Where the tool leaves an inside corner round, it goes {how}, until \
+                 its side reaches the corner's point, and back, at every level. The \
+                 notch cuts past the part, as it is meant to: it is no gouge."
+            ),
+            mono: false,
+        });
+    }
+    Some(group("Corners", rows))
+}
+
 /// The Finishing passes group, for a strategy that has them.
 pub fn finishing_group(
     data: &OperationData,
@@ -1209,6 +1297,7 @@ fn start(field: &str, data: &OperationData, tool: Option<&ToolSpec>) -> Option<f
         "finishing_feed" => data.feed,
         "max_depth" => 1.0,
         "thread_diameter" => nominal(data.passes.thread_pitch),
+        "relief_angle" => obtuse().value,
         _ => return None,
     })
 }
@@ -1271,6 +1360,7 @@ fn put_right(p: &mut PassesData) {
     p.tip_offset = p.tip_offset.max(0.0);
     p.boss_width = p.boss_width.max(0.0);
     p.rest_adjustment = p.rest_adjustment.max(0.0);
+    p.relief_angle.value = p.relief_angle.value.clamp(1.0, 180.0);
 }
 
 /// A widget of the passes' rows changed: `id` without its `passes/`. Whether it
@@ -1349,6 +1439,12 @@ pub fn passes_event(
             return set(
                 Some(&mut data.passes.hand),
                 HANDS.get(*index).map(|(x, _)| *x),
+            );
+        }
+        ("relief_style", PanelEvent::Choice { index, .. }) => {
+            return set(
+                Some(&mut data.passes.relief_style),
+                RELIEF_STYLES.get(*index).map(|(x, _)| *x),
             );
         }
         ("tab_shape", PanelEvent::Choice { index, .. }) => {

@@ -1329,3 +1329,90 @@ selection = {{ edges = [
     let all = helixes(true);
     assert!(all > one, "{one} then {all}");
 }
+
+/// The hinge jig roughed then profiled, as a request.
+fn rough_then_profile(rough: &str) -> Request {
+    let job = format!(
+        "{JOB}{rough}\n[[setup.operation]]\nname = \"outline\"\nstrategy = \"profile\"\n\
+         tool = \"flat-6\"\npasses = {{ stepdown = 6.0 }}\n"
+    );
+    Request {
+        version: VERSION,
+        job,
+        shapes: BTreeMap::from([(
+            "part".to_string(),
+            Shape {
+                text: native("hinge_jig.step"),
+                placement: IDENTITY,
+            },
+        )]),
+        max_points: 2000,
+        ..Request::default()
+    }
+}
+
+/// An operation turned off is in the run but made nothing: no toolpath, no
+/// program, no checks, no time in playback. The one after it cuts the
+/// material as if it were not there: the same program as with it gone.
+#[test]
+fn an_operation_turned_off_is_left_out() {
+    let off = answer(&rough_then_profile("enabled = false\n")).unwrap();
+    let rough = &off.operations[0];
+    assert_eq!(rough.made, "disabled");
+    assert!(rough.program.is_none());
+    assert!(rough.strokes.is_empty() && rough.points == 0);
+    assert_eq!(rough.cut_mm, 0.0);
+    assert!(off.findings.iter().all(|f| f.operation != Some(0)));
+    assert_eq!(off.operations[1].made, "generated");
+
+    // With it gone, the outline is the only operation.
+    let mut gone = rough_then_profile("");
+    gone.job = gone.job.replace(
+        "[[setup.operation]]\nname = \"rough\"\nstrategy = \"pocket-clearing\"\ntool = \"flat-6\"\npasses = { stepdown = 3.0, stepover = 3.0 }\n",
+        "",
+    );
+    assert!(!gone.job.contains("rough"), "{}", gone.job);
+    let gone = answer(&gone).unwrap();
+    let text = |r: &cam_protocol::Run, i: usize| {
+        r.operations[i]
+            .program
+            .as_ref()
+            .unwrap()
+            .text
+            .lines()
+            .filter(|l| !l.contains("(") && !l.starts_with(';'))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert_eq!(text(&off, 1), text(&gone, 0));
+    // On again, it cuts first, and the outline after it has less to take.
+    let on = answer(&rough_then_profile("")).unwrap();
+    assert_eq!(on.operations[0].made, "generated");
+    assert_ne!(text(&on, 1), text(&gone, 0));
+}
+
+/// A profile asked for corner relief posts longer: out into each inside
+/// corner and back. The verifier takes the notches as meant, not gouges.
+#[test]
+fn a_profile_posts_its_dogbones() {
+    let cut = |relief: &str| {
+        let mut request = rough_then_profile("enabled = false\n");
+        request.job = request.job.replace(
+            "passes = { stepdown = 6.0 }",
+            &format!("passes = {{ stepdown = 6.0{relief} }}"),
+        );
+        let run = answer(&request).unwrap();
+        let op = &run.operations[1];
+        assert_eq!(op.made, "generated", "{:?}", op.warnings);
+        let gouges = run
+            .findings
+            .iter()
+            .filter(|f| f.level == Level::Fail)
+            .count();
+        (op.program.as_ref().unwrap().text.lines().count(), gouges)
+    };
+    let (plain, failed) = cut("");
+    let (relieved, failed_relieved) = cut(", relief = { style = \"dogbone\" }");
+    assert!(relieved > plain, "{relieved} lines against {plain}");
+    assert_eq!(failed_relieved, failed);
+}
