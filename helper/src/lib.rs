@@ -15,8 +15,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use cam_protocol::{
-    Cylinder, Finding, HeightPlane, IDENTITY, Level, Mark, Material, OperationRun, Program,
-    Request, Run, Stroke, VERSION,
+    Cutting, Cylinder, Finding, HeightPlane, IDENTITY, Layout, Level, Machining, Mark, Material,
+    OperationRun, Program, Request, Run, Stroke, ToolUse, VERSION,
 };
 use camcraft_core::job::{HeightContext, Operation, Outline, Programs};
 use camcraft_core::path::toolpath::{MoveRole, Toolpath};
@@ -26,8 +26,8 @@ use camcraft_core::setup::frame::Frame;
 use camcraft_core::setup::{Bodies, Prepared, bounds_all, features, prepare};
 use camcraft_geom::mesh::Aabb;
 use camcraft_import::native::load_native;
-use camcraft_post::op::lower_counted;
-use camcraft_post::profile::Profile;
+use camcraft_post::op::{Op, lower_counted, tilt_notes};
+use camcraft_post::profile::{Profile, Rapid};
 use camcraft_post::render::{Title, render_program};
 use camcraft_session::checks::Level as CheckLevel;
 use camcraft_session::{
@@ -202,6 +202,11 @@ pub(crate) fn execute(
     // from the setup's.
     let one_each = setup.programs == Programs::Operation;
     let mut numbered = 0u32;
+    // How many times the programs change the tool.
+    let mut tool_changes = 0usize;
+    let rapid = profile.rapids();
+    // What the programs' headers say of a tilt, once.
+    let mut tilt: Option<Vec<String>> = None;
     for (k, op) in ran.result.operations.iter().enumerate() {
         let heights = match (setup.operations.get(k), stock_box) {
             _ if op.made == Made::Text => Vec::new(),
@@ -226,7 +231,12 @@ pub(crate) fn execute(
             Made::Disabled => "disabled",
             Made::Text => "custom-gcode",
         };
-        let mut drawn = strokes(&op.path, &frame, tolerance, request.max_points);
+        let mut drawn = strokes(&op.path, &frame, tolerance, request.max_points, &rapid);
+        if tilt.is_none() && op.made.has_paths() {
+            tilt = program_spec(op, setup.wcs, &frame, &profile)
+                .ok()
+                .map(|spec| tilt_notes(&spec));
+        }
         let program = if one_each && op.made.has_paths() {
             let name = camcraft_session::program_name(&setup.name, k, &op.name);
             // As `camcraft_session::program` posts it, keeping which move
@@ -242,6 +252,7 @@ pub(crate) fn execute(
             });
             match posted {
                 Ok((ops, made)) => {
+                    tool_changes += changes(&ops);
                     let title = Title {
                         name: &name,
                         number: setup.number.saturating_add(numbered),
@@ -325,6 +336,11 @@ pub(crate) fn execute(
             program,
             heights,
             seconds: drawn.times.last().copied().unwrap_or(0.0),
+            cutting: setup
+                .operations
+                .get(k)
+                .filter(|_| op.made.has_paths())
+                .and_then(|spec| cutting(spec, op, &drawn)),
             marks: marks(&ran, k, op, &drawn, elapsed),
             outlines: setup.operations.get(k).and_then(|spec| {
                 let uses = spec.strategy.uses();
@@ -360,6 +376,7 @@ pub(crate) fn execute(
         };
         match setup_program(setup, &ran.result, &profile, &title) {
             Ok(p) => {
+                tool_changes = p.tool_changes;
                 let (operations, moves) = line_moments(&p.made, &p.report.op_lines, p.report.lines);
                 Some(Program {
                     name,
@@ -385,6 +402,27 @@ pub(crate) fn execute(
         }
     };
 
+    // A program that could not be posted changes the tool, at least,
+    // wherever the next operation's is another.
+    if tool_changes == 0 {
+        tool_changes = changes_by_tool(&ran.result.operations);
+    }
+    let machining = Machining {
+        moves: elapsed,
+        tool_changes: u32::try_from(tool_changes).unwrap_or(u32::MAX),
+        tool_change: profile.tool_change_seconds,
+        rapid: [rapid.x, rapid.y, rapid.z],
+        rapid_given: profile.rapid.is_some(),
+    };
+    let tools = tool_uses(&job, setup, &ran.result.operations, &draws);
+    let layout = stock_box.map(|b| Layout {
+        stock: [to_array(b.min), to_array(b.max)],
+        part: part_box(&loaded, &setup.models, &frame).unwrap_or([[0.0; 3]; 2]),
+        tool_axis: to_array(frame.turn.tool_axis()),
+        tilt: tilt.unwrap_or_default(),
+        post: profile.name.clone(),
+        date: date.clone(),
+    });
     let stock = stock_box
         .map(|b| corners(&frame, b))
         .unwrap_or([[0.0; 3]; 8]);
@@ -414,6 +452,9 @@ pub(crate) fn execute(
         program,
         seconds: started.elapsed().as_secs_f64(),
         timing: cam_protocol::timing(draws.iter().map(|d| d.times.as_slice())),
+        machining,
+        tools,
+        layout,
     };
     Ok(Executed {
         run,
@@ -421,6 +462,218 @@ pub(crate) fn execute(
         ran,
         draws,
     })
+}
+
+/// How many times `ops`, a program lowered, changes the tool.
+fn changes(ops: &[Op]) -> usize {
+    ops.iter()
+        .filter(|op| matches!(op, Op::ToolChange { .. }))
+        .count()
+}
+
+/// How many times a setup's operations change the tool, the first
+/// included, going by their tools alone: for a setup whose program was not
+/// posted.
+pub(crate) fn changes_by_tool(ops: &[camcraft_core::run::OperationResult]) -> usize {
+    let mut tools: Vec<u32> = ops
+        .iter()
+        .filter(|op| op.made.has_paths())
+        .map(|op| op.tool_number)
+        .collect();
+    tools.dedup();
+    tools.len()
+}
+
+/// What the setup sheet says of how operation `spec` cut, as run (`op`).
+fn cutting(
+    spec: &Operation,
+    op: &camcraft_core::run::OperationResult,
+    drawn: &Drawn,
+) -> Option<Cutting> {
+    let uses = spec.strategy.uses();
+    let leave = spec.stock_to_leave();
+    Some(Cutting {
+        strategy: op.strategy.to_string(),
+        tool: spec.tool.clone()?,
+        tool_number: op.tool_number,
+        rpm: op.rpm,
+        feed: spec.passes.feed,
+        plunge_feed: spec.linking.plunge_feed,
+        fastest_feed: drawn.fastest,
+        stepover: uses.stepover.then_some(spec.passes.stepover),
+        stepdown: spec.stepdown(),
+        stock_to_leave: (uses.stock_to_leave != camcraft_core::job::Leave::None)
+            .then_some([leave.radial, leave.axial]),
+        z: drawn.z,
+        notes: strategy_notes(spec),
+    })
+}
+
+/// What the setup sheet says of an operation's own settings, beyond its
+/// feeds and steps: a bore's pitch, a thread's pitch and hand, a tap, a
+/// peck, rest machining and a pattern's copies.
+fn strategy_notes(spec: &Operation) -> Vec<String> {
+    use camcraft_core::job::{StrategySpec, ThreadHand};
+    let mm = |v: f64| format!("{}", (v * 1000.0).round() / 1000.0);
+    let hand = |h: ThreadHand| match h {
+        ThreadHand::Right => "right-hand",
+        ThreadHand::Left => "left-hand",
+    };
+    let mut out = Vec::new();
+    match &spec.strategy {
+        StrategySpec::Bore { pitch, .. } => out.push(format!("helix {} mm a turn", mm(*pitch))),
+        StrategySpec::Thread {
+            pitch,
+            hand: h,
+            diameter,
+            ..
+        } => out.push(match diameter {
+            Some(d) => format!("thread {} mm pitch, {}, Ø{}", mm(*pitch), hand(*h), mm(*d)),
+            None => format!("thread {} mm pitch, {}", mm(*pitch), hand(*h)),
+        }),
+        StrategySpec::Circular { boss_width, .. } if *boss_width > 0.0 => {
+            out.push(format!("boss material {} mm wide", mm(*boss_width)));
+        }
+        StrategySpec::Drill {
+            pitch: Some(pitch),
+            hand: h,
+            ..
+        } => out.push(format!("tapped {} mm pitch, {}", mm(*pitch), hand(*h))),
+        StrategySpec::Drill {
+            peck: Some(peck),
+            chip_break,
+            ..
+        } => out.push(match chip_break {
+            Some(b) => format!("pecks of {} mm, backing off {}", mm(*peck), mm(*b)),
+            None => format!("pecks of {} mm", mm(*peck)),
+        }),
+        StrategySpec::Adaptive {
+            rest: Some(rest), ..
+        } => out.push(if rest.adjustment > 0.0 {
+            format!(
+                "rest machining: what the operations before left, past {} mm",
+                mm(rest.adjustment)
+            )
+        } else {
+            "rest machining: what the operations before left".into()
+        }),
+        _ => {}
+    }
+    if let Some(relief) = spec.relief() {
+        use camcraft_core::job::ReliefStyle;
+        let style = match relief.style {
+            ReliefStyle::Dogbone => "dogbones",
+            ReliefStyle::TBoneX => "T-bones along X",
+            ReliefStyle::TBoneY => "T-bones along Y",
+            ReliefStyle::TBoneLong => "T-bones along the longer wall",
+            ReliefStyle::TBoneShort => "T-bones along the shorter wall",
+        };
+        out.push(match relief.sharper_than {
+            Some(a) => format!("corners relieved with {style}, sharper than {}°", mm(a)),
+            None => format!("corners relieved with {style}"),
+        });
+    }
+    let copies = spec.transform.copies();
+    if copies > 1 {
+        out.push(format!("{copies} copies, by its pattern"));
+    }
+    out
+}
+
+/// The tools a setup's operations cut with, in the order they first cut,
+/// each with what it does.
+fn tool_uses(
+    job: &camcraft_core::job::Job,
+    setup: &camcraft_core::job::Setup,
+    ops: &[camcraft_core::run::OperationResult],
+    draws: &[Drawn],
+) -> Vec<ToolUse> {
+    let mut out: Vec<ToolUse> = Vec::new();
+    for (k, (op, drawn)) in ops.iter().zip(draws).enumerate() {
+        if !op.made.has_paths() {
+            continue;
+        }
+        let Some(spec) = setup.operations.get(k) else {
+            continue;
+        };
+        let (Some(name), Some(tool)) = (spec.tool.as_deref(), job.tool_for(spec)) else {
+            continue;
+        };
+        let at = match out.iter().position(|t| t.name == name) {
+            Some(at) => at,
+            None => {
+                out.push(ToolUse {
+                    name: name.to_string(),
+                    number: tool.number,
+                    kind: tool_kind(tool.kind).into(),
+                    diameter: tool.diameter,
+                    corner: tool.corner,
+                    angle: tool.angle.or(match tool.kind {
+                        camcraft_core::job::ToolKind::Drill => {
+                            Some(camcraft_core::job::DRILL_POINT)
+                        }
+                        _ => None,
+                    }),
+                    pitch_range: tool.pitch_range,
+                    flutes: tool.flutes,
+                    flute_length: tool.flute_length,
+                    stickout: tool.stickout,
+                    overall_length: tool.overall_length,
+                    holder: tool.holder.as_ref().map(|h| {
+                        if h.name.is_empty() {
+                            format!("{} segment(s)", h.segments.len())
+                        } else {
+                            h.name.clone()
+                        }
+                    }),
+                    comment: tool.comment.clone(),
+                    ..ToolUse::default()
+                });
+                out.len() - 1
+            }
+        };
+        let Some(t) = out.get_mut(at) else {
+            continue;
+        };
+        t.operations.push(k);
+        if let Some([low, _]) = drawn.z {
+            t.lowest = Some(t.lowest.map_or(low, |l| l.min(low)));
+        }
+        t.fastest_feed = t.fastest_feed.max(drawn.fastest);
+        t.fastest_rpm = t.fastest_rpm.max(op.rpm);
+        t.seconds += drawn.times.last().copied().unwrap_or(0.0);
+    }
+    out
+}
+
+/// A tool's kind, as a job file names it.
+fn tool_kind(kind: camcraft_core::job::ToolKind) -> &'static str {
+    use camcraft_core::job::ToolKind;
+    match kind {
+        ToolKind::Flat => "flat",
+        ToolKind::Ball => "ball",
+        ToolKind::Bullnose => "bullnose",
+        ToolKind::Cone => "cone",
+        ToolKind::Drill => "drill",
+        ToolKind::ThreadMill => "thread-mill",
+    }
+}
+
+/// The box round the bodies `names`, as the setup sees them: their lowest
+/// and highest corners from the work zero along its axes.
+fn part_box(loaded: &[(&str, Model)], names: &[String], frame: &Frame) -> Option<[[f64; 3]; 2]> {
+    let mut low = DVec3::splat(f64::INFINITY);
+    let mut high = DVec3::splat(f64::NEG_INFINITY);
+    for (_, model) in loaded.iter().filter(|(n, _)| names.iter().any(|m| m == n)) {
+        for &v in model.body.mesh().vertices() {
+            let p = frame.to_setup(v);
+            low = low.min(p);
+            high = high.max(p);
+        }
+    }
+    low.cmple(high)
+        .all()
+        .then(|| [to_array(low), to_array(high)])
 }
 
 /// Where operation `k`'s checks found something at a move, and its steep
@@ -767,6 +1020,11 @@ pub(crate) struct Drawn {
     pub after_move: Vec<usize>,
     /// Which points, before thinning, were kept, in order; `None` for all.
     pub kept: Option<Vec<usize>>,
+    /// The lowest and highest the tool's tip goes, in the setup's frame;
+    /// `None` for no moves.
+    pub z: Option<[f64; 2]>,
+    /// The fastest any move is fed, mm/min.
+    pub fastest: f64,
 }
 
 impl Drawn {
@@ -783,20 +1041,32 @@ impl Drawn {
     }
 }
 
-/// The rapid rate a program is timed at until a machine profile gives one,
-/// as camcraft's app times it, in mm/min.
-const ASSUMED_RAPID: f64 = 5000.0;
-
-/// How long a move `length` long takes, in seconds: at its feed, or the
-/// assumed rapid rate.
-fn duration(length: f64, feed: Option<f64>) -> f64 {
-    let rate = feed.filter(|f| *f > 0.0).unwrap_or(ASSUMED_RAPID);
-    length / rate * 60.0
+/// How long a move `length` long from `from` to `to`, in the setup's frame,
+/// takes, in seconds: at its feed, or at rapid, as the machine's axes go
+/// (`rapid`). The program's axes are the setup's.
+pub(crate) fn duration(
+    from: DVec3,
+    to: DVec3,
+    length: f64,
+    feed: Option<f64>,
+    rapid: &Rapid,
+) -> f64 {
+    match feed.filter(|f| *f > 0.0) {
+        Some(feed) => rapid.feed_seconds(length, to - from, feed),
+        None => rapid.seconds(to - from),
+    }
 }
 
 /// `path` as strokes in the model's coordinates, thinned to `budget` points,
-/// with how many points it has, how far it cuts and how far it rapids.
-fn strokes(path: &Toolpath, frame: &Frame, tolerance: f64, budget: usize) -> Drawn {
+/// with how many points it has, how far it cuts and how far it rapids, each
+/// move timed at the machine's rates (`rates`).
+pub(crate) fn strokes(
+    path: &Toolpath,
+    frame: &Frame,
+    tolerance: f64,
+    budget: usize,
+    rates: &Rapid,
+) -> Drawn {
     let mut out: Vec<Stroke> = Vec::new();
     let (mut cut, mut rapid) = (0.0, 0.0);
     let mut at: Option<DVec3> = None;
@@ -805,9 +1075,17 @@ fn strokes(path: &Toolpath, frame: &Frame, tolerance: f64, budget: usize) -> Dra
     let mut times = Vec::new();
     let mut clock = 0.0;
     let mut raw = 0;
+    let mut z: Option<[f64; 2]> = None;
+    let mut fastest: f64 = 0.0;
     for m in path.moves() {
         let fast = m.role == MoveRole::Rapid;
         ends.push(m.to);
+        z = Some(z.map_or([m.to.z, m.to.z], |[lo, hi]| {
+            [lo.min(m.to.z), hi.max(m.to.z)]
+        }));
+        if let Some(f) = m.feed {
+            fastest = fastest.max(f);
+        }
         let Some(from) = at else {
             times.push(clock);
             at = Some(m.to);
@@ -820,7 +1098,7 @@ fn strokes(path: &Toolpath, frame: &Frame, tolerance: f64, budget: usize) -> Dra
             continue;
         };
         let length = m.length(from);
-        clock += duration(length, m.feed);
+        clock += duration(from, m.to, length, m.feed, rates);
         times.push(clock);
         if fast {
             rapid += length;
@@ -854,6 +1132,8 @@ fn strokes(path: &Toolpath, frame: &Frame, tolerance: f64, budget: usize) -> Dra
         times,
         after_move,
         kept: None,
+        z,
+        fastest,
     };
     if budget == 0 {
         return drawn;
