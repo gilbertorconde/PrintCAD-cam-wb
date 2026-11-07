@@ -32,7 +32,7 @@ use crate::setup::{Bodies, Prepared};
 use crate::strategy::StrategyError;
 use crate::strategy::adaptive::{AdaptiveParams, adaptive_rough, flat_heights};
 use crate::strategy::chamfer::{Centres, Place, centres, material_side};
-use crate::strategy::drilling::{DrillParams, DrillReport, Hole, Tap, drill, holes, nearest_first};
+use crate::strategy::drilling::{DrillParams, DrillReport, Hole, Round, Tap, drill};
 use crate::strategy::engrave::{EngraveParams, EngraveReport, Levels, Trace, engrave, in_order};
 use crate::strategy::face::{FaceParams, LevelsAsked, face};
 use crate::strategy::flat::{FlatParams, flat_finish};
@@ -53,16 +53,19 @@ use crate::strategy::waterline::{WaterlineParams, waterline};
 mod carving;
 mod clearing;
 mod finishing;
+mod holes;
 mod link;
 
 pub(super) use carving::chamfer_curves;
 use carving::{chamfer_paths, engrave_paths, slot_paths, vcarve_paths};
 use clearing::{adaptive_paths, drill_paths, face_paths, planar_paths, pocket_clearing_paths};
-pub(super) use clearing::{drill_holes, heights_of, planar_areas};
+pub(super) use clearing::{heights_of, planar_areas};
 use finishing::{
     contour_paths, flat_paths, morphed_spiral_paths, parallel_paths, radial_paths, scallop_paths,
     spiral_paths,
 };
+pub(super) use holes::hole_targets;
+use holes::milled_paths;
 use link::{Cutting, OnPart, link_params};
 
 /// One operation, and everything its strategy works from.
@@ -152,8 +155,8 @@ type Paths = (Toolpath, u64, StrategyDetail);
 pub(super) enum Target {
     /// The machining boundary its tool's centre is kept to, if any.
     Limit(Option<Region>),
-    /// A drilling operation's holes, in order.
-    Holes(Vec<Hole>),
+    /// A hole operation's holes and bosses, in order.
+    Holes(Vec<Round>),
     /// A 2D operation's areas, each with its floor.
     Areas(Vec<Area>),
     /// The curves an engraving follows.
@@ -261,9 +264,12 @@ pub(super) fn run_operation(
             work,
             (peck, chip_break, dwell),
             op.strategy.tap(),
-            holes,
+            &holes.iter().map(|r| r.hole).collect::<Vec<Hole>>(),
             &mut warnings,
         )?,
+        StrategySpec::Bore { .. } | StrategySpec::Circular { .. } | StrategySpec::Thread { .. } => {
+            milled_paths(work, holes, &mut warnings)?
+        }
         StrategySpec::Engrave {
             depth,
             direction,
@@ -500,6 +506,9 @@ pub(super) fn not_made(op: &Operation, spec: Option<&ToolSpec>, made: Made) -> O
             StrategyDetail::Engrave(Default::default())
         }
         StrategySpec::VCarve { .. } => StrategyDetail::VCarve(Default::default()),
+        StrategySpec::Bore { .. } | StrategySpec::Circular { .. } | StrategySpec::Thread { .. } => {
+            StrategyDetail::Holes(Default::default())
+        }
         StrategySpec::CustomGcode {} => StrategyDetail::CustomGcode,
         StrategySpec::Drill {
             peck,

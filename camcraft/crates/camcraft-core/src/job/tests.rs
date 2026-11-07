@@ -2287,3 +2287,49 @@ fn a_setup_says_where_its_work_offset_is() {
     let nan: Job = toml::from_str(&text.replace("-120.0", "nan")).unwrap();
     assert!(nan.validate().is_err());
 }
+
+/// Every strategy, its settings away from their defaults where it has them
+/// and its holes found by their diameter, is written to a job file and read
+/// back as it was: none of its own settings is called what an operation's
+/// are, which the file could not tell apart.
+#[test]
+fn every_hole_strategy_reads_back_from_a_job_file() {
+    use crate::job::{HoleOrder, ThreadHand};
+    let mut j = sample();
+    let strategies = [
+        StrategySpec::Bore {
+            pitch: 0.5,
+            conventional: true,
+        },
+        StrategySpec::Circular {
+            conventional: true,
+            boss_width: 3.0,
+        },
+        StrategySpec::Thread {
+            pitch: 1.25,
+            hand: ThreadHand::Left,
+            diameter: Some(8.0),
+            radial_passes: 3,
+            spring_pass: true,
+            conventional: true,
+        },
+    ];
+    let base = j.setups[0].operations[0].clone();
+    j.setups[0].operations = strategies
+        .iter()
+        .map(|s| {
+            let mut op = base.clone();
+            op.strategy = *s;
+            op.passes.stepdown = Some(1.5);
+            op.holes.same_diameter = true;
+            op.holes.order = HoleOrder::XThenY;
+            op
+        })
+        .collect();
+    let text = toml::to_string(&j).unwrap();
+    let again: Job = toml::from_str(&text).unwrap();
+    assert_eq!(again, j, "{text}");
+    for name in ["bore", "circular", "thread"] {
+        assert!(StrategySpec::named(name).is_some(), "{name}");
+    }
+}

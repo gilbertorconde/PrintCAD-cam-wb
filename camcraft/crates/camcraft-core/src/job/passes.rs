@@ -215,7 +215,7 @@ impl Operation {
         let corner = match tool.kind {
             ToolKind::Ball => tool.diameter / 2.0,
             ToolKind::Bullnose => tool.corner,
-            ToolKind::Flat | ToolKind::Cone | ToolKind::Drill => 0.0,
+            ToolKind::Flat | ToolKind::Cone | ToolKind::Drill | ToolKind::ThreadMill => 0.0,
         };
         StockToLeave {
             radial: -tool.diameter / 2.0,
@@ -249,7 +249,7 @@ impl Operation {
                 let r = match tool.kind {
                     ToolKind::Ball => d / 2.0,
                     ToolKind::Bullnose => tool.corner,
-                    ToolKind::Flat | ToolKind::Cone | ToolKind::Drill => 0.0,
+                    ToolKind::Flat | ToolKind::Cone | ToolKind::Drill | ToolKind::ThreadMill => 0.0,
                 };
                 let over = if r > tolerance && r > 0.0 {
                     2.0 * (r * r - (r - tolerance).powi(2)).sqrt() / 2f64.sqrt()
@@ -261,18 +261,21 @@ impl Operation {
             }
             StrategySpec::PocketClearing { .. }
             | StrategySpec::Pocket { .. }
-            | StrategySpec::Flat { .. } => Some(0.6 * d),
+            | StrategySpec::Flat { .. }
+            | StrategySpec::Circular { .. } => Some(0.6 * d),
             // Fusion's optimal load: a tenth of the tool, to the micron.
             StrategySpec::Adaptive { .. } => Some((0.1 * d * 1000.0).round() / 1000.0),
             // Fusion's: 95% of the flat of the tool's end, less its corners.
             StrategySpec::Face { .. } => match tool.kind {
                 ToolKind::Flat => Some(0.95 * d),
                 ToolKind::Bullnose => Some(0.95 * (d - 2.0 * tool.corner)),
-                ToolKind::Ball | ToolKind::Cone | ToolKind::Drill => None,
+                ToolKind::Ball | ToolKind::Cone | ToolKind::Drill | ToolKind::ThreadMill => None,
             },
             StrategySpec::Profile { .. }
             | StrategySpec::Contour { .. }
             | StrategySpec::Drill { .. }
+            | StrategySpec::Bore { .. }
+            | StrategySpec::Thread { .. }
             | StrategySpec::Engrave { .. }
             | StrategySpec::VCarve { .. }
             | StrategySpec::Slot { .. }

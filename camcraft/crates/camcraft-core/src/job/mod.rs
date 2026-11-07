@@ -82,7 +82,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 pub use error::JobError;
-pub use geometry::{Boundary, Containment, Curve, MachiningBoundary, Outline, Segment, Selection};
+pub use geometry::{
+    Boundary, Containment, Curve, HoleOrder, HolePicking, MachiningBoundary, Outline, Segment,
+    Selection,
+};
 pub use heights::{Height, HeightContext, HeightRef, Heights, Picks};
 pub use linking::{Entry, LeadSizes, Leads, Linking, Retraction};
 pub use model::{

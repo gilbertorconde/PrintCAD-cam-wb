@@ -34,7 +34,7 @@ use camcraft_sim::stock::{PackedStock, PartSurface, Stock};
 
 use crate::cutter::allowance::{Allowance, EffectiveTool};
 use crate::cutter::dropcutter::DropCutter;
-use crate::job::{Job, JobError, Operation, Setup, ToolSpec};
+use crate::job::{Job, JobError, Operation, Setup, StrategySpec, ToolSpec};
 use crate::path::simadapt::sim_moves;
 use crate::setup::features::{FeatureError, Picking};
 use crate::setup::{Bodies, Prepared};
@@ -45,7 +45,7 @@ pub use result::{Made, OperationResult, Plan, SetupResult, Stage, StrategyDetail
 
 use error::in_op;
 use operation::{
-    Target, Work, chamfer_curves, drill_holes, heights_of, not_made, planar_areas, run_operation,
+    Target, Work, chamfer_curves, heights_of, hole_targets, not_made, planar_areas, run_operation,
 };
 use pitch::sim_pitch;
 
@@ -161,7 +161,7 @@ pub fn run_prepared_planned(
         } else if uses.outline {
             Target::Areas(planar_areas(job, op, &picking, bodies, &ctx, &tool)?)
         } else if uses.holes {
-            Target::Holes(drill_holes(job, op, prepared, bodies, &ctx)?)
+            Target::Holes(hole_targets(job, op, prepared, bodies, &ctx)?)
         } else if uses.traces {
             Target::Traces(picking.traces().map_err(in_op(op))?)
         } else if uses.carves {
@@ -236,7 +236,8 @@ fn cut_past(
         let leave = op.stock_to_leave();
         let (radial, axial) = (-leave.radial.min(0.0), -leave.axial.min(0.0));
         let uses = op.strategy.uses();
-        let into = uses.traces || uses.carves;
+        // A thread's groove, past the wall it is cut in, is meant too.
+        let into = uses.traces || uses.carves || matches!(op.strategy, StrategySpec::Thread { .. });
         if !op.enabled || (radial == 0.0 && axial == 0.0 && !into) {
             continue;
         }

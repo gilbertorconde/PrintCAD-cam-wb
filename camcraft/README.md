@@ -331,6 +331,47 @@ tapping operations, each in its post's form (`fanuc-setup-taps.nc`, rigid
 mode taken again for each, as it ends at `G80`; `linuxcnc-setup-taps.nc`,
 `G33.1`).
 
+And holes milled, as Fusion's Bore, Circular and Thread, and picked as
+its Select Same Diameter picks them. In `camcraft-core`, `StrategySpec`
+has `Bore` (`pitch`, a millimetre a turn; `conventional`), `Circular`
+(`conventional`; `boss_width`, how far out from a boss its material
+goes) and `Thread` (`pitch`, `hand`, `diameter`, its major one, the
+hole's plus the thread's depth or the boss's own unless given;
+`radial_passes`, not `passes`, which the operation's own are called;
+`spring_pass`; `conventional`), each with its holes as a drill's are
+(`Uses::holes`), worked out in `strategy::holes`: a bore down a helix
+about each hole, round once at the bottom, then finishing passes
+(`Operation::finishing`) there; circles a stepover apart, a hole's from
+its middle out and a boss's in to it, a stepdown a level, each level
+entered down a helix at the ramp angle; a thread round a helix at its
+pitch, the ISO profile's depth (`thread_depth`) in radial passes, up or
+down as the hand and climbing say, a multi-form mill a turn for each
+span its teeth cover, its end no lower than the bottom. Into and out of
+a finishing circle or a thread it goes along half circles tangent to
+it; every move round a hole is an arc, a helix where it goes down, which
+the post writes as `G2` or `G3` with a `Z`, split as the profile's arcs
+are. Each hole is one pass, linked as a drilled one is. A thread's
+groove past the wall is meant: the part it is verified against is cut
+where it cut (`run::cut_past`). A `ToolKind::ThreadMill` (`tip_length`,
+`pitch_range` and `teeth` on `ToolSpec`) cuts as a flat end mill its
+cutting diameter, cuts only threads, and a thread only it
+(`Operation::cannot_use`, which also refuses a pitch outside its
+range); a Fusion library's thread mill imports as one, its pitch its
+range. `drilling::rounds` finds holes and round bosses (`Round`, `Rim`)
+from rims, a hole and a boss on one axis two, and `drilling::hole_order`
+orders them nearest first, by X then Y back and forth, or as picked. An
+`Operation` has `holes` (`HolePicking`: `same_diameter`, `order`, a
+`HoleOrder`). `run/operation/holes.rs` takes a picked face as a hole's
+wall (curved, every corner on one cylinder along the tool, its rims at
+two heights or more), a boss's when it faces out, and with the same
+diameter every such wall of the setup's models as wide; drilling and
+boring refuse a boss (`HoleError::Boss`), and milling what does not fit
+is a `RunError::Milling`. `setup::features::chain_of` makes an edge's
+chain. `StrategyDetail::Holes` reports the holes. Golden programs:
+`grbl-holes.nc`, `linuxcnc-holes.nc`, `fanuc-holes.nc` and
+`heidenhain-holes.nc` (each helix a Klartext `CP IPA.. IZ.. DR±`), read
+back in every profile, alone and in a setup's one program.
+
 And one test: ogeom is 0.11.1 here, which printCAD's shapes need, and it
 meshes `round_edge_loose_fit.step`'s seam that 0.11.0 drew off the torus, so
 `a_loose_fit_is_refused_for_ogeoms_seam` became

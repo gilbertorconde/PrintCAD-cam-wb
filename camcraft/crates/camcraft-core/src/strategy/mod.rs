@@ -20,6 +20,7 @@ pub mod pocket_clearing;
 
 // Holes.
 pub mod drilling;
+pub mod holes;
 
 // Along curves, beside edges, and down the middle of areas.
 pub mod chamfer;

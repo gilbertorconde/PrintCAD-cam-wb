@@ -555,6 +555,7 @@ fn operation_findings(
         // A hole the tool does not fit is among the run's own warnings, as
         // are a curve too short to ramp along and a floor wider than the V.
         StrategyDetail::Drill(_)
+        | StrategyDetail::Holes(_)
         | StrategyDetail::Engrave(_)
         | StrategyDetail::VCarve(_)
         | StrategyDetail::CustomGcode => {}

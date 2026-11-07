@@ -220,3 +220,52 @@ fn a_tap_goes_in_and_out_at_its_feed() {
         ]
     );
 }
+
+/// By X then Y, holes go up the first column and down the next, two within
+/// the tolerance along X in one column; as picked, as they came.
+#[test]
+fn holes_are_ordered_by_x_then_y_or_as_picked() {
+    let points = [
+        dvec2(10.0, 0.0),
+        dvec2(0.0, 5.0),
+        dvec2(10.004, 5.0),
+        dvec2(0.0, 0.0),
+        dvec2(20.0, 1.0),
+        dvec2(20.0, 0.0),
+    ];
+    assert_eq!(
+        hole_order(&points, HoleOrder::XThenY, 0.01),
+        [3, 1, 2, 0, 5, 4]
+    );
+    assert_eq!(
+        hole_order(&points, HoleOrder::AsPicked, 0.01),
+        [0, 1, 2, 3, 4, 5]
+    );
+    assert_eq!(
+        hole_order(&points, HoleOrder::Nearest, 0.01),
+        [0, 2, 1, 3, 5, 4]
+    );
+}
+
+/// A boss's rims make a boss, and a hole on the same axis, a tube's bore,
+/// is a hole of its own.
+#[test]
+fn a_boss_and_a_hole_on_one_axis_are_two() {
+    let chains = [
+        rim(1, dvec3(0.0, 0.0, 10.0), 6.0),
+        rim(2, dvec3(0.0, 0.0, 0.0), 6.0),
+        rim(3, dvec3(0.0, 0.0, 10.0), 3.0),
+    ];
+    let side = |c: &Chain| {
+        fit(c).map(|(centre, radius)| Rim {
+            centre,
+            radius,
+            boss: radius > 5.0,
+        })
+    };
+    let got = rounds(&chains, side, -2.0, 0.01).unwrap();
+    assert_eq!(got.len(), 2);
+    assert!(got[0].boss && !got[1].boss);
+    assert_eq!((got[0].hole.top, got[0].hole.bottom), (10.0, 0.0));
+    assert_eq!((got[1].hole.top, got[1].hole.bottom), (10.0, -2.0));
+}

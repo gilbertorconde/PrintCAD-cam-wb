@@ -205,9 +205,85 @@ pub fn engraving() -> Toolpath {
     linked(&path)
 }
 
+/// Holes milled: a 12 mm hole bored with a 6 mm end mill, a millimetre a
+/// turn, and finished once at its wall; a 10 mm boss milled round in
+/// circles from 3 mm out, in two levels; and an M10 × 1.5 thread in an 8.5
+/// mm hole, right-hand, climbing up it in two radial passes. Each a helix
+/// or a circle about its axis, in and out along half circles: its links
+/// made as the linker would, straight down from above.
+pub fn milled_holes() -> Toolpath {
+    use camcraft_core::strategy::drilling::Round;
+    use camcraft_core::strategy::holes::{
+        BoreParams, CircularParams, ThreadParams, bore, circular, thread,
+    };
+    let round = |x: f64, radius: f64, boss: bool| Round {
+        hole: Hole {
+            at: dvec2(x, 0.0),
+            top: 0.0,
+            bottom: -4.0,
+            radius,
+        },
+        boss,
+    };
+    let (bored, _) = bore(
+        &[round(0.0, 6.0, false)],
+        &BoreParams {
+            tool_radius: 3.0,
+            leave: (0.0, 0.0),
+            pitch: 1.0,
+            ccw: true,
+            feed: 900.0,
+            retract_feed: 2000.0,
+            finishing: Some((1, 0.3, 600.0, false)),
+        },
+    )
+    .unwrap();
+    let round_boss = circular(
+        &[round(30.0, 5.0, true)],
+        &CircularParams {
+            tool_radius: 3.0,
+            leave: (0.0, 0.0),
+            stepover: 2.0,
+            stepdown: Some(2.0),
+            ramp_angle: 5f64.to_radians(),
+            boss_width: 3.0,
+            ccw: true,
+            feed: 900.0,
+            ramp_feed: 500.0,
+            retract_feed: 2000.0,
+        },
+    )
+    .unwrap();
+    let (threaded, _) = thread(
+        &[round(-30.0, 4.25, false)],
+        &ThreadParams {
+            pitch: 1.5,
+            hand: ThreadHand::Right,
+            diameter: Some(10.0),
+            passes: 2,
+            spring_pass: false,
+            tool_radius: 3.0,
+            tip_length: 0.4,
+            teeth: 1,
+            ccw: true,
+            feed: 300.0,
+            plunge_feed: 250.0,
+            retract_feed: 2000.0,
+        },
+    )
+    .unwrap();
+    let mut all = Toolpath::new();
+    for path in [bored, round_boss, threaded] {
+        for m in path.moves() {
+            all.push(*m).unwrap();
+        }
+    }
+    linked(&all)
+}
+
 /// `path`'s links made as the linker would, straight down from above, from
 /// and back to 10 mm up.
-fn linked(path: &Toolpath) -> Toolpath {
+pub fn linked(path: &Toolpath) -> Toolpath {
     let mut t = Toolpath::new();
     t.rapid_to(dvec3(0.0, 0.0, 10.0)).unwrap();
     for m in path.moves() {

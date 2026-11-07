@@ -421,22 +421,27 @@ pub fn picked_chains(
         {
             continue;
         }
-        let Some(edge) = body.topology().edge(found.index) else {
-            continue;
-        };
-        out.push(Chain {
-            model: pick.model.clone(),
-            edge: found.index,
-            points: body
-                .topology()
-                .edge_points(body.mesh(), found.index)
-                .map(|p| prepared.frame.to_setup(p))
-                .collect(),
-            closed: edge.closed,
-            ends: edge.ends,
-        });
+        if let Some(chain) = chain_of(body, &pick.model, found.index, &prepared.frame) {
+            out.push(chain);
+        }
     }
     Ok(out)
+}
+
+/// Edge `edge` of `body`, model `model`, as a chain in `frame`.
+pub fn chain_of(body: &Body, model: &str, edge: u32, frame: &Frame) -> Option<Chain> {
+    let e = body.topology().edge(edge)?;
+    Some(Chain {
+        model: model.to_string(),
+        edge,
+        points: body
+            .topology()
+            .edge_points(body.mesh(), edge)
+            .map(|p| frame.to_setup(p))
+            .collect(),
+        closed: e.closed,
+        ends: e.ends,
+    })
 }
 
 /// Picked edges joined into closed loops, end to end through the vertices they

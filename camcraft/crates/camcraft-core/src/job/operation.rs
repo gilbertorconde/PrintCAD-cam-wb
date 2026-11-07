@@ -5,8 +5,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::{
-    Depths, Heights, Linking, MachiningBoundary, Outline, Passes, Pattern, Preset, ProfileSide,
-    Selection, StrategySpec, ToolKind, ToolSpec, is_default, is_yes, yes,
+    Depths, Heights, HolePicking, Linking, MachiningBoundary, Outline, Passes, Pattern, Preset,
+    ProfileSide, Selection, StrategySpec, ToolKind, ToolSpec, is_default, is_yes, yes,
 };
 
 /// One operation.
@@ -30,6 +30,10 @@ pub struct Operation {
     /// a drill drills.
     #[serde(default, skip_serializing_if = "is_default")]
     pub selection: Selection,
+    /// How a hole operation finds more holes than those picked, and the order
+    /// it takes them in ([`Uses::holes`](super::Uses::holes)).
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub holes: HolePicking,
     /// Where a 3D operation's tool may go
     /// ([`Uses::boundary`](super::Uses::boundary)).
     #[serde(default, skip_serializing_if = "is_default")]
@@ -75,6 +79,7 @@ impl Operation {
             tool: None,
             preset: None,
             selection: Selection::default(),
+            holes: HolePicking::default(),
             boundary: MachiningBoundary::default(),
             outline: Outline::default(),
             heights: Heights::default(),
@@ -101,7 +106,30 @@ impl Operation {
     /// round, no more than its corner radius down.
     pub fn cannot_use(&self, tool: &ToolSpec) -> Option<&'static str> {
         let uses = self.strategy.uses();
-        let drilling = uses.holes;
+        let drilling = matches!(self.strategy, StrategySpec::Drill { .. });
+        // A thread mill's teeth are the thread's form: it cuts nothing else,
+        // and a thread is cut by nothing else.
+        let threading = matches!(self.strategy, StrategySpec::Thread { .. });
+        if threading != (tool.kind == ToolKind::ThreadMill) {
+            return Some(if threading {
+                "mill a thread with a thread mill"
+            } else {
+                "a thread mill only mills threads; use a thread operation"
+            });
+        }
+        if let StrategySpec::Thread { pitch, .. } = self.strategy
+            && tool.pitch_problem(pitch).is_some()
+        {
+            return Some("the thread's pitch is outside the thread mill's range of pitches");
+        }
+        // Bored and milled with the side of an end mill, which a drill has not.
+        if matches!(
+            self.strategy,
+            StrategySpec::Bore { .. } | StrategySpec::Circular { .. }
+        ) && matches!(tool.kind, ToolKind::Drill | ToolKind::Cone)
+        {
+            return Some("bore and mill holes with an end mill: it cuts with its side");
+        }
         if tool.kind == ToolKind::Drill && !drilling {
             return Some("a drill only drills; use a drilling operation");
         }

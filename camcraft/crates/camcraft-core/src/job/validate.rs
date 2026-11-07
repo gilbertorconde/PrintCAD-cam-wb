@@ -598,6 +598,27 @@ impl Operation {
             positive(&field("width"), width)?;
             at_least_zero(&field("tip_offset"), tip_offset)?;
         }
+        if let StrategySpec::Bore { pitch, .. } = self.strategy {
+            positive(&field("pitch"), pitch)?;
+        }
+        if let StrategySpec::Circular { boss_width, .. } = self.strategy {
+            at_least_zero(&field("boss_width"), boss_width)?;
+        }
+        if let StrategySpec::Thread {
+            pitch,
+            diameter,
+            radial_passes,
+            ..
+        } = self.strategy
+        {
+            positive(&field("pitch"), pitch)?;
+            if let Some(d) = diameter {
+                positive(&field("diameter"), d)?;
+            }
+            if radial_passes == 0 {
+                return Err(bad(field("radial_passes"), 0.0, "at least one"));
+            }
+        }
         if let StrategySpec::VCarve { max_depth: Some(d) } = self.strategy {
             positive(&field("max_depth"), d)?;
         }
