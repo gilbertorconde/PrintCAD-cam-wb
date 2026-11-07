@@ -36,6 +36,7 @@ comment   = ["(", ")"]
 
 arc_style      = "ij"
 tool_change    = "m6"
+tool_change_seconds = 5
 length_offset  = true
 preselect_tool = true
 # Haas takes G81, G82, G83, G73, G84 and G74, returning with G98. Off until they
@@ -98,3 +99,11 @@ enabled = false
 suppress_motion = true
 suppress_axes   = true
 suppress_feed   = true
+
+# Machining time. A VF-series mill's rapids, 1000 in/min on each axis as Haas
+# gives them for the VF-2, and about five seconds chip to chip for its
+# carousel changer: typical, not your machine's, which its spec sheet gives.
+[rapid]  # mm/min, whatever the program's units
+x = 25400
+y = 25400
+z = 25400

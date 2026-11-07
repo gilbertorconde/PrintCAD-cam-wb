@@ -422,6 +422,20 @@ cut past the part as meant, not as a gouge. Tests in `path/relief/tests.rs`
 and `a_square_hole_has_its_corners_relieved`; in `camcraft-post`, the
 golden program `grbl-dogbone.nc`.
 
+And machining time, for the setup sheet. In `camcraft-post`, a profile's
+`[rapid]` (`Rapid`) gives each axis's rapid rate, `x`, `y` and `z` in
+mm/min whatever the program's units (`ASSUMED_RAPID`, 5000, for one left
+out), and `tool_change_seconds` how long a change takes, chip to chip;
+`Profile::rapids` gives them, `Rapid::seconds` times a rapid as its slowest
+axis goes, and `Rapid::feed_seconds` a feed move at its feed but never
+quicker than its axes go at rapid. Neither speeds up or slows down. A rate
+of nothing, or a time that is not one, makes the profile invalid. Every
+built-in profile has them, typical of its kind of machine, its comments
+saying where the machine's own are kept. `op::tilt_notes` is public, for
+the sheet to say what the program's header says of a tilt. In
+`camcraft-session`, `SetupProgram::tool_changes` says how many times a
+setup's program changes the tool.
+
 And one test: ogeom is 0.11.1 here, which printCAD's shapes need, and it
 meshes `round_edge_loose_fit.step`'s seam that 0.11.0 drew off the torus, so
 `a_loose_fit_is_refused_for_ogeoms_seam` became

@@ -34,6 +34,7 @@ comment   = [";", ""]
 # Arcs are always by their centre, CC, in Klartext.
 arc_style   = "ij"
 tool_change = "m6"
+tool_change_seconds = 6
 # Drilling as CYCL DEF 200 (drilling, pecking, a pause at the bottom), 203
 # (breaking the chip) and 207 (rigid tapping), each called by M99 at its hole.
 # Off until they have been dry-run on the machine; off, a drilling operation is
@@ -72,3 +73,11 @@ increment = 1
 suppress_motion = true
 suppress_axes   = true
 suppress_feed   = true
+
+# Machining time. Typical of a machining centre, not of any one: a TNC keeps
+# each axis's rapid in its machine parameters. A changer takes about six
+# seconds chip to chip.
+[rapid]  # mm/min, whatever the program's units
+x = 30000
+y = 30000
+z = 30000

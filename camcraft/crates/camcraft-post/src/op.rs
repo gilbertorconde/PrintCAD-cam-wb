@@ -490,7 +490,7 @@ pub(crate) fn refuse(path: &Toolpath, spec: &ProgramSpec) -> Result<(), LowerErr
 /// What the program's header says of a tilted setup: which way its tool
 /// axis is, how it is stood up the spindle, and that the coordinates are in
 /// the tilted frame. Nothing for one up the model's Z.
-pub(crate) fn tilt_notes(spec: &ProgramSpec) -> Vec<String> {
+pub fn tilt_notes(spec: &ProgramSpec) -> Vec<String> {
     let Some(axis) = spec.tilt else {
         return Vec::new();
     };

@@ -23,6 +23,7 @@ comment_upper = true
 
 arc_style   = "ij"
 tool_change = "m6"
+tool_change_seconds = 30
 # Avid's CNC12 measures each tool on the tool height setter at its M6, and keeps
 # the length under the tool's number: `G43 Z.. H<tool>` takes it up.
 length_offset = true
@@ -68,3 +69,11 @@ enabled = false
 suppress_motion = true
 suppress_axes   = true
 suppress_feed   = true
+
+# Machining time. Typical of an Avid router, not of any one: CNC12 keeps each
+# axis's top speed in its machine configuration. A change by hand, measured
+# on the tool height setter at its M6, is about half a minute.
+[rapid]  # mm/min, whatever the program's units
+x = 10000
+y = 10000
+z = 5000

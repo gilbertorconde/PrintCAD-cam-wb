@@ -1416,3 +1416,200 @@ fn a_profile_posts_its_dogbones() {
     assert!(relieved > plain, "{relieved} lines against {plain}");
     assert_eq!(failed_relieved, failed);
 }
+
+/// A known path takes the seconds its moves take: each rapid as long as its
+/// slowest axis at the machine's rates, each feed at its feed, but never
+/// quicker than its axes can go.
+#[test]
+fn a_path_is_timed_at_its_feeds_and_the_machines_rapids() {
+    use camcraft_core::path::toolpath::{MoveRole, Toolpath};
+    use camcraft_core::setup::frame::Frame;
+    use camcraft_post::profile::Rapid;
+    use glam::DVec3;
+
+    let rapid = Rapid {
+        x: 5000.0,
+        y: 5000.0,
+        z: 2500.0,
+    };
+    let mut path = Toolpath::new();
+    // Where it starts: no time.
+    path.rapid_to(DVec3::new(0.0, 0.0, 10.0)).unwrap();
+    // 100 mm along X at 5000 mm/min: 1.2 s.
+    path.rapid_to(DVec3::new(100.0, 0.0, 10.0)).unwrap();
+    // 8 mm down at Z's 2500 mm/min: 0.192 s.
+    path.rapid_to(DVec3::new(100.0, 0.0, 2.0)).unwrap();
+    // 5 mm plunged at 300 mm/min: 1 s.
+    path.feed_to(DVec3::new(100.0, 0.0, -3.0), MoveRole::Plunge, 300.0)
+        .unwrap();
+    // 60 mm cut at 1200 mm/min: 3 s.
+    path.feed_to(DVec3::new(100.0, 60.0, -3.0), MoveRole::Cut, 1200.0)
+        .unwrap();
+    // 13 mm retracted at 6000 mm/min, which Z cannot: 0.312 s, as at rapid.
+    path.feed_to(DVec3::new(100.0, 60.0, 10.0), MoveRole::Retract, 6000.0)
+        .unwrap();
+    let drawn = crate::strokes(&path, &Frame::default(), 0.01, 0, &rapid);
+    let want = [0.0, 1.2, 1.392, 2.392, 5.392, 5.704];
+    assert_eq!(drawn.times.len(), want.len());
+    for (got, want) in drawn.times.iter().zip(want) {
+        assert!((got - want).abs() < 1e-9, "{:?}", drawn.times);
+    }
+    assert_eq!(drawn.z, Some([-3.0, 10.0]));
+    assert_eq!(drawn.fastest, 6000.0);
+    assert_eq!((drawn.cut, drawn.rapid), (78.0, 108.0));
+}
+
+/// A setup's machining time is its operations' at its machine's rapid
+/// rates, and its tool changes at the machine's time for one; its tools are
+/// listed with what each does, and each operation with how it cuts.
+#[test]
+fn a_setup_is_timed_and_its_tools_listed() {
+    let job = JOB.replace("programs = \"operation\"\n", "")
+        + r#"
+[tools.ball-3]
+kind = "ball"
+diameter = 3.0
+number = 2
+rpm = 18000
+flutes = 2
+stickout = 20.0
+holder = { name = "ER11 collet", segments = [{ diameter = 16.0, length = 20.0 }] }
+
+[[setup.operation]]
+name = "finish"
+strategy = "parallel"
+tool = "ball-3"
+passes = { stepover = 1.0, feed = 900.0 }
+"#;
+    let request = |post: Option<String>| Request {
+        version: VERSION,
+        job: match &post {
+            Some(_) => job.replace("post = \"grbl\"", "post = \"Quick\""),
+            None => job.clone(),
+        },
+        shapes: BTreeMap::from([(
+            "part".to_string(),
+            Shape {
+                text: native("hinge_jig.step"),
+                placement: IDENTITY,
+            },
+        )]),
+        max_points: 0,
+        post,
+        read: None,
+    };
+    let run = answer(&request(None)).unwrap();
+    let m = &run.machining;
+    // GRBL's own rates, and a minute a change by hand.
+    assert_eq!((m.rapid, m.rapid_given), ([5000.0, 5000.0, 2500.0], true));
+    assert_eq!(m.tool_change, Some(60.0));
+    assert_eq!(m.tool_changes, 2, "{}", run.program.as_ref().unwrap().text);
+    let moves: f64 = run.operations.iter().map(|o| o.seconds).sum();
+    assert!((m.moves - moves).abs() < 1e-9);
+    assert!((m.total() - (moves + 120.0)).abs() < 1e-9);
+
+    // Each tool, in the order it first cuts, and what it does.
+    let names: Vec<&str> = run.tools.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(names, ["flat-6", "ball-3"]);
+    let ball = &run.tools[1];
+    assert_eq!((ball.number, ball.kind.as_str()), (2, "ball"));
+    assert_eq!((ball.flutes, ball.stickout), (Some(2), Some(20.0)));
+    assert_eq!(ball.holder.as_deref(), Some("ER11 collet"));
+    assert_eq!(ball.operations, [1]);
+    assert_eq!(ball.fastest_rpm, 18000);
+    assert!((ball.seconds - run.operations[1].seconds).abs() < 1e-9);
+
+    // Each operation, as it cuts.
+    let rough = run.operations[0].cutting.as_ref().unwrap();
+    assert_eq!((rough.tool.as_str(), rough.tool_number), ("flat-6", 1));
+    assert_eq!((rough.stepdown, rough.stepover), (Some(3.0), Some(3.0)));
+    assert_eq!(rough.rpm, 16000);
+    let [low, high] = rough.z.unwrap();
+    assert!(low < 0.0 && high > 0.0, "{low} {high}");
+    assert_eq!(run.tools[0].lowest, Some(low));
+    let finish = run.operations[1].cutting.as_ref().unwrap();
+    assert_eq!((finish.feed, finish.stepdown), (900.0, None));
+
+    // The part inside its stock, its top at the work zero's height less
+    // the stock's margin.
+    let layout = run.layout.as_ref().unwrap();
+    assert_eq!(layout.post, "GRBL");
+    assert!(layout.tilt.is_empty());
+    assert_eq!(layout.tool_axis, [0.0, 0.0, 1.0]);
+    for i in 0..3 {
+        assert!(layout.stock[0][i] <= layout.part[0][i] + 1e-9);
+        assert!(layout.part[1][i] <= layout.stock[1][i] + 1e-9);
+    }
+    assert!((layout.stock[1][2] - layout.part[1][2] - 2.0).abs() < 1e-6);
+
+    // The same on a machine whose rapids are quicker: the cutting takes as
+    // long, the rest less, and a machine that does not say how long a
+    // change takes leaves the changes out.
+    let grbl = include_str!("../../camcraft/crates/camcraft-post/profiles/grbl.toml");
+    let quick = grbl
+        .replacen("\"GRBL\"", "\"Quick\"", 1)
+        .replace("tool_change_seconds = 60\n", "")
+        .replace("x = 5000", "x = 50000")
+        .replace("y = 5000", "y = 50000")
+        .replace("z = 2500", "z = 25000");
+    let fast = answer(&request(Some(quick))).unwrap();
+    assert_eq!(fast.machining.tool_change, None);
+    assert!((fast.machining.total() - fast.machining.moves).abs() < 1e-9);
+    assert!(fast.machining.moves < m.moves);
+    for (a, b) in run.operations.iter().zip(&fast.operations) {
+        assert!(b.seconds < a.seconds, "{}", a.name);
+        assert_eq!(a.cut_mm, b.cut_mm);
+    }
+}
+
+/// The sheet's notes on an operation say its strategy's own settings: a
+/// thread's pitch and hand, a bore's helix, rest machining, corner relief
+/// and a pattern.
+#[test]
+fn an_operations_own_settings_are_noted() {
+    use camcraft_core::job::{
+        Linear, Operation, Relief, ReliefStyle, Rest, StrategySpec, ThreadHand,
+    };
+
+    let mut thread = Operation::new("thread", StrategySpec::named("thread").unwrap());
+    if let StrategySpec::Thread { pitch, hand, .. } = &mut thread.strategy {
+        (*pitch, *hand) = (0.8, ThreadHand::Left);
+    }
+    assert_eq!(
+        crate::strategy_notes(&thread),
+        ["thread 0.8 mm pitch, left-hand"]
+    );
+    let bore = Operation::new("bore", StrategySpec::named("bore").unwrap());
+    assert_eq!(crate::strategy_notes(&bore), ["helix 1 mm a turn"]);
+    let mut rest = Operation::new("rest", StrategySpec::named("adaptive").unwrap());
+    if let StrategySpec::Adaptive { rest: r, .. } = &mut rest.strategy {
+        *r = Some(Rest {
+            adjustment: 0.2,
+            ..Rest::default()
+        });
+    }
+    rest.transform.linear = Some(Linear {
+        x_count: 3,
+        x_spacing: 20.0,
+        y_count: 1,
+        y_spacing: 0.0,
+    });
+    assert_eq!(
+        crate::strategy_notes(&rest),
+        [
+            "rest machining: what the operations before left, past 0.2 mm",
+            "3 copies, by its pattern"
+        ]
+    );
+    let mut profile = Operation::new("profile", StrategySpec::named("profile").unwrap());
+    profile.passes.relief = Some(Relief {
+        style: ReliefStyle::TBoneLong,
+        sharper_than: Some(100.0),
+    });
+    assert_eq!(
+        crate::strategy_notes(&profile),
+        ["corners relieved with T-bones along the longer wall, sharper than 100°"]
+    );
+    let plain = Operation::new("plain", StrategySpec::named("parallel").unwrap());
+    assert!(crate::strategy_notes(&plain).is_empty());
+}

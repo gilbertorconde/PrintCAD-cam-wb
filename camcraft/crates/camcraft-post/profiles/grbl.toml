@@ -11,6 +11,7 @@ comment   = ["(", ")"]
 
 arc_style   = "ij"
 tool_change = "pause"
+tool_change_seconds = 60
 # GRBL has no canned cycles and nothing that keeps the feed to the spindle, so
 # it cannot tap: a tapping operation is a failed check.
 tap = "none"
@@ -42,3 +43,11 @@ enabled = false
 suppress_motion = true
 suppress_axes   = true
 suppress_feed   = true
+
+# Machining time. Typical of a hobby router, not of any one: GRBL's own are its
+# $110, $111 and $112 (mm/min), which `$$` lists. A change by hand, the tool
+# touched off again, is about a minute.
+[rapid]  # mm/min
+x = 5000
+y = 5000
+z = 2500

@@ -15,6 +15,7 @@ comment   = ["(", ")"]
 
 arc_style     = "ij"
 tool_change   = "m6"
+tool_change_seconds = 30
 length_offset = true
 # LinuxCNC is the reference for these cycles (its G-code reference, 2.8 and
 # 2.9): G81, G82 with its dwell in seconds, G83, and G73, which backs off
@@ -80,3 +81,12 @@ suppress_feed   = true
 # x = [0, 300]
 # y = [-200, 0]
 # z = [-120, 0]
+
+# Machining time. Typical of a small mill or router, not of any one: the
+# machine's are each axis's MAX_VELOCITY in its INI file, in its units a
+# second: times 60 for mm/min, and by 25.4 more for an inch machine. A change
+# by hand, as LinuxCNC's M6 asks for one by default, is about half a minute.
+[rapid]  # mm/min
+x = 5000
+y = 5000
+z = 3000

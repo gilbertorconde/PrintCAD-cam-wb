@@ -138,6 +138,10 @@ fn a_setup_program_says_whose_each_instruction_is() {
     for (k, op) in ran.result.operations.iter().enumerate() {
         assert!(p.made.contains(&(k, op.path.len())), "{}", op.name);
     }
+    // Each change it counts is one it writes.
+    let written = p.text.lines().filter(|l| l.contains(" M6")).count();
+    assert!(p.tool_changes >= 1);
+    assert_eq!(p.tool_changes, written, "{}", p.text);
 }
 
 /// Two setups whose names come to the same file name, as "flip 1" and

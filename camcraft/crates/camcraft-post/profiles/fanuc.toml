@@ -29,6 +29,7 @@ comment_upper = true
 
 arc_style      = "ij"
 tool_change    = "m6"
+tool_change_seconds = 6
 length_offset  = true
 preselect_tool = true
 # Fanuc takes G81, G82, G83, G73, G84 and G74, returning with G98. Off until
@@ -84,3 +85,11 @@ enabled = false
 suppress_motion = true
 suppress_axes   = true
 suppress_feed   = true
+
+# Machining time. Typical of a vertical machining centre, not of any one: a
+# Fanuc keeps each axis's rapid in parameter 1420. A carousel changer takes
+# about six seconds chip to chip.
+[rapid]  # mm/min
+x = 30000
+y = 30000
+z = 30000

@@ -16,7 +16,7 @@ pub const HELPER: &str = "camcraft-helper";
 
 /// Bumped whenever a request or response changes shape, so a package never
 /// reads an answer from a helper of another build.
-pub const VERSION: u32 = 6;
+pub const VERSION: u32 = 7;
 
 /// One setup to run.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -116,6 +116,127 @@ pub struct Run {
     /// are the ones it shows.
     #[serde(default)]
     pub timing: u64,
+    /// How long it machines, as its machine profile times it.
+    #[serde(default)]
+    pub machining: Machining,
+    /// The tools its operations cut with, in the order they first cut.
+    #[serde(default)]
+    pub tools: Vec<ToolUse>,
+    /// Where the part and its stock are, for the setup sheet.
+    #[serde(default)]
+    pub layout: Option<Layout>,
+}
+
+/// How long a setup machines: its moves at their feeds and the machine's
+/// rapid rates, and its tool changes. Nothing speeds up or slows down, so a
+/// real machine takes longer.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Machining {
+    /// Its moves', every operation's [`OperationRun::seconds`] together.
+    pub moves: f64,
+    /// How many times its programs change the tool, the first included.
+    pub tool_changes: u32,
+    /// How long a change takes, in seconds; `None` when the profile does
+    /// not say, and the changes are left out.
+    pub tool_change: Option<f64>,
+    /// The rapid rates it was timed at, X, Y and Z, in mm/min.
+    pub rapid: [f64; 3],
+    /// Whether they are the profile's own; else assumed.
+    pub rapid_given: bool,
+}
+
+impl Machining {
+    /// The whole: its moves and its tool changes, in seconds.
+    pub fn total(&self) -> f64 {
+        self.moves + f64::from(self.tool_changes) * self.tool_change.unwrap_or(0.0)
+    }
+}
+
+/// A tool a setup cuts with, as its setup sheet lists it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ToolUse {
+    /// Its name in the setup.
+    pub name: String,
+    /// Its number in the program.
+    pub number: u32,
+    /// Its kind, as a job file names it: `flat`, `ball`, `bullnose`, `cone`
+    /// or `drill`.
+    pub kind: String,
+    /// Its diameter, and a bull-nose's corner radius, in millimetres.
+    pub diameter: f64,
+    pub corner: f64,
+    /// A cone's or a drill's included angle, in degrees.
+    pub angle: Option<f64>,
+    /// The pitches a thread mill cuts, finest and coarsest, in millimetres.
+    pub pitch_range: Option<[f64; 2]>,
+    pub flutes: Option<u32>,
+    /// How long its cutting edges are, how far it sticks out of its
+    /// holder, and its overall length, in millimetres, where known.
+    pub flute_length: Option<f64>,
+    pub stickout: Option<f64>,
+    pub overall_length: Option<f64>,
+    /// What holds it, in words, if it has a holder.
+    pub holder: Option<String>,
+    /// Its description.
+    pub comment: String,
+    /// The operations that cut with it, by their place in the setup.
+    pub operations: Vec<usize>,
+    /// The lowest its tip goes, from the work zero along the tool's axis.
+    pub lowest: Option<f64>,
+    /// The fastest it is fed, mm/min, and turned, rev/min.
+    pub fastest_feed: f64,
+    pub fastest_rpm: u32,
+    /// How long it machines, in seconds.
+    pub seconds: f64,
+}
+
+/// What a setup sheet says of how an operation cuts.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Cutting {
+    /// Its strategy, as a job file names it: `adaptive`.
+    pub strategy: String,
+    /// Its tool's name in the setup, and number.
+    pub tool: String,
+    pub tool_number: u32,
+    /// The spindle's speed, rev/min.
+    pub rpm: u32,
+    /// Its cutting and plunge feeds, and the fastest any move is fed, in
+    /// mm/min.
+    pub feed: f64,
+    pub plunge_feed: f64,
+    pub fastest_feed: f64,
+    /// The distance between its passes, where it has one.
+    pub stepover: Option<f64>,
+    /// The deepest each of its levels may be, where it cuts in levels.
+    pub stepdown: Option<f64>,
+    /// The stock it leaves beside and below, where it leaves any.
+    pub stock_to_leave: Option<[f64; 2]>,
+    /// The lowest and highest its tip goes, from the work zero along the
+    /// tool's axis.
+    pub z: Option<[f64; 2]>,
+    /// Its strategy's own settings worth reading on the shop floor, in
+    /// words: a bore's or a thread's pitch, a tap, rest machining, corner
+    /// relief, a pattern's copies.
+    pub notes: Vec<String>,
+}
+
+/// Where a setup's part and stock are, as its setup sheet says.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Layout {
+    /// The stock's lowest and highest corners, from the work zero along the
+    /// setup's axes, in millimetres.
+    pub stock: [[f64; 3]; 2],
+    /// The bodies' the same way.
+    pub part: [[f64; 3]; 2],
+    /// The tool's axis, pointing up it, in the document's coordinates.
+    pub tool_axis: [f64; 3],
+    /// What its programs' headers say of a tilt: none for a part square up
+    /// its Z.
+    pub tilt: Vec<String>,
+    /// The post's name, as its profile gives it.
+    pub post: String,
+    /// The day it ran, `2026-11-07`, in UTC.
+    pub date: String,
 }
 
 /// A round bar of stock, in the document's coordinates.
@@ -229,9 +350,12 @@ pub struct OperationRun {
     #[serde(default)]
     pub heights: Vec<HeightPlane>,
     /// How long it machines, in seconds: its moves at their feeds, rapids at
-    /// an assumed 5000 mm/min.
+    /// the machine profile's rates ([`Machining`]).
     #[serde(default)]
     pub seconds: f64,
+    /// How it cuts, for the setup sheet: `None` for one with no tool.
+    #[serde(default)]
+    pub cutting: Option<Cutting>,
     /// Where its checks found something, in order.
     #[serde(default)]
     pub marks: Vec<Mark>,

@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Setup sheet: Top</title>
+<style>
+body{font:10pt/1.35 system-ui,sans-serif;color:#000;background:#fff;margin:1.5em}
+h1{font-size:15pt;margin:0 0 .2em}
+h2{font-size:11pt;margin:1.2em 0 .3em;border-bottom:1px solid #000}
+.sub{color:#444;margin:0 0 .8em}
+.fail{border:2px solid #b00;color:#b00;padding:.3em .5em;font-weight:bold}
+.pass{border:1px solid #070;color:#070;padding:.3em .5em}
+table{border-collapse:collapse;width:100%;break-inside:avoid}
+th,td{border:1px solid #999;padding:.15em .35em;text-align:left;vertical-align:top}
+th{background:#eee}
+td.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+dl{display:grid;grid-template-columns:max-content auto;gap:.1em 1em;margin:0}
+dt{color:#444}dd{margin:0}
+.note{color:#444;font-size:9pt}
+ul{margin:.2em 0;padding-left:1.4em}
+@media print{body{margin:0}h2{break-after:avoid}}
+</style>
+</head>
+<body>
+<h1>Setup sheet: Top</h1>
+<p class="sub">top.nc · program 1001 · GRBL · run 2026-11-07</p>
+<p class="fail">1 check(s) failed: camcraft would not post this setup. Do not run it.</p>
+<h2>Part and stock</h2>
+<dl>
+<dt>Bodies</dt><dd>Bracket</dd>
+<dt>Material</dt><dd>6061 aluminium &amp; &lt;friends&gt;</dd>
+<dt>Part</dt><dd>100 × 60 × 22 mm (X × Y × Z)</dd>
+<dt>Stock</dt><dd>a box round the bodies, 2 mm more each side, 2 on top, 0 below: 104 × 64 × 24 mm (X × Y × Z)</dd>
+<dt>Stock from the work zero</dt><dd>X 0 to 104, Y 0 to 64, Z −24 to 0</dd>
+</dl>
+<h2>Work zero and orientation</h2>
+<dl>
+<dt>Work zero</dt><dd>Stock top, front-left corner</dd>
+<dt>Work offset</dt><dd>G54: the work zero at X 250, Y −180, Z −95 in machine coordinates, Z the tool&#39;s tip&#39;s</dd>
+<dt>Tool axis</dt><dd>square: the tool up the document&#39;s +Z, machine X along its +X</dd>
+</dl>
+<h2>Program</h2>
+<dl>
+<dt>Post</dt><dd>GRBL</dd>
+<dt>Program</dt><dd>top.nc</dd>
+<dt>Number</dt><dd>1001</dd>
+<dt>Lines</dt><dd>4211</dd>
+</dl>
+<h2>Machining time</h2>
+<dl>
+<dt>Moves</dt><dd>1 h 14 min 39 s</dd>
+<dt>Tool changes</dt><dd>2 × 1 min 00 s = 2 min 00 s</dd>
+<dt>Total</dt><dd>1 h 16 min 39 s</dd>
+</dl>
+<p class="note">Moves at their feeds, and rapids at X 5000, Y 5000, Z 2500 mm/min, as the post gives them, none quicker than its axes go. Nothing speeds up or slows down here: a machine does, so it takes longer, the more so the shorter its moves.</p>
+<h2>Tools</h2>
+<table>
+<tr><th>T</th><th>Tool</th><th>Kind</th><th>Ø</th><th>Flutes</th><th>Flute length</th><th>Stickout</th><th>Length</th><th>Holder</th><th>Operations</th><th>Lowest Z</th><th>Fastest feed</th><th>Speed</th><th>Time</th></tr>
+<tr><td class="n">1</td><td>1/4 upcut</td><td>flat end mill</td><td class="n">6.35</td><td class="n">2</td><td class="n">22</td><td class="n">30</td><td class="n">—</td><td>ER20 collet</td><td>rough</td><td class="n">−12</td><td class="n">1500</td><td class="n">18000</td><td class="n">12 min 34 s</td></tr>
+<tr><td class="n">2</td><td>1/8 ball (Amana 46282)</td><td>ball end mill</td><td class="n">3.175</td><td class="n">—</td><td class="n">—</td><td class="n">—</td><td class="n">—</td><td>—</td><td>finish</td><td class="n">−11.5</td><td class="n">2000</td><td class="n">20000</td><td class="n">1 h 02 min 05 s</td></tr>
+<tr><td class="n">3</td><td>M5 thread mill</td><td>thread mill, 0.8 mm pitch</td><td class="n">3.9</td><td class="n">—</td><td class="n">—</td><td class="n">—</td><td class="n">—</td><td>—</td><td>M5 thread</td><td class="n">−10</td><td class="n">300</td><td class="n">12000</td><td class="n">42 s</td></tr>
+</table>
+<h2>Operations</h2>
+<table>
+<tr><th>#</th><th>Operation</th><th>Strategy</th><th>T</th><th>Speed</th><th>Feed</th><th>Plunge</th><th>Stepover</th><th>Stepdown</th><th>Stock to leave</th><th>Z from</th><th>Z to</th><th>Time</th></tr>
+<tr><td class="n">1</td><td>rough<br><span class="note">rest machining: what the operations before left</span></td><td>Adaptive clearing (3D roughing)</td><td class="n">1</td><td class="n">18000</td><td class="n">1500</td><td class="n">500</td><td class="n">0.635</td><td class="n">6</td><td class="n">0.3 / 0.2</td><td class="n">−12</td><td class="n">15</td><td class="n">12 min 34 s</td></tr>
+<tr><td class="n">2</td><td>clamps</td><td colspan="10">1 line(s) of custom G-code</td><td class="n">—</td></tr>
+<tr><td class="n">3</td><td>finish</td><td>Parallel (3D finishing)</td><td class="n">2</td><td class="n">20000</td><td class="n">1200 (to 2000)</td><td class="n">400</td><td class="n">0.25</td><td class="n">—</td><td class="n">0 / 0</td><td class="n">−11.5</td><td class="n">15</td><td class="n">1 h 02 min 05 s</td></tr>
+<tr><td class="n">4</td><td>M5 thread<br><span class="note">thread 0.8 mm pitch, right-hand</span></td><td>Thread milling</td><td class="n">3</td><td class="n">12000</td><td class="n">300</td><td class="n">300</td><td class="n">—</td><td class="n">—</td><td class="n">—</td><td class="n">−10</td><td class="n">15</td><td class="n">42 s</td></tr>
+<tr><td class="n">5</td><td>spare pocket</td><td colspan="10">turned off: not cut, nor in the program</td><td class="n">—</td></tr>
+</table>
+<p class="note">Stock to leave beside, then below. Z from the lowest to the highest the tool's tip goes.</p>
+<h2>Checks</h2>
+<ul>
+<li><b>Failed</b>: finish: rapid through material at move 12</li>
+<li><b>Warning</b>, finish: passes left cutting &lt;conventional&gt;</li>
+</ul>
+<p class="note">Made by the CAM workbench with camcraft. Lengths in mm, feeds in mm/min, speeds in rev/min; Z from the work zero, up the tool. Check the program yourself before it cuts.</p>
+</body>
+</html>

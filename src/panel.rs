@@ -404,6 +404,11 @@ fn verdict(run: &Run, only: Option<usize>) -> Vec<Widget> {
                         value: format!("{:.0} mm cut, {:.0} mm rapid", op.cut_mm, op.rapid_mm),
                         mono: false,
                     });
+                    out.push(Widget::Value {
+                        label: "Machining time".into(),
+                        value: crate::sheet::duration(op.seconds),
+                        mono: false,
+                    });
                     out.push(Widget::Text {
                         text: op.summary.clone(),
                         mono: false,
@@ -451,17 +456,21 @@ fn verdict(run: &Run, only: Option<usize>) -> Vec<Widget> {
                         ));
                     }
                 }
+                out.push(sheet_button());
             }
         }
         None if run.program.is_some() => {
+            out.push(machining(run));
             out.push(button(
                 "save_setup",
                 "Save G-code…",
                 ButtonStyle::Primary,
                 run.passed,
             ));
+            out.push(sheet_button());
         }
         None => {
+            out.push(machining(run));
             let programs = run
                 .operations
                 .iter()
@@ -485,9 +494,68 @@ fn verdict(run: &Run, only: Option<usize>) -> Vec<Widget> {
                     ));
                 }
             }
+            out.push(sheet_button());
         }
     }
     out
+}
+
+/// The button that saves the setup's sheet, beside its G-code's: a setup
+/// that failed has one too, saying so first.
+fn sheet_button() -> Widget {
+    button(
+        "save_sheet",
+        "Save setup sheet…",
+        ButtonStyle::Secondary,
+        true,
+    )
+}
+
+/// How long a setup machines: each operation, the tool changes and the
+/// whole, and what that leaves out.
+fn machining(run: &Run) -> Widget {
+    let m = &run.machining;
+    let mut rows: Vec<Widget> = run
+        .operations
+        .iter()
+        .filter(|o| o.seconds > 0.0)
+        .map(|o| Widget::Value {
+            label: o.name.clone(),
+            value: crate::sheet::duration(o.seconds),
+            mono: false,
+        })
+        .collect();
+    rows.push(Widget::Value {
+        label: "Tool changes".into(),
+        value: match m.tool_change {
+            Some(each) => format!("{} × {}", m.tool_changes, crate::sheet::duration(each)),
+            None => format!("{}, not timed", m.tool_changes),
+        },
+        mono: false,
+    });
+    rows.push(Widget::Value {
+        label: "Total".into(),
+        value: crate::sheet::duration(m.total()),
+        mono: false,
+    });
+    let [x, y, z] = m.rapid.map(crate::sheet::num);
+    rows.push(Widget::Text {
+        text: format!(
+            "Rapids at X {x}, Y {y}, Z {z} mm/min{}. Nothing speeds up or slows down \
+             here, so a machine takes longer.",
+            if m.rapid_given {
+                ", as the post says"
+            } else {
+                ", assumed"
+            }
+        ),
+        mono: false,
+    });
+    Widget::Group {
+        title: format!("Machining time: {}", crate::sheet::duration(m.total())),
+        open: false,
+        children: rows,
+    }
 }
 
 pub fn setup_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
@@ -648,6 +716,11 @@ pub fn setup_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
             }
         }
     }
+    stock.push(Widget::TextField {
+        id: "material".into(),
+        label: "Material".into(),
+        value: setup.material.clone(),
+    });
     panel.push(group("Stock", stock));
     let mut orientation = orientation_rows(cam, id, &setup);
     orientation.extend([
@@ -732,7 +805,11 @@ pub fn setup_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
         .map(|(i, (n, d))| ListItem {
             label: n.name.clone(),
             detail: Some(match run.and_then(|r| r.operations.get(i)) {
-                Some(o) if o.made == "generated" => format!("{:.0} mm cut", o.cut_mm),
+                Some(o) if o.made == "generated" => format!(
+                    "{:.0} mm cut, {}",
+                    o.cut_mm,
+                    crate::sheet::duration(o.seconds)
+                ),
                 Some(o) if o.made == "custom-gcode" => o.summary.clone(),
                 Some(o) => o.made.clone(),
                 None => crate::data::strategy_word(&d.strategy()).into(),
@@ -771,7 +848,19 @@ pub fn setup_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
                 .iter()
                 .map(|(name, t)| Widget::Value {
                     label: name.clone(),
-                    value: tool_line(t),
+                    value: match run.and_then(|r| r.tools.iter().find(|u| &u.name == name)) {
+                        Some(used) => format!(
+                            "{} · {} · to Z{}",
+                            tool_line(t),
+                            used.operations
+                                .iter()
+                                .filter_map(|&k| ops.get(k).map(|(n, _)| n.name.as_str()))
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                            used.lowest.map_or_else(|| "?".into(), crate::sheet::num)
+                        ),
+                        None => tool_line(t),
+                    },
                     mono: false,
                 })
                 .collect(),
@@ -1043,6 +1132,14 @@ pub fn setup_event(cam: &mut Cam, id: &str, event: PanelEvent) {
         PanelEvent::Toggle { id: t, on } if t == "show_material" => cam.show_material = on,
         PanelEvent::Button { id: b } if b == "generate" => cam.refresh(id, true),
         PanelEvent::Button { id: b } if b == "stop" => cam.runs.stop(id),
+        PanelEvent::Text { id: t, value } if t == "material" => {
+            setup.material = value.trim().to_string();
+            cam.write_setup(id, &setup);
+        }
+        PanelEvent::Button { id: b } if b == "save_sheet" => match cam.sheet_of(id) {
+            Ok((name, html)) => Cam::save_sheet(&name, html),
+            Err(e) => cam.hint = Some(e),
+        },
         PanelEvent::Button { id: b } if b == "save_setup" => match cam.program_of(id, false) {
             Ok(p) => Cam::save(&p),
             Err(e) => cam.hint = Some(e),
@@ -2123,6 +2220,13 @@ pub fn operation_event(cam: &mut Cam, id: &str, event: PanelEvent) {
         PanelEvent::Button { id: b } if b == "save" || b == "save_anyway" => {
             match cam.program_of(id, b == "save_anyway") {
                 Ok(p) => Cam::save(&p),
+                Err(e) => cam.hint = Some(e),
+            }
+            return;
+        }
+        PanelEvent::Button { id: b } if b == "save_sheet" => {
+            match cam.sheet_of(id) {
+                Ok((name, html)) => Cam::save_sheet(&name, html),
                 Err(e) => cam.hint = Some(e),
             }
             return;
