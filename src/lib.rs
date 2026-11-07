@@ -1161,9 +1161,11 @@ impl Bench for Cam {
                              finishing_passes: numbers; centre, tabs, finishing, \
                              finishing_repeat: booleans; tab_shape: rectangular|triangular; \
                              hand: right|left; depth: engrave's and slot's, mm; chamfer_width, \
-                             tip_offset: a chamfer's, mm; outer_radius, peck, \
-                             chip_break, dwell, pitch, max_depth, finishing_stepover, \
-                             finishing_feed: {value, given}}",
+                             tip_offset: a chamfer's, mm; bore_pitch: a bore's helix, mm a \
+                             turn; boss_width: circular's, mm; thread_pitch, thread_passes: \
+                             a milled thread's; outer_radius, peck, chip_break, dwell, pitch, \
+                             max_depth, finishing_stepover, finishing_feed, thread_diameter: \
+                             {value, given}}",
                         ),
                         param(
                             "transform",
@@ -1181,6 +1183,40 @@ impl Bench for Cam {
                             false,
                             "a list of sketch ids: their closed loops, text among them, are \
                              what it follows or cuts within (a 2D cut's outline then)",
+                        ),
+                        param(
+                            "faces",
+                            ParamKind::List,
+                            false,
+                            "faces picked: a list of {body, at = {x, y, z}}, three numbers for a point on each, \
+                             in document coordinates; a hole's wall for a hole operation",
+                        ),
+                        param(
+                            "edges",
+                            ParamKind::List,
+                            false,
+                            "edges picked, as faces are: a hole's rim for a hole operation",
+                        ),
+                        param(
+                            "holes",
+                            ParamKind::Any,
+                            false,
+                            "drill, bore, circular, thread: {same_diameter: boolean, every \
+                             hole as wide as one picked; order: nearest|x-then-y|as-picked \
+                             (nearest)}",
+                        ),
+                        param(
+                            "conventional",
+                            ParamKind::Bool,
+                            false,
+                            "profile, pocket, pocket-clearing, bore, circular, thread: cut \
+                             conventional rather than climb",
+                        ),
+                        param(
+                            "spring_pass",
+                            ParamKind::Bool,
+                            false,
+                            "thread: the last radial pass cut twice",
                         ),
                         param(
                             "direction",
@@ -1256,6 +1292,17 @@ impl Bench for Cam {
                          Haas and Centroid CNC12 (G84, G74), Heidenhain (cycle 207), or a post \
                          of your own with tap = \"g84\", \"m29\" or \"g33.1\"; on Masso, GRBL \
                          and Mach it is a failed check."
+                            .into(),
+                        "Holes (drill, bore, circular, thread) are picked by a rim (edges) or a \
+                         wall (faces); holes.same_diameter takes every hole of the setup's \
+                         bodies as wide as one picked, a boss's every boss as wide. Bore goes \
+                         down a helix, passes.bore_pitch a turn (1 mm), with finishing passes \
+                         at the bottom. Circular clears holes from the middle out and bosses \
+                         from passes.boss_width out, in circles a stepover apart, a stepdown a \
+                         level. Thread mills a thread with a thread mill at \
+                         passes.thread_pitch, passes.hand, in passes.thread_passes radial \
+                         passes, to passes.thread_diameter (a hole's plus the thread's depth, \
+                         a boss's own, unless given). Each helix is G2 or G3 with a Z."
                             .into(),
                     ],
                     see_also: vec![id(TOOLS), id(RUN)],
@@ -1736,6 +1783,33 @@ impl Bench for Cam {
                     if let Some(r) = args.get("reverse").and_then(Value::as_bool) {
                         *reverse = r;
                     }
+                }
+                for (key, picks) in [("faces", &mut data.faces), ("edges", &mut data.edges)] {
+                    if let Some(given) = args.get(key) {
+                        *picks = serde_json::from_value(given.clone())
+                            .map_err(|_| format!("{key}: a list of {{body, at = {{x, y, z}}}}"))?;
+                    }
+                }
+                if let Some(given) = args.get("holes") {
+                    data.operation.holes = serde_json::from_value(given.clone()).map_err(|_| {
+                        "holes: {same_diameter = true|false, order = nearest|x-then-y|as-picked}"
+                    })?;
+                }
+                if let Some(on) = args.get("conventional").and_then(Value::as_bool) {
+                    match &mut data.operation.strategy {
+                        StrategySpec::Profile { conventional, .. }
+                        | StrategySpec::Pocket { conventional }
+                        | StrategySpec::PocketClearing { conventional, .. }
+                        | StrategySpec::Bore { conventional, .. }
+                        | StrategySpec::Circular { conventional, .. }
+                        | StrategySpec::Thread { conventional, .. } => *conventional = on,
+                        _ => return Err("conventional: this strategy has no such choice".into()),
+                    }
+                }
+                if let StrategySpec::Thread { spring_pass, .. } = &mut data.operation.strategy
+                    && let Some(on) = args.get("spring_pass").and_then(Value::as_bool)
+                {
+                    *spring_pass = on;
                 }
                 if let StrategySpec::Chamfer { side, .. } = &mut data.operation.strategy
                     && let Some(d) = text("side")

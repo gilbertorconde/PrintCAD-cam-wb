@@ -115,12 +115,13 @@ pub fn add_post(posts: &mut BTreeMap<String, String>, text: &str) -> Result<Stri
 }
 
 /// The tool kinds, as the editor lists them.
-const KINDS: [(ToolKind, &str); 5] = [
+const KINDS: [(ToolKind, &str); 6] = [
     (ToolKind::Flat, "Flat end mill"),
     (ToolKind::Ball, "Ball end mill"),
     (ToolKind::Bullnose, "Bull nose end mill"),
     (ToolKind::Cone, "V-bit or chamfer mill"),
     (ToolKind::Drill, "Drill"),
+    (ToolKind::ThreadMill, "Thread mill"),
 ];
 
 /// A number of a tool, by the editor's field, for showing: zero for none.
@@ -131,6 +132,10 @@ fn field(t: &ToolSpec, id: &str) -> Option<f64> {
         "corner" => t.corner,
         "angle" => opt(t.angle),
         "tip_diameter" => t.tip_diameter,
+        "tip_length" => t.tip_length,
+        "pitch_fine" => t.pitch_range.map_or(0.0, |[f, _]| f),
+        "pitch_coarse" => t.pitch_range.map_or(0.0, |[_, c]| c),
+        "teeth" => f64::from(t.teeth.unwrap_or(0)),
         "flutes" => f64::from(t.flutes.unwrap_or(0)),
         "flute_length" => opt(t.flute_length),
         "shank_diameter" => opt(t.shank_diameter),
@@ -155,6 +160,22 @@ fn set_field(t: &mut ToolSpec, id: &str, v: f64) -> bool {
         "corner" if v <= t.diameter / 2.0 => t.corner = v,
         "angle" if v < 180.0 => t.angle = opt,
         "tip_diameter" if v < t.diameter => t.tip_diameter = v,
+        "tip_length" => t.tip_length = v,
+        // A range from one pitch, or to one: the other end follows it where
+        // it would be passed.
+        "pitch_fine" => {
+            t.pitch_range = opt.map(|f| {
+                let coarse = t.pitch_range.map_or(f, |[_, c]| c);
+                [f, coarse.max(f)]
+            })
+        }
+        "pitch_coarse" => {
+            t.pitch_range = opt.map(|c| {
+                let fine = t.pitch_range.map_or(c, |[f, _]| f);
+                [fine.min(c), c]
+            })
+        }
+        "teeth" => t.teeth = (whole > 1).then_some(whole),
         "flutes" => t.flutes = (whole > 0).then_some(whole),
         "flute_length" => t.flute_length = opt,
         "shank_diameter" => t.shank_diameter = opt,
@@ -175,6 +196,15 @@ fn fields(kind: ToolKind) -> Vec<(&'static str, &'static str, Dim, usize)> {
     }
     if matches!(kind, ToolKind::Cone | ToolKind::Drill) {
         out.push(("angle", "Included angle (0: none)", Dim::Angle, 1));
+    }
+    if kind == ToolKind::ThreadMill {
+        out.extend([
+            ("angle", "Thread angle (0: 60°)", Dim::Angle, 1),
+            ("tip_length", "Tip, below the teeth", Dim::Length, 3),
+            ("pitch_fine", "Finest pitch (0: any)", Dim::Length, 3),
+            ("pitch_coarse", "Coarsest pitch (0: any)", Dim::Length, 3),
+            ("teeth", "Rows of teeth (0: single form)", Dim::Number, 0),
+        ]);
     }
     if kind == ToolKind::Cone {
         out.push(("tip_diameter", "Tip diameter", Dim::Length, 3));
@@ -316,6 +346,12 @@ pub fn tool_event(
                 tool.kind = *k;
                 if *k != ToolKind::Bullnose {
                     tool.corner = 0.0;
+                }
+                // A thread mill's own, which no other tool has.
+                if *k != ToolKind::ThreadMill {
+                    tool.tip_length = 0.0;
+                    tool.pitch_range = None;
+                    tool.teeth = None;
                 }
             }
         }
@@ -500,6 +536,56 @@ mod tests {
         assert_eq!(t.presets[0].feed, Some(1500.0));
         assert_eq!(chosen, Some(0));
         assert!(!tools.contains_key("Flat 6"));
+    }
+
+    /// A thread mill has its tip, its pitches and its rows of teeth in the
+    /// editor; a range given from one end follows it, and they go when it
+    /// is made another kind.
+    #[test]
+    fn a_thread_mill_is_edited() {
+        let mut tools = library();
+        let (mut chosen, mut preset) = (Some(0), None);
+        let mut send = |tools: &mut BTreeMap<String, ToolSpec>, e: PanelEvent| {
+            assert!(tool_event(tools, &mut chosen, &mut preset, &e), "{e:?}");
+        };
+        send(
+            &mut tools,
+            PanelEvent::Choice {
+                id: "tool/kind".into(),
+                index: 5,
+            },
+        );
+        for (field, value) in [
+            ("tip_length", 0.4),
+            ("pitch_coarse", 1.5),
+            ("pitch_fine", 2.0),
+            ("teeth", 3.0),
+        ] {
+            send(
+                &mut tools,
+                PanelEvent::Number {
+                    id: format!("tool/{field}"),
+                    value,
+                },
+            );
+        }
+        let t = &tools["Flat 6"];
+        assert_eq!(t.kind, ToolKind::ThreadMill);
+        assert_eq!(t.tip_length, 0.4);
+        assert_eq!(t.pitch_range, Some([2.0, 2.0]), "the coarsest follows");
+        assert_eq!(t.threads_per_turn(), 3);
+        let ids: Vec<&str> = fields(t.kind).iter().map(|f| f.0).collect();
+        assert!(ids.contains(&"pitch_fine") && ids.contains(&"teeth"));
+        assert!(t.check().is_empty(), "{:?}", t.check());
+        send(
+            &mut tools,
+            PanelEvent::Choice {
+                id: "tool/kind".into(),
+                index: 0,
+            },
+        );
+        let t = &tools["Flat 6"];
+        assert_eq!((t.tip_length, t.pitch_range, t.teeth), (0.0, None, None));
     }
 
     #[test]

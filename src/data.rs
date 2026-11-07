@@ -1075,7 +1075,7 @@ fn positive(v: f64) -> bool {
 
 /// The strategies a new operation may have, in the order the panel lists them,
 /// with what the panel calls them.
-pub const STRATEGIES: [(&str, &str); 18] = [
+pub const STRATEGIES: [(&str, &str); 21] = [
     ("adaptive", "Adaptive clearing (3D roughing)"),
     ("pocket-clearing", "Pocket clearing (3D roughing)"),
     ("parallel", "Parallel (3D finishing)"),
@@ -1089,6 +1089,9 @@ pub const STRATEGIES: [(&str, &str); 18] = [
     ("pocket", "2D pocket"),
     ("face", "Facing"),
     ("drill", "Drilling"),
+    ("bore", "Bore (holes, down a helix)"),
+    ("circular", "Circular (holes and bosses)"),
+    ("thread", "Thread milling"),
     ("engrave", "Engrave (along curves)"),
     ("slot", "Slot (along curves)"),
     ("chamfer", "Deburr / chamfer (along edges)"),
@@ -1120,6 +1123,9 @@ pub fn strategy_word(strategy: &StrategySpec) -> &'static str {
         StrategySpec::Pocket { .. } => "2D pocket",
         StrategySpec::Face { .. } => "Face",
         StrategySpec::Drill { .. } => "Drill",
+        StrategySpec::Bore { .. } => "Bore",
+        StrategySpec::Circular { .. } => "Circular",
+        StrategySpec::Thread { .. } => "Thread",
         StrategySpec::Engrave { .. } => "Engrave",
         StrategySpec::VCarve { .. } => "V-carve",
         StrategySpec::Slot { .. } => "Slot",
@@ -1145,6 +1151,9 @@ fn start_on_silhouette(op: &mut Operation) {
         | StrategySpec::Pocket { .. }
         | StrategySpec::Face { .. }
         | StrategySpec::Drill { .. }
+        | StrategySpec::Bore { .. }
+        | StrategySpec::Circular { .. }
+        | StrategySpec::Thread { .. }
         | StrategySpec::Engrave { .. }
         | StrategySpec::VCarve { .. }
         | StrategySpec::Slot { .. }

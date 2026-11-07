@@ -65,6 +65,20 @@ pub struct PassesData {
     /// The deepest a V-carving goes; the V's own full depth unless given.
     #[serde(default)]
     pub max_depth: Opt,
+    /// How far down a bore's helix goes each turn.
+    #[serde(default = "one_mm")]
+    pub bore_pitch: f64,
+    /// How far out from a boss circular milling clears in from.
+    #[serde(default)]
+    pub boss_width: f64,
+    /// A milled thread's pitch, mm a turn, its major diameter (its hole's
+    /// or boss's own unless given), and the radial passes it is cut in.
+    #[serde(default = "one_mm")]
+    pub thread_pitch: f64,
+    #[serde(default)]
+    pub thread_diameter: Opt,
+    #[serde(default = "one_mm")]
+    pub thread_passes: f64,
     pub tabs: bool,
     pub tab_shape: TabShape,
     pub tab_width: f64,
@@ -104,6 +118,11 @@ impl Default for PassesData {
             chamfer_width: half(),
             tip_offset: fifth(),
             max_depth: Opt::default(),
+            bore_pitch: one_mm(),
+            boss_width: 0.0,
+            thread_pitch: one_mm(),
+            thread_diameter: Opt::default(),
+            thread_passes: 1.0,
             tabs: false,
             tab_shape: tabs.shape,
             tab_width: tabs.width,
@@ -122,6 +141,9 @@ impl Default for PassesData {
             "drill",
             "engrave",
             "chamfer",
+            "bore",
+            "circular",
+            "thread",
         ] {
             out.read_strategy(&named(name));
         }
@@ -137,6 +159,12 @@ fn half() -> f64 {
 /// A chamfer's tip offset in a document from before it had one: camcraft's.
 fn fifth() -> f64 {
     0.2
+}
+
+/// A bore's and a thread's pitch, and a thread's passes, in a document from
+/// before they had them: camcraft's.
+fn one_mm() -> f64 {
+    1.0
 }
 
 fn named(name: &str) -> StrategySpec {
@@ -244,6 +272,20 @@ impl PassesData {
                 width, tip_offset, ..
             } => (self.chamfer_width, self.tip_offset) = (width, tip_offset),
             StrategySpec::VCarve { max_depth } => self.max_depth = Opt::of(max_depth),
+            StrategySpec::Bore { pitch, .. } => self.bore_pitch = pitch,
+            StrategySpec::Circular { boss_width, .. } => self.boss_width = boss_width,
+            StrategySpec::Thread {
+                pitch,
+                hand,
+                diameter,
+                radial_passes,
+                ..
+            } => {
+                self.thread_pitch = pitch;
+                self.hand = hand;
+                self.thread_diameter = Opt::of(diameter);
+                self.thread_passes = f64::from(radial_passes);
+            }
             _ => {}
         }
         if let StrategySpec::MorphedSpiral { centre, .. } = *s {
@@ -349,6 +391,20 @@ impl PassesData {
                 width, tip_offset, ..
             } => (*width, *tip_offset) = (self.chamfer_width, self.tip_offset),
             StrategySpec::VCarve { max_depth } => *max_depth = self.max_depth.get(),
+            StrategySpec::Bore { pitch, .. } => *pitch = self.bore_pitch,
+            StrategySpec::Circular { boss_width, .. } => *boss_width = self.boss_width,
+            StrategySpec::Thread {
+                pitch,
+                hand,
+                diameter,
+                radial_passes,
+                ..
+            } => {
+                *pitch = self.thread_pitch;
+                *hand = self.hand;
+                *diameter = self.thread_diameter.get();
+                *radial_passes = self.thread_passes.round().clamp(1.0, 20.0) as u32;
+            }
             _ => {}
         }
         let uses = op.strategy.uses();
@@ -422,6 +478,21 @@ impl PassesData {
         );
         let chamfer = matches!(s, StrategySpec::Chamfer { .. });
         add(chamfer, "chamfer_width", "Chamfer width", Dim::Length);
+        add(
+            matches!(s, StrategySpec::Bore { .. }),
+            "bore_pitch",
+            "Helix pitch",
+            Dim::Length,
+        );
+        add(
+            matches!(s, StrategySpec::Circular { .. }),
+            "boss_width",
+            "Boss stock width",
+            Dim::Length,
+        );
+        let thread = matches!(s, StrategySpec::Thread { .. });
+        add(thread, "thread_pitch", "Thread pitch", Dim::Length);
+        add(thread, "thread_passes", "Radial passes", Dim::Number);
         add(chamfer, "tip_offset", "Tip offset", Dim::Length);
         let tabs = uses.tabs && self.tabs;
         add(tabs, "tab_width", "Tab width", Dim::Length);
@@ -459,6 +530,12 @@ impl PassesData {
                 matches!(s, StrategySpec::Drill { .. }) && tap,
                 "pitch",
                 "Thread pitch",
+                Dim::Length,
+            ),
+            (
+                thread && self.thread_diameter.given,
+                "thread_diameter",
+                "Thread diameter",
                 Dim::Length,
             ),
             (
@@ -501,6 +578,10 @@ const FACE_DIRECTIONS: [(FaceDirection, &str); 3] = [
     (FaceDirection::Conventional, "Conventional"),
 ];
 const HANDS: [(ThreadHand, &str); 2] = [
+    (ThreadHand::Right, "Right-hand"),
+    (ThreadHand::Left, "Left-hand"),
+];
+const THREAD_HANDS: [(ThreadHand, &str); 2] = [
     (ThreadHand::Right, "Right-hand"),
     (ThreadHand::Left, "Left-hand"),
 ];
@@ -665,6 +746,35 @@ pub fn strategy_rows(data: &OperationData, tool: Option<&ToolSpec>, feature: &st
     if let StrategySpec::Drill { .. } = s {
         drill_rows(&mut rows, data, tool, feature);
     }
+    if let StrategySpec::Bore { .. } = s {
+        rows.push(length("passes/bore_pitch", "Helix pitch", p.bore_pitch));
+        rows.push(Widget::Text {
+            text: "Down a helix from just above each hole to its bottom, the pitch a turn, \
+                   round once there, then out to the wall in the finishing passes, each in \
+                   and out along an arc. A hole wider than twice the tool leaves a core in \
+                   its middle, and says so."
+                .into(),
+            mono: false,
+        });
+    }
+    if let StrategySpec::Circular { .. } = s {
+        rows.push(length(
+            "passes/boss_width",
+            "Boss stock width",
+            p.boss_width,
+        ));
+        rows.push(Widget::Text {
+            text: "A hole is cleared in circles from its middle out to its wall; a boss \
+                   from the boss stock width out from it in to it (one circle round it \
+                   when 0). Each level is entered down a helix at the ramp angle, and \
+                   its last circle left along an arc."
+                .into(),
+            mono: false,
+        });
+    }
+    if let StrategySpec::Thread { spring_pass, .. } = s {
+        thread_rows(&mut rows, data, spring_pass, tool, feature);
+    }
     if let StrategySpec::Engrave {
         direction, reverse, ..
     } = s
@@ -795,6 +905,74 @@ pub fn v_depth(tool: &ToolSpec) -> Option<f64> {
     let half = (tool.angle? / 2.0).to_radians();
     (tool.kind == ToolKind::Cone && half > 0.0)
         .then(|| (tool.diameter - tool.tip_diameter).max(0.0) / 2.0 / half.tan())
+}
+
+/// A thread milling operation's rows: its pitch, hand, diameter and passes,
+/// and what that comes to with `tool`.
+fn thread_rows(
+    rows: &mut Vec<Widget>,
+    data: &OperationData,
+    spring_pass: bool,
+    tool: Option<&ToolSpec>,
+    feature: &str,
+) {
+    let p = &data.passes;
+    rows.push(number(
+        "passes/thread_pitch",
+        "Thread pitch",
+        p.thread_pitch,
+        Dim::Length,
+        3,
+        feature,
+    ));
+    rows.push(pick("passes/hand", "Thread", &THREAD_HANDS, p.hand));
+    optional_row(
+        rows,
+        "passes",
+        "thread_diameter",
+        "Major diameter",
+        "a hole's plus the thread's depth, a boss's own",
+        p.thread_diameter,
+        Dim::Length,
+        feature,
+    );
+    rows.push(number(
+        "passes/thread_passes",
+        "Radial passes",
+        p.thread_passes,
+        Dim::Number,
+        0,
+        feature,
+    ));
+    rows.push(Widget::Toggle {
+        id: "passes/spring_pass".into(),
+        label: "Cut the last pass twice (spring pass)".into(),
+        on: spring_pass,
+    });
+    let pitch = p.thread_pitch;
+    let depth = |boss| camcraft_core::strategy::holes::thread_depth(pitch, boss);
+    let mut text = format!(
+        "Round a helix at the pitch a turn, in and out along arcs, the thread's depth \
+         ({:.3} mm in a hole, {:.3} mm on a boss) in equal radial passes. Climbing, a \
+         right-hand thread goes up a hole and down a boss; the tool's end goes no lower \
+         than the bottom.",
+        depth(false),
+        depth(true)
+    );
+    if let Some(t) = tool.filter(|t| t.kind == ToolKind::ThreadMill) {
+        let teeth = t.threads_per_turn();
+        if teeth > 1 {
+            text.push_str(&format!(
+                " This mill cuts {teeth} turns of the thread each time round."
+            ));
+        }
+        if let Some(why) = t.pitch_problem(pitch) {
+            text.push_str(&format!(" It cannot: {why}."));
+        }
+    } else {
+        text.push_str(" It cuts with a thread mill.");
+    }
+    rows.push(Widget::Text { text, mono: false });
 }
 
 /// A drilling operation's rows: its pecks, how they break the chip and the
@@ -978,30 +1156,42 @@ fn start(field: &str, data: &OperationData, tool: Option<&ToolSpec>) -> Option<f
         "finishing_stepover" => 0.1 * d,
         "finishing_feed" => data.feed,
         "max_depth" => 1.0,
+        "thread_diameter" => nominal(data.passes.thread_pitch),
         _ => return None,
     })
 }
 
+/// The ISO metric coarse threads, diameter and pitch.
+const COARSE: [(f64, f64); 11] = [
+    (2.0, 0.4),
+    (2.5, 0.45),
+    (3.0, 0.5),
+    (4.0, 0.7),
+    (5.0, 0.8),
+    (6.0, 1.0),
+    (8.0, 1.25),
+    (10.0, 1.5),
+    (12.0, 1.75),
+    (16.0, 2.0),
+    (20.0, 2.5),
+];
+
 /// The ISO metric coarse pitch of the thread nearest `diameter` across, as a
 /// tap of that size most likely cuts.
 fn coarse_pitch(diameter: f64) -> f64 {
-    const COARSE: [(f64, f64); 11] = [
-        (2.0, 0.4),
-        (2.5, 0.45),
-        (3.0, 0.5),
-        (4.0, 0.7),
-        (5.0, 0.8),
-        (6.0, 1.0),
-        (8.0, 1.25),
-        (10.0, 1.5),
-        (12.0, 1.75),
-        (16.0, 2.0),
-        (20.0, 2.5),
-    ];
     COARSE
         .iter()
         .min_by(|a, b| (a.0 - diameter).abs().total_cmp(&(b.0 - diameter).abs()))
         .map_or(1.0, |(_, p)| *p)
+}
+
+/// The diameter of the ISO metric coarse thread whose pitch is nearest
+/// `pitch`: where a thread's major diameter most likely starts.
+fn nominal(pitch: f64) -> f64 {
+    COARSE
+        .iter()
+        .min_by(|a, b| (a.1 - pitch).abs().total_cmp(&(b.1 - pitch).abs()))
+        .map_or(6.0, |(d, _)| *d)
 }
 
 /// A range camcraft would refuse put right, as camcraft's app does as it is
@@ -1025,7 +1215,9 @@ fn put_right(p: &mut PassesData) {
         p.outer_radius.value = p.inner_radius + 1.0;
     }
     p.finishing_passes = p.finishing_passes.round().clamp(1.0, 20.0);
+    p.thread_passes = p.thread_passes.round().clamp(1.0, 20.0);
     p.tip_offset = p.tip_offset.max(0.0);
+    p.boss_width = p.boss_width.max(0.0);
 }
 
 /// A widget of the passes' rows changed: `id` without its `passes/`. Whether it
@@ -1074,6 +1266,12 @@ pub fn passes_event(
                 Some(direction),
                 TRACE_DIRECTIONS.get(*index).map(|(x, _)| *x),
             );
+        }
+        ("spring_pass", PanelEvent::Toggle { on, .. }) => {
+            let StrategySpec::Thread { spring_pass, .. } = s else {
+                return false;
+            };
+            return set(Some(spring_pass), Some(*on));
         }
         ("reverse", PanelEvent::Toggle { on, .. }) => {
             let (StrategySpec::Engrave { reverse, .. } | StrategySpec::Slot { reverse, .. }) = s
@@ -1283,6 +1481,94 @@ mod tests {
         assert!(
             names.contains(&"pitch") && !names.contains(&"peck"),
             "{names:?}"
+        );
+    }
+
+    /// A bore's pitch, a boss's width and a thread's settings reach the
+    /// operation and come back from it; a bore has finishing passes.
+    #[test]
+    fn hole_milling_reaches_the_operation() {
+        let mut bore = op("bore");
+        bore.passes.bore_pitch = 0.5;
+        bore.passes.finishing = true;
+        let cut = bore.operation("");
+        assert!(matches!(
+            cut.strategy,
+            StrategySpec::Bore { pitch: 0.5, .. }
+        ));
+        assert!(cut.passes.finishing.is_some());
+        assert_eq!(PassesData::of(&cut), bore.passes);
+
+        let mut circular = op("circular");
+        circular.passes.boss_width = 4.0;
+        let cut = circular.operation("");
+        assert!(matches!(
+            cut.strategy,
+            StrategySpec::Circular {
+                boss_width: 4.0,
+                ..
+            }
+        ));
+
+        let mut thread = op("thread");
+        let tick = PanelEvent::Toggle {
+            id: "passes/thread_diameter/given".into(),
+            on: true,
+        };
+        thread.passes.thread_pitch = 1.25;
+        assert!(passes_event(
+            &mut thread,
+            "thread_diameter/given",
+            &tick,
+            None
+        ));
+        assert_eq!(thread.passes.thread_diameter, Opt::of(Some(8.0)), "an M8's");
+        let spring = PanelEvent::Toggle {
+            id: "passes/spring_pass".into(),
+            on: true,
+        };
+        assert!(passes_event(&mut thread, "spring_pass", &spring, None));
+        let left = PanelEvent::Choice {
+            id: "passes/hand".into(),
+            index: 1,
+        };
+        assert!(passes_event(&mut thread, "hand", &left, None));
+        thread.passes.thread_passes = 3.0;
+        let cut = thread.operation("");
+        assert!(matches!(
+            cut.strategy,
+            StrategySpec::Thread {
+                pitch: 1.25,
+                hand: ThreadHand::Left,
+                diameter: Some(8.0),
+                radial_passes: 3,
+                spring_pass: true,
+                ..
+            }
+        ));
+        assert_eq!(PassesData::of(&cut), thread.passes);
+        assert_eq!(OperationData::from(&thread.to_value()).unwrap(), thread);
+        let names: Vec<_> = thread
+            .passes
+            .parameters(&cut)
+            .into_iter()
+            .map(|(_, name, ..)| name)
+            .collect();
+        assert!(names.contains(&"thread_diameter") && names.contains(&"thread_pitch"));
+        // A document from before them reads.
+        let mut old = op("drill").to_value();
+        for field in [
+            "bore_pitch",
+            "boss_width",
+            "thread_pitch",
+            "thread_diameter",
+            "thread_passes",
+        ] {
+            old["passes"].as_object_mut().unwrap().remove(field);
+        }
+        assert_eq!(
+            OperationData::from(&old).unwrap().operation(""),
+            op("drill").operation("")
         );
     }
 

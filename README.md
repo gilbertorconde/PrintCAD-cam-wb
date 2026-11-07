@@ -58,7 +58,19 @@ panels, the drawing and the helper that runs camcraft.
 - **Operations**, after Fusion's: adaptive and pocket clearing; parallel,
   scallop, contour, flat, spiral, radial and morphed spiral finishing; 2D
   profiles and pockets; facing; drilling: at once, in pecks backing out,
-  breaking the chip, or tapping, right- or left-hand; engraving along curves
+  breaking the chip, or tapping, right- or left-hand; holes milled with
+  the side of a tool: bored down a helix (a millimetre a turn unless set),
+  round once at the bottom, then finished at the wall in passes that go in
+  and out along arcs; holes and round bosses cleared in circles, a hole's
+  from its middle out and a boss's from a width out from it in, a
+  stepover apart, a stepdown a level, each level entered down a helix at
+  the ramp angle; and threads milled inside holes or on bosses with a
+  thread mill, right- or left-hand, at a pitch, climbing up or down as
+  the hand says, in radial passes and a spring pass, along helixes in
+  and out along arcs, a multi-form mill cutting as many turns each time
+  round as it has rows of teeth (a thread's groove, past the wall it is
+  cut in, is meant, not a gouge). Their helixes are written as `G2` and
+  `G3` with a `Z`; engraving along curves
   and edges, open or closed, at a depth (0.5 mm unless set), each ramped
   down along itself, round a closed one and back and forth along an open
   one, so it never lifts between its levels, its arcs written as `G2` and
@@ -107,7 +119,13 @@ panels, the drawing and the helper that runs camcraft.
   and while it is armed, hovering shows what a click takes. An operation
   takes faces, and edges by the loop they go round at their height (an edge
   that is not level, alone; an engraving's, each alone, and those end to
-  end followed as one); a click on a picked one takes it out. It can take
+  end followed as one); a click on a picked one takes it out. A hole
+  operation (drilling, boring, circular, thread) takes a hole by its rim,
+  or by its wall, whose rims are its top and its bottom; "Every hole as
+  wide" takes every hole of the setup's bodies as wide as one picked, its
+  axis along the tool, as Fusion's Select Same Diameter, or every boss as
+  wide; and its holes are cut nearest first, by X then Y back and forth,
+  or as picked. It can take
   the document's sketches too, ticked in its panel: what their closed loops
   enclose, or the loops themselves for an engraving. A sketch's text is its
   letters' outlines. Its open curves close nothing, and a package cannot
@@ -284,6 +302,8 @@ panels, the drawing and the helper that runs camcraft.
   the spindle): a tapping operation posted for them is a failed check that
   says so, and names the machines that can. A tap is kept in the tool
   library as a flat end mill its size, and turns the way its thread does.
+  A thread mill is a kind of its own: its cutting diameter, its tip below
+  the teeth, the pitches it cuts, and its rows of teeth.
   A profile can name its rotary axes, for 3+2 machining:
 
   ```toml
@@ -328,6 +348,10 @@ local deburr = cam.operation{setup = setup.feature, strategy = "chamfer", tool =
                              passes = {chamfer_width = 0.8, tip_offset = 0.3}}
 local letters = cam.operation{setup = setup.feature, strategy = "v-carve", tool = "60° V-bit",
                               sketches = {"<sketch id>"}, passes = {max_depth = {value = 2, given = true}}}
+local holes = cam.operation{setup = setup.feature, strategy = "thread", tool = "M8 thread mill",
+                            faces = {{body = "<body id>", at = {10, 10, -3}}},
+                            holes = {same_diameter = true, order = "x-then-y"},
+                            passes = {thread_pitch = 1.25, thread_passes = 2}}
 local clamps = cam.operation{setup = setup.feature, strategy = "custom-gcode",
                              gcode = "M0 (move the clamps for @operation@)\nM7"}
 cam.status{id = setup.feature}          -- queued, running, ready (with its checks), failed
