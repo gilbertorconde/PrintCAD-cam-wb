@@ -6,6 +6,10 @@
 //! settings, and a run is too big for either. The helper is native, so it
 //! keeps them in the user's cache folder, `printcad-cam`, the newest
 //! [`KEPT`] of them. `CAM_HELPER_CACHE` names another folder, or `off`.
+//!
+//! Beside each run it keeps the material the setup left ([`Kind::Left`]),
+//! for a setup that carries on from it: the newest [`KEPT_LEFT`], as they
+//! are larger.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -13,6 +17,34 @@ use std::time::SystemTime;
 
 /// How many runs are kept.
 pub const KEPT: usize = 64;
+
+/// How many setups' material left is kept.
+pub const KEPT_LEFT: usize = 8;
+
+/// What is kept under a key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// A run's answer, as JSON.
+    Run,
+    /// The material a setup left ([`crate::left`]).
+    Left,
+}
+
+impl Kind {
+    fn extension(self) -> &'static str {
+        match self {
+            Kind::Run => "json",
+            Kind::Left => "left",
+        }
+    }
+
+    fn kept(self) -> usize {
+        match self {
+            Kind::Run => KEPT,
+            Kind::Left => KEPT_LEFT,
+        }
+    }
+}
 
 /// The folder runs are kept in, if any.
 pub fn folder() -> Option<PathBuf> {
@@ -83,13 +115,18 @@ fn key_for(request: &str, build: &str) -> String {
     )
 }
 
-fn path(folder: &Path, key: &str) -> PathBuf {
-    folder.join(format!("{key}.json"))
+fn path(folder: &Path, key: &str, kind: Kind) -> PathBuf {
+    folder.join(format!("{key}.{}", kind.extension()))
 }
 
 /// The answer kept for `key`, if one is; it becomes the newest.
 pub fn get(folder: &Path, key: &str) -> Option<Vec<u8>> {
-    let path = path(folder, key);
+    get_kind(folder, key, Kind::Run)
+}
+
+/// What of `kind` is kept for `key`, if any is; it becomes the newest.
+pub fn get_kind(folder: &Path, key: &str, kind: Kind) -> Option<Vec<u8>> {
+    let path = path(folder, key, kind);
     let bytes = fs::read(&path).ok()?;
     if let Ok(f) = fs::File::options().append(true).open(&path) {
         let _ = f.set_modified(SystemTime::now());
@@ -100,29 +137,34 @@ pub fn get(folder: &Path, key: &str) -> Option<Vec<u8>> {
 /// Keep `answer` for `key`, and drop all but the newest [`KEPT`]. A folder
 /// that cannot be written is left alone: the run was answered anyway.
 pub fn put(folder: &Path, key: &str, answer: &[u8]) {
+    put_kind(folder, key, Kind::Run, answer);
+}
+
+/// Keep `bytes` of `kind` for `key`, as [`put`] keeps an answer.
+pub fn put_kind(folder: &Path, key: &str, kind: Kind, bytes: &[u8]) {
     if fs::create_dir_all(folder).is_err() {
         return;
     }
     // Written aside and moved in, so a run read while it is written is
     // whole or not there.
-    let path = path(folder, key);
-    let part = path.with_extension("part");
-    if fs::write(&part, answer).is_err() || fs::rename(&part, &path).is_err() {
+    let path = path(folder, key, kind);
+    let part = path.with_extension(format!("{}-part", kind.extension()));
+    if fs::write(&part, bytes).is_err() || fs::rename(&part, &path).is_err() {
         let _ = fs::remove_file(&part);
         return;
     }
-    prune(folder, KEPT);
+    prune(folder, kind, kind.kept());
 }
 
-/// Drop all but the newest `keep` kept answers.
-fn prune(folder: &Path, keep: usize) {
+/// Drop all but the newest `keep` kept of `kind`.
+fn prune(folder: &Path, kind: Kind, keep: usize) {
     let Ok(entries) = fs::read_dir(folder) else {
         return;
     };
     let mut kept: Vec<(SystemTime, PathBuf)> = entries
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .filter(|p| p.extension().is_some_and(|x| x == kind.extension()))
         .filter_map(|p| Some((fs::metadata(&p).ok()?.modified().ok()?, p)))
         .collect();
     kept.sort_by_key(|k| std::cmp::Reverse(k.0));
@@ -153,7 +195,7 @@ mod tests {
             put(&folder, &key(&i.to_string()), b"x");
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        prune(&folder, 3);
+        prune(&folder, Kind::Run, 3);
         let left = fs::read_dir(&folder).unwrap().count();
         assert_eq!(left, 3);
         assert!(get(&folder, &key("4")).is_some());

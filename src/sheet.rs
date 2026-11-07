@@ -20,6 +20,8 @@ pub struct Sheet<'a> {
     pub bodies: Vec<String>,
     /// Its run.
     pub run: &'a Run,
+    /// The earlier setup its stock carries on from, by name, when it does.
+    pub carried_from: Option<String>,
 }
 
 /// The sheet's look: plain, small and black on white, so it prints as it
@@ -188,6 +190,13 @@ impl Sheet<'_> {
                     None => format!("a round bar {along}"),
                 }
             }
+            StockKind::Earlier => format!(
+                "what {} leaves after its last operation, turned as this setup sees \
+                 the part; its size is the box round that",
+                self.carried_from
+                    .as_deref()
+                    .map_or_else(|| "the setup before".to_string(), |n| format!("setup {n}"))
+            ),
         }
     }
 
@@ -792,6 +801,7 @@ mod tests {
             setup: &setup,
             bodies: vec!["Bracket".into()],
             run: &run,
+            carried_from: None,
         }
         .html()
     }
@@ -867,6 +877,7 @@ mod tests {
             setup: &setup,
             bodies: vec!["Bracket".into()],
             run: &run,
+            carried_from: None,
         }
         .html();
         assert!(html.contains("2 check(s) failed"), "{html}");
@@ -900,5 +911,25 @@ mod tests {
         assert_eq!(num(-0.0001), "0");
         assert_eq!(num(12.5), "12.5");
         assert_eq!(num(-3.0), "−3");
+    }
+
+    /// A setup carrying on from an earlier one says which, as its stock.
+    #[test]
+    fn a_carried_stock_says_where_from() {
+        let run = run();
+        let mut setup = setup();
+        setup.stock = StockKind::Earlier;
+        let html = Sheet {
+            name: "Bottom",
+            setup: &setup,
+            bodies: vec!["Bracket".into()],
+            run: &run,
+            carried_from: Some("Top".into()),
+        }
+        .html();
+        assert!(
+            html.contains("what setup Top leaves after its last operation"),
+            "{html}"
+        );
     }
 }

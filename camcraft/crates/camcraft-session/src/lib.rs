@@ -39,4 +39,4 @@ pub use post::{
     plan_posting, program, program_name, program_spec, program_with, setup_profile, setup_program,
     setup_program_name, setup_specs, travel_check, write_posting,
 };
-pub use run::{Passed, Ran, check_runnable, gate, run_setup, run_setup_planned};
+pub use run::{Passed, Ran, check_runnable, gate, run_setup, run_setup_from, run_setup_planned};

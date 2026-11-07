@@ -463,6 +463,31 @@ left out); `library::system::holders`, a dozen common holders; and
 `library::fusion_json`, Fusion's JSON tool library, which carries holders,
 read as `fusion_csv` reads CSV (`fusion_csv::name_for` is shared).
 
+And a setup may carry on from the material an earlier one left, as
+Fusion's setups take their stock from the one before. In `camcraft-sim`, a
+`Stock` may have an underside (`Stock::under`): each column's bottom, where
+the material stands clear of the floor, shared by its copies as it never
+changes. A tool taking a column down to its bottom empties it (to the
+floor), and only what stood above the bottom is cut, so a rapid through it
+after is clear; the volume is measured from the bottoms. `Stock::with_bottoms`
+gives a stock its underside, `Block::bottom_near` saying where a block's
+starts. `Carry` (a rigid map from one frame to another, and the box the
+material is within) carries a stock into another frame:
+`Stock::carried_bounds` is the box round it there, and `Stock::carried`
+makes it a stock on a grid there. Down the same line, the other way up or
+turned about it, each column stays one, a cell taking every earlier column
+whose cell overlaps its own; across it, each new column is looked down for
+the first material from above and from below and held as everything
+between, grown a cell all round: never less material, only more.
+`PackedStock` keeps the underside, and `to_bytes` and `from_bytes` keep a
+stock in a file. In `camcraft-core`, `setup::Carried` is what a setup left
+(its stock with an underside, its box, and its frame to model coordinates),
+`SetupResult::left` gives it, and `setup::prepare_from` lays a setup out on
+it in place of its own stock, one block the box round it as the setup sees
+it (`Prepared::carried`); `run_prepared_planned` then starts from it
+carried into the setup's frame. `setup::affine_of` makes a turn and a move
+an affine map. In `camcraft-session`, `run_setup_from` runs a setup so.
+
 And one test: ogeom is 0.11.1 here, which printCAD's shapes need, and it
 meshes `round_edge_loose_fit.step`'s seam that 0.11.0 drew off the torus, so
 `a_loose_fit_is_refused_for_ogeoms_seam` became

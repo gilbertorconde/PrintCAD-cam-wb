@@ -3,12 +3,13 @@
 
 use std::sync::Arc;
 
-use camcraft_sim::stock::{Block, PackedStock, PartSurface, SimReport, VerifyReport};
+use camcraft_sim::stock::{Block, PackedStock, PartSurface, SimReport, StockError, VerifyReport};
 use glam::DVec2;
 
 use crate::job::{Coolant, HeightContext, Piece, SpindleDirection};
 use crate::path::linker::LinkReport;
 use crate::path::toolpath::Toolpath;
+use crate::setup::Carried;
 use crate::setup::frame::Frame;
 use crate::strategy::adaptive::AdaptiveReport;
 use crate::strategy::drilling::DrillReport;
@@ -280,6 +281,33 @@ impl SetupResult {
     /// Whether the whole setup verified.
     pub fn is_clean(&self) -> bool {
         self.verify.is_clean() && self.operations.iter().all(OperationResult::is_clean)
+    }
+
+    /// The material it left, for a setup that carries on from it: the finished
+    /// material, each column standing on its stock's underside.
+    pub fn left(&self) -> Result<Carried, StockError> {
+        let last = self
+            .keyframes
+            .last()
+            .ok_or(StockError::NoBlocks)?
+            .unpack()?;
+        // A cell's material reaches to the cell's edges either way, as a
+        // block's top is taken to them.
+        let grow = last.field().pitch();
+        let blocks = &self.stocks;
+        let stock = last.with_bottoms(|p| {
+            blocks
+                .iter()
+                .filter_map(|b| b.bottom_near(p, grow))
+                .reduce(f64::min)
+        });
+        let within = crate::setup::bounds_all(blocks).ok_or(StockError::NoBlocks)?;
+        let frame = self.frame;
+        Ok(Carried {
+            stock: Arc::new(stock),
+            within,
+            to_model: crate::setup::affine_of(|q| frame.to_model(q)),
+        })
     }
 
     /// Everything worth a person's attention, across every operation.

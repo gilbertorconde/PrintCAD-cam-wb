@@ -10,9 +10,10 @@ use cam_protocol::{Moment, Playback};
 use camcraft_core::job::Job;
 use camcraft_core::path::simadapt::sim_moves;
 use camcraft_core::run::cutting_tool;
+use camcraft_core::setup::bounds_all;
 use camcraft_session::Ran;
-use camcraft_sim::stock::{Block, Stock};
-use glam::{DVec2, DVec3};
+use camcraft_sim::stock::{Block, Carry, Stock};
+use glam::{DAffine3, DVec2, DVec3};
 
 use crate::{Drawn, to_f32};
 
@@ -73,8 +74,20 @@ pub(crate) fn playback(job: &Job, ran: &Ran, draws: &[Drawn]) -> Option<Playback
     }
     let quantum = (high - low) / f64::from(u16::MAX);
 
-    // The stock, swept on a coarse grid of its own.
-    let mut stock = Stock::from_blocks(&r.stocks, low, span.x.max(span.y) / SWEPT as f64).ok()?;
+    // The stock, swept on a coarse grid of its own: the setup's blocks, or
+    // what an earlier setup left, as the run started from it.
+    let coarse = span.x.max(span.y) / SWEPT as f64;
+    let first = r.keyframes.first()?.unpack().ok()?;
+    let mut stock = if first.under().is_some() {
+        let all = bounds_all(&r.stocks)?;
+        let same = Carry {
+            to: DAffine3::IDENTITY,
+            within: all,
+        };
+        first.carried(&same, all, low - 1.0, coarse).ok()?
+    } else {
+        Stock::from_blocks(&r.stocks, low, coarse).ok()?
+    };
     let floor = stock.floor();
 
     // The moments, spread evenly over all the moves, each operation's last

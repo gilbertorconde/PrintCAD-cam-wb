@@ -7,7 +7,7 @@ use camcraft_geom::steps::bounded_count;
 use glam::{DVec2, DVec3, dvec2};
 use rayon::prelude::*;
 
-use super::{CellRect, MoveClass, SimMove, SimReport, Stock, Swept, SweptTool};
+use super::{CellRect, MoveClass, SimMove, SimReport, Stock, Swept, SweptTool, THIN};
 
 /// How far a move may climb and still be level, or wander and still be straight
 /// up or down, in millimetres: both are then swept exactly.
@@ -61,12 +61,23 @@ fn capsule_row(a: DVec2, b: DVec2, r: f64, y: f64) -> Option<(f64, f64)> {
     (lo <= hi).then_some((lo, hi))
 }
 
-/// A tool's underside as it cuts: the tool, the height of its tip, and the floor
-/// no cut goes below.
+/// A tool's underside as it cuts: the tool, the height of its tip, the floor
+/// no cut goes below, and the stock's underside, if it has one: each column's
+/// bottom, row by row, `nx` a row.
 struct Underside<'t, T> {
     tool: &'t T,
     z: f64,
     floor: f64,
+    under: Option<&'t [f32]>,
+    nx: usize,
+}
+
+impl<T> Underside<'_, T> {
+    /// The bottoms of row `iy`'s columns, when the stock has an underside.
+    fn row(&self, iy: u32) -> Option<&[f32]> {
+        let start = iy as usize * self.nx;
+        self.under?.get(start..start + self.nx)
+    }
 }
 
 /// Lower the cells `i0..=i1` of row `iy`, `cells` being the whole row, to the
@@ -75,7 +86,9 @@ struct Underside<'t, T> {
 /// columns it lowered, or `None` when it lowered none.
 ///
 /// Every sweep lowers cells this way, so a level move and a stamp at a point
-/// agree cell for cell.
+/// agree cell for cell. A column taken down to its bottom, where the stock has
+/// an underside, is empty: it goes to the floor, and only what stood above
+/// its bottom counts as cut.
 fn lower_row<T: SweptTool>(
     cells: &mut [f32],
     iy: u32,
@@ -86,6 +99,7 @@ fn lower_row<T: SweptTool>(
     distance: impl Fn(DVec2) -> f64,
 ) -> Option<(f64, u32, u32)> {
     let mut cut: Option<(f64, u32, u32)> = None;
+    let bottoms = under.row(iy);
     for ix in i0..=i1 {
         let p = origin + dvec2(f64::from(ix) * pitch, f64::from(iy) * pitch);
         let Some(h) = under.tool.height_at(distance(p)) else {
@@ -97,9 +111,18 @@ fn lower_row<T: SweptTool>(
         };
         let cur = f64::from(*slot);
         if cur.is_finite() && depth < cur {
-            *slot = narrow(depth);
+            // On an underside, a skin thinner than THIN is none.
+            let (bottom, thin) = bottoms
+                .and_then(|b| b.get(ix as usize))
+                .map_or((under.floor, 0.0), |b| (f64::from(*b), THIN));
+            let (left, took) = if depth <= bottom + thin {
+                (under.floor, cur - bottom.max(under.floor))
+            } else {
+                (depth, cur - depth)
+            };
+            *slot = narrow(left);
             let (d, lo, _) = cut.unwrap_or((0.0, ix, ix));
-            cut = Some((d.max(cur - depth), lo, ix));
+            cut = Some((d.max(took.max(0.0)), lo, ix));
         }
     }
     cut
@@ -285,14 +308,16 @@ impl Stock {
             return (0.0, None);
         };
         let (a, b) = (from.truncate(), to.truncate());
+        let pitch = self.field.pitch();
+        let origin = self.field.origin();
+        let nx = self.field.nx() as usize;
         let under = Underside {
             tool,
             z: from.z.min(to.z),
             floor: self.floor,
+            under: self.under.as_deref(),
+            nx,
         };
-        let pitch = self.field.pitch();
-        let origin = self.field.origin();
-        let nx = self.field.nx() as usize;
         // One row: how deep it cut, and the first and last columns it lowered.
         let row = |iy: u32, cells: &mut [f32]| -> Option<(f64, u32, u32)> {
             let y = origin.y + f64::from(iy) * pitch;
@@ -347,12 +372,14 @@ impl Stock {
             return (0.0, None);
         };
 
+        let (origin, pitch, nx) = (self.field.origin(), self.field.pitch(), self.field.nx());
         let under = Underside {
             tool,
             z: tip.z,
             floor: self.floor,
+            under: self.under.as_deref(),
+            nx: nx as usize,
         };
-        let (origin, pitch, nx) = (self.field.origin(), self.field.pitch(), self.field.nx());
         let axis = tip.truncate();
         // A hair over the radius squared: a cell this rejects, the tool's own
         // profile would have too.

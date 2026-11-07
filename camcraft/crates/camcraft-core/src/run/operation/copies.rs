@@ -115,10 +115,14 @@ pub(super) fn each_copy(
     let tolerance = work.job.tolerance;
     let arc = tolerance * 0.5;
     // The material as the setup starts, on the same grid: where the grid is
-    // lower now, something has cut it.
-    let fresh = match &planned {
-        Planned::Adaptive(_) => Some(Stock::from_blocks(blocks, stock.floor(), pitch)?),
-        Planned::Clearing(_) => None,
+    // lower now, something has cut it. For a setup that carries on from an
+    // earlier one, what that one left, not its box.
+    let fresh = match (&planned, &work.prepared.carried) {
+        (Planned::Adaptive(_), Some((left, carry))) => {
+            Some(left.carried(carry, work.prepared.stock_bounds(), stock.floor(), pitch)?)
+        }
+        (Planned::Adaptive(_), None) => Some(Stock::from_blocks(blocks, stock.floor(), pitch)?),
+        (Planned::Clearing(_), _) => None,
     };
     // What the copies start from: the material as it stands, for pocket
     // clearing and rest machining; else the setup's blocks, so adaptive

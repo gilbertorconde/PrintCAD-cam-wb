@@ -110,7 +110,12 @@ pub fn run_prepared_planned(
         .fold(None, |n: Option<f64>, d| Some(n.map_or(d, |n| n.min(d))));
     let sim_pitch = sim_pitch(job.tolerance, hi - lo, narrowest);
     let blocks = &prepared.stocks;
-    let mut stock = Stock::from_blocks(blocks, ctx.stock_bottom - 1.0, sim_pitch)?;
+    // What an earlier setup left, carried into this frame, when it carries on
+    // from one; else its blocks, fresh.
+    let mut stock = match &prepared.carried {
+        Some((left, carry)) => left.carried(carry, all, ctx.stock_bottom - 1.0, sim_pitch)?,
+        None => Stock::from_blocks(blocks, ctx.stock_bottom - 1.0, sim_pitch)?,
+    };
     // The part's top on the simulator's grid: what the tool above its flutes
     // is checked against as each operation cuts, and what the result is
     // verified against at the end.

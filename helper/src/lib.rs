@@ -11,6 +11,7 @@
 //! A setup that cannot run is answered with [`Response::Refused`] and a reason a
 //! person can read; only a broken request or a crash ends it with a failure.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -18,12 +19,12 @@ use cam_protocol::{
     Cutting, Cylinder, Finding, HeightPlane, IDENTITY, Layout, Level, Machining, Mark, Material,
     OperationRun, Program, Request, Run, Stroke, ToolUse, VERSION,
 };
-use camcraft_core::job::{HeightContext, Operation, Outline, Programs};
+use camcraft_core::job::{HeightContext, Job, Operation, Outline, Programs};
 use camcraft_core::path::toolpath::{MoveRole, Toolpath};
 use camcraft_core::run::Made;
 use camcraft_core::run::{PLUNGE_RATIO, Stage};
 use camcraft_core::setup::frame::Frame;
-use camcraft_core::setup::{Bodies, Prepared, bounds_all, features, prepare};
+use camcraft_core::setup::{Bodies, Prepared, bounds_all, features, prepare_from};
 use camcraft_geom::mesh::Aabb;
 use camcraft_import::native::load_native;
 use camcraft_post::op::{Op, lower_counted, tilt_notes};
@@ -32,7 +33,7 @@ use camcraft_post::render::{Title, render_program};
 use camcraft_session::checks::Level as CheckLevel;
 use camcraft_session::{
     Model, Models, Ran, custom_gcode, load_profile, next_tools, parse_job, program_spec,
-    run_setup_planned, setup_program, setup_program_name, travel_check,
+    run_setup_from, setup_program, setup_program_name, travel_check,
 };
 use camcraft_sim::stock::{Axis, Block};
 use glam::{DAffine3, DMat4, DVec2, DVec3};
@@ -86,7 +87,22 @@ pub fn answer_reporting(
     request: &Request,
     progress: &mut dyn FnMut(u64, u64),
 ) -> Result<Run, String> {
-    execute(request, progress).map(|done| done.run)
+    execute(request, progress, None).map(|done| done.run)
+}
+
+/// [`answer_reporting`], keeping in `cache` (a folder, as
+/// [`cache::folder`] names) what the setup left, for a setup that carries on
+/// from it, and taking from there what the setup it carries on from left.
+pub fn answer_kept(
+    request: &Request,
+    progress: &mut dyn FnMut(u64, u64),
+    cache: Option<&Path>,
+) -> Result<Run, String> {
+    let done = execute(request, progress, cache)?;
+    if let Some(folder) = cache {
+        left::keep(folder, request, &done.ran);
+    }
+    Ok(done.run)
 }
 
 /// A setup run, with what the answer was made from: the job, camcraft's
@@ -100,9 +116,13 @@ pub(crate) struct Executed {
 }
 
 /// [`answer_reporting`], keeping what the answer was made from.
+///
+/// What the setup it carries on from left, when it does, is taken from
+/// `cache` when it is kept there, else worked out again.
 pub(crate) fn execute(
     request: &Request,
     progress: &mut dyn FnMut(u64, u64),
+    cache: Option<&Path>,
 ) -> Result<Executed, String> {
     speaks(request)?;
     let started = Instant::now();
@@ -114,52 +134,16 @@ pub(crate) fn execute(
     let total = ops + 5;
     progress(0, total);
 
-    // A STEP file is tessellated to a quarter of the machining tolerance; a
-    // native shape is the same B-rep, so it gets the same.
-    let tessellation = job.tolerance / 4.0;
-    let mut loaded = Vec::new();
-    for def in &job.models {
-        let shape = request
-            .shapes
-            .get(&def.name)
-            .ok_or_else(|| format!("no shape came for '{}'", def.name))?;
-        let (body, report) =
-            load_native(&shape.text, tessellation).map_err(|e| format!("{}: {e}", def.name))?;
-        let body = if shape.placement == IDENTITY {
-            body
-        } else {
-            body.placed(affine(&shape.placement))
-                .map_err(|e| format!("{}: {e}", def.name))?
-        };
-        let bounds = body
-            .mesh()
-            .bounds()
-            .ok_or_else(|| format!("{} is empty", def.name))?;
-        let mut warnings = Vec::new();
-        if report.degenerate > 0 {
-            warnings.push(format!(
-                "{} degenerate triangle(s) from tessellation",
-                report.degenerate
-            ));
-        }
-        loaded.push((
-            def.name.as_str(),
-            Model {
-                file: Arc::new(body.clone()),
-                body,
-                bounds,
-                path: def.name.clone(),
-                units: "mm".into(),
-                notes: vec![format!(
-                    "{}: {} face(s), {} triangles at {} mm",
-                    def.name, report.faces, report.triangles, tessellation
-                )],
-                warnings,
-            },
-        ));
-    }
-    let models: Models<'_> = loaded.iter().map(|(n, m)| (*n, m)).collect();
-    let ran = run_setup_planned(&job, 0, &models, &[], &mut |stage| {
+    // What the setup it carries on from left, when it does: taken first, as
+    // its stock is what this one is laid out round.
+    let carried = request
+        .from
+        .as_deref()
+        .map(|earlier| left::left_by(earlier, cache))
+        .transpose()?;
+    let loaded = load(request, &job)?;
+    let models: Models<'_> = loaded.iter().map(|(n, m)| (n.as_str(), m)).collect();
+    let ran = run_setup_from(&job, 0, &models, &[], carried.as_ref(), &mut |stage| {
         let done = match stage {
             Stage::Preparing => 1,
             Stage::Operation(i) => 2 + i as u64,
@@ -180,7 +164,7 @@ pub(crate) fn execute(
     let frame = ran.result.frame;
     let tolerance = job.tolerance.max(0.02);
     let stock_box = bounds_all(&ran.result.stocks);
-    let bodies: Bodies<'_> = loaded.iter().map(|(n, m)| (*n, &m.body)).collect();
+    let bodies: Bodies<'_> = loaded.iter().map(|(n, m)| (n.as_str(), &m.body)).collect();
     // Laid out again only for a height measured from the picks.
     let mut prepared: Option<Option<Prepared>> = None;
     let mut operations = Vec::new();
@@ -213,7 +197,9 @@ pub(crate) fn execute(
             (Some(spec), Some(stock)) => {
                 let mut ctx = ran.result.heights;
                 if spec.heights.measured_from_selection() || down_to_picks(spec) {
-                    let laid = prepared.get_or_insert_with(|| prepare(&job, 0, &bodies).ok());
+                    let laid = prepared.get_or_insert_with(|| {
+                        prepare_from(&job, 0, &bodies, carried.as_ref()).ok()
+                    });
                     ctx.picked = laid.as_ref().and_then(|p| {
                         features::picks(&spec.selection, p, &bodies, job.tolerance)
                             .ok()
@@ -348,7 +334,7 @@ pub(crate) fn execute(
                     return None;
                 }
                 let laid = prepared
-                    .get_or_insert_with(|| prepare(&job, 0, &bodies).ok())
+                    .get_or_insert_with(|| prepare_from(&job, 0, &bodies, carried.as_ref()).ok())
                     .as_ref()?;
                 outlines::Ground {
                     job: &job,
@@ -655,7 +641,7 @@ fn tool_kind(kind: camcraft_core::job::ToolKind) -> &'static str {
 
 /// The box round the bodies `names`, as the setup sees them: their lowest
 /// and highest corners from the work zero along its axes.
-fn part_box(loaded: &[(&str, Model)], names: &[String], frame: &Frame) -> Option<[[f64; 3]; 2]> {
+fn part_box(loaded: &[(String, Model)], names: &[String], frame: &Frame) -> Option<[[f64; 3]; 2]> {
     let mut low = DVec3::splat(f64::INFINITY);
     let mut high = DVec3::splat(f64::NEG_INFINITY);
     for (_, model) in loaded.iter().filter(|(n, _)| names.iter().any(|m| m == n)) {
@@ -668,6 +654,56 @@ fn part_box(loaded: &[(&str, Model)], names: &[String], frame: &Frame) -> Option
     low.cmple(high)
         .all()
         .then(|| [to_array(low), to_array(high)])
+}
+
+/// The models of `request`'s `job`, read from its shapes and placed where
+/// their bodies sit.
+pub(crate) fn load(request: &Request, job: &Job) -> Result<Vec<(String, Model)>, String> {
+    // A STEP file is tessellated to a quarter of the machining tolerance; a
+    // native shape is the same B-rep, so it gets the same.
+    let tessellation = job.tolerance / 4.0;
+    let mut loaded = Vec::new();
+    for def in &job.models {
+        let shape = request
+            .shapes
+            .get(&def.name)
+            .ok_or_else(|| format!("no shape came for '{}'", def.name))?;
+        let (body, report) =
+            load_native(&shape.text, tessellation).map_err(|e| format!("{}: {e}", def.name))?;
+        let body = if shape.placement == IDENTITY {
+            body
+        } else {
+            body.placed(affine(&shape.placement))
+                .map_err(|e| format!("{}: {e}", def.name))?
+        };
+        let bounds = body
+            .mesh()
+            .bounds()
+            .ok_or_else(|| format!("{} is empty", def.name))?;
+        let mut warnings = Vec::new();
+        if report.degenerate > 0 {
+            warnings.push(format!(
+                "{} degenerate triangle(s) from tessellation",
+                report.degenerate
+            ));
+        }
+        loaded.push((
+            def.name.clone(),
+            Model {
+                file: Arc::new(body.clone()),
+                body,
+                bounds,
+                path: def.name.clone(),
+                units: "mm".into(),
+                notes: vec![format!(
+                    "{}: {} face(s), {} triangles at {} mm",
+                    def.name, report.faces, report.triangles, tessellation
+                )],
+                warnings,
+            },
+        ));
+    }
+    Ok(loaded)
 }
 
 /// Where operation `k`'s checks found something at a move, and its steep
@@ -1211,6 +1247,7 @@ fn material(ran: &Ran) -> Option<Material> {
 }
 
 pub mod cache;
+mod left;
 mod outlines;
 mod playback;
 pub mod session;

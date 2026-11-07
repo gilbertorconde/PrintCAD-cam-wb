@@ -38,6 +38,23 @@ panels, the drawing and the helper that runs camcraft.
   its work zero (a corner or the middle of the stock or of the bodies, or the
   document's origin, plus an offset), its post and its tolerance. New setup on
   the toolbar makes one on the selected body, or on every shown one.
+- **Stock from an earlier setup,** as Fusion's "Continue from previous
+  setup": a setup's stock can be what the setup before it in the document
+  leaves, or a named earlier one, after its last operation: the same
+  material, turned as this setup sees the part, which may be turned over or
+  tilted. Its box is the box round that material, which a work zero on the
+  stock is placed on. The checks, the simulation, playback, rest machining
+  and the times all start from it, so a rapid through what the first side
+  cut away is not a failed check on the second, and roughing the second
+  side does not cut air. The earlier setup runs first, and a setup runs
+  again when the one it carries on from changes; one turned off leaves
+  nothing, and the setup carrying on from it says so. The setup sheet says
+  which setup the stock comes from. The helper keeps what each
+  setup left, so the next takes it from there; otherwise it runs the
+  earlier one again for it. Each column of material is kept as one stretch,
+  from its bottom up to its top, so turned over it is the same material;
+  seen from the side, or tilted, a pocket hidden inside the material along
+  the new tool axis is taken as material, never the other way round.
 - **Tilted setups (3+2).** A setup's tool axis can be any direction: out of
   a flat face picked on the part, along a straight edge picked on it (either
   way), the document's Z tilted by angles about its X and then its Y, or a

@@ -34,6 +34,10 @@ pub enum StockKind {
     Fixed,
     /// A round bar: round the bodies, or of a fixed size.
     Cylinder,
+    /// What an earlier setup leaves: the same material, after its last
+    /// operation, turned as this setup sees it, as Fusion's "Continue from
+    /// previous setup".
+    Earlier,
 }
 
 /// Which way a cylinder of stock lies, as the part sits.
@@ -214,6 +218,10 @@ pub struct SetupData {
     pub bodies: Vec<String>,
     #[serde(default)]
     pub stock: StockKind,
+    /// The setup it carries on from, by id, for [`StockKind::Earlier`]: one
+    /// before it in the document; `None` for the one just before it.
+    #[serde(default)]
+    pub stock_from: Option<String>,
     /// Extra material each side in X and Y, round the bodies.
     pub margin_side: f64,
     /// Extra material on top of the bodies.
@@ -330,6 +338,7 @@ impl SetupData {
         Self {
             bodies,
             stock: StockKind::Around,
+            stock_from: None,
             margin_side: 2.0,
             margin_top: 2.0,
             margin_below: 0.0,
@@ -415,6 +424,14 @@ impl SetupData {
                 axis: self.cylinder_model_axis(),
                 margin: self.margin_radial,
                 ends: self.margin_ends,
+            },
+            // The helper starts from what the earlier setup left, which its
+            // request carries, and lays the setup out round that; the job
+            // still names a stock, the bodies' box.
+            StockKind::Earlier => StockSpec::AroundModels {
+                models: Vec::new(),
+                margin: [0.0; 3],
+                below: 0.0,
             },
         }
     }
@@ -1334,6 +1351,20 @@ mod tests {
             "{:?}",
             op.problem(&setup.tools)
         );
+    }
+
+    /// A setup carrying on from an earlier one keeps which, and one kept
+    /// before there was the choice carries on from none.
+    #[test]
+    fn a_setup_carrying_on_survives_the_document() {
+        let mut setup = SetupData::new(vec!["b1".into()], "grbl", 0.05);
+        let mut value = setup.to_value();
+        value.as_object_mut().unwrap().remove("stock_from");
+        assert_eq!(SetupData::from(&value).unwrap().stock_from, None);
+        setup.stock = StockKind::Earlier;
+        setup.stock_from = Some("s1".into());
+        assert_eq!(SetupData::from(&setup.to_value()).unwrap(), setup);
+        assert_eq!(setup.to_value()["stock"], "earlier");
     }
 
     #[test]

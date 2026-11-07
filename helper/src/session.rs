@@ -100,7 +100,7 @@ fn open(request: &cam_protocol::Request) -> Result<(Kept, SessionReady), String>
         let _ = writeln!(errors, "progress {done} {total}");
         let _ = errors.flush();
     };
-    let done = execute(request, &mut progress)?;
+    let done = execute(request, &mut progress, crate::cache::folder().as_deref())?;
     let setup = done.job.setups.first().ok_or("the job has no setup")?;
     let r = &done.ran.result;
     let replay = Replay::new(&done.job, setup, r).map_err(|e| e.to_string())?;

@@ -892,3 +892,189 @@ fn a_column_is_classified_by_the_verifiers_rule() {
     assert_eq!(classify(1.05, Some((1.0, -0.05)), 0.1, 0.5), Class::OnPart);
     assert_eq!(classify(1.6, Some((1.0, -0.6)), 0.1, 0.5), Class::Leftover);
 }
+
+/// The 20 mm block, its underside its floor, cut by a 4 mm slot 4 mm deep
+/// along y = 0 from x = -8 to 0, and one through it from x = 3 to 8.
+fn cut_from_the_top() -> Stock {
+    let mut s = block().with_bottoms(|_| Some(-5.0));
+    let level = |x: f64, z: f64, class| SimMove {
+        to: dvec3(x, 0.0, z),
+        class,
+        arc: None,
+    };
+    s.sweep(
+        &[
+            level(-8.0, 1.0, MoveClass::MayCut),
+            level(0.0, 1.0, MoveClass::MayCut),
+            level(0.0, 9.0, MoveClass::Rapid),
+            level(3.0, 9.0, MoveClass::Rapid),
+            level(3.0, -9.0, MoveClass::MayCut),
+            level(8.0, -9.0, MoveClass::MayCut),
+        ],
+        &Flat(2.0),
+    );
+    s
+}
+
+/// Turned over about X, as a part is for its second side.
+fn turned_over() -> Carry {
+    use camcraft_geom::mesh::Aabb;
+    Carry {
+        to: glam::DAffine3::from_mat3(glam::DMat3::from_diagonal(dvec3(1.0, -1.0, -1.0))),
+        within: Aabb {
+            min: dvec3(-10.0, -10.0, -5.0),
+            max: dvec3(10.0, 10.0, 5.0),
+        },
+    }
+}
+
+/// A stock turned over is the same material the other way up: its box the
+/// block's, a column's top its old bottom and its bottom the slot's floor, a
+/// slot cut through it empty, and as much of it, cell for cell.
+#[test]
+fn a_stock_turned_over_is_the_same_material() {
+    let cut = cut_from_the_top();
+    let carry = turned_over();
+    let onto = cut.carried_bounds(&carry).unwrap();
+    assert!(
+        onto.min.distance(dvec3(-10.0, -10.0, -5.0)) < 1e-9,
+        "{onto:?}"
+    );
+    assert!(onto.max.distance(dvec3(10.0, 10.0, 5.0)) < 1e-9, "{onto:?}");
+    let over = cut.carried(&carry, onto, -6.0, 0.5).unwrap();
+    let column = |s: &Stock, x: f64, y: f64| {
+        let (ix, iy) = (((x + 10.0) / 0.5) as usize, ((y + 10.0) / 0.5) as usize);
+        let i = iy * 41 + ix;
+        let top = f64::from(s.field().data()[i]);
+        let bottom = f64::from(s.under().unwrap()[i]);
+        (bottom, top)
+    };
+    assert_eq!(column(&over, -4.0, 6.0), (-5.0, 5.0), "uncut");
+    assert_eq!(column(&over, -4.0, 0.0), (-1.0, 5.0), "under the slot");
+    assert_eq!(column(&over, 5.0, 0.0).1, -6.0, "cut through: empty");
+    assert!((over.volume() - cut.volume()).abs() < 1e-6);
+    // Turned back, it is what it was.
+    let back = over.carried(&carry, onto, -6.0, 0.5).unwrap();
+    assert!((back.volume() - cut.volume()).abs() < 1e-6);
+    assert_eq!(column(&back, -4.0, 0.0), (-5.0, 1.0));
+}
+
+/// The second side's rapid along the slot cut through from the first is in
+/// air; a fresh block, turned over or not, would have it plough through.
+#[test]
+fn a_rapid_through_air_cut_from_the_other_side_is_clear() {
+    let cut = cut_from_the_top();
+    let carry = turned_over();
+    let onto = cut.carried_bounds(&carry).unwrap();
+    let rapid = [
+        SimMove {
+            to: dvec3(3.5, 0.0, -3.0),
+            class: MoveClass::Rapid,
+            arc: None,
+        },
+        SimMove {
+            to: dvec3(7.5, 0.0, -3.0),
+            class: MoveClass::Rapid,
+            arc: None,
+        },
+    ];
+    let mut over = cut.carried(&carry, onto, -6.0, 0.5).unwrap();
+    assert_eq!(over.apply(&rapid, &Flat(0.5)).rapid_contacts, 0);
+    assert_eq!(block().apply(&rapid, &Flat(0.5)).rapid_contacts, 1);
+}
+
+/// Cut from the second side down to where the first side's slot was, a
+/// column is empty: what stood under its bottom was never there. Only what
+/// stood above its bottom is cut, and a rapid across it after is clear.
+#[test]
+fn a_column_cut_down_to_its_bottom_is_empty() {
+    let cut = cut_from_the_top();
+    let carry = turned_over();
+    let onto = cut.carried_bounds(&carry).unwrap();
+    let mut over = cut.carried(&carry, onto, -6.0, 0.5).unwrap();
+    let plunge = |z: f64| {
+        [
+            SimMove {
+                to: dvec3(-4.0, 0.0, 9.0),
+                class: MoveClass::Rapid,
+                arc: None,
+            },
+            SimMove {
+                to: dvec3(-4.0, 0.0, z),
+                class: MoveClass::MayCut,
+                arc: None,
+            },
+        ]
+    };
+    let before = over.volume();
+    over.apply(&plunge(-0.5), &Flat(2.0));
+    assert_eq!(over.height_at(-4.0, 0.0), Some(-0.5), "a skin left");
+    let removed = over.apply(&plunge(-3.0), &Flat(2.0)).removed_mm3;
+    assert_eq!(over.height_at(-4.0, 0.0), Some(-6.0), "through: empty");
+    // Half a millimetre over the slot's floor was all there was left there.
+    assert!(removed < before * 0.05, "{removed} of {before}");
+    let across = [
+        SimMove {
+            to: dvec3(-5.0, 0.0, -3.0),
+            class: MoveClass::Rapid,
+            arc: None,
+        },
+        SimMove {
+            to: dvec3(-3.0, 0.0, -3.0),
+            class: MoveClass::Rapid,
+            arc: None,
+        },
+    ];
+    assert_eq!(over.apply(&across, &Flat(0.5)).rapid_contacts, 0);
+}
+
+/// Carried into a frame looking across its columns, the stock is never less
+/// than it was: a slot through the block, hidden inside it seen from the
+/// side, is taken as material, and the whole block is there.
+#[test]
+fn a_stock_seen_from_the_side_is_never_less() {
+    use camcraft_geom::mesh::Aabb;
+    let cut = cut_from_the_top();
+    // Turned a quarter about X: the old Y is the new Z.
+    let carry = Carry {
+        to: glam::DAffine3::from_mat3(glam::DMat3::from_cols(
+            dvec3(1.0, 0.0, 0.0),
+            dvec3(0.0, 0.0, 1.0),
+            dvec3(0.0, -1.0, 0.0),
+        )),
+        within: Aabb {
+            min: dvec3(-10.0, -10.0, -5.0),
+            max: dvec3(10.0, 10.0, 5.0),
+        },
+    };
+    let onto = cut.carried_bounds(&carry).unwrap();
+    assert!(
+        onto.min.distance(dvec3(-10.0, -5.0, -10.0)) < 1e-9,
+        "{onto:?}"
+    );
+    let side = cut.carried(&carry, onto, -11.0, 0.5).unwrap();
+    for (x, y) in [(5.0, 0.0), (-4.0, 4.0), (0.0, -4.5), (-9.5, 0.0)] {
+        assert_eq!(side.height_at(x, y), Some(10.0), "{x}, {y}");
+    }
+    assert!(side.volume() >= cut.volume());
+}
+
+/// A stock with an underside is kept as bytes and read back bit for bit; what
+/// is not a kept stock is refused.
+#[test]
+fn a_stock_kept_as_bytes_reads_back() {
+    let over = {
+        let cut = cut_from_the_top();
+        let carry = turned_over();
+        let onto = cut.carried_bounds(&carry).unwrap();
+        cut.carried(&carry, onto, -6.0, 0.5).unwrap()
+    };
+    for s in [&block(), &over] {
+        let packed = PackedStock::pack(s);
+        let back = PackedStock::from_bytes(&packed.to_bytes()).unwrap();
+        assert_eq!(&back.unpack().unwrap(), s);
+    }
+    let bytes = PackedStock::pack(&over).to_bytes();
+    assert!(PackedStock::from_bytes(&bytes[..bytes.len() - 1]).is_err());
+    assert!(PackedStock::from_bytes(b"not a stock").is_err());
+}

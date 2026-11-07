@@ -558,6 +558,16 @@ fn machining(run: &Run) -> Widget {
     }
 }
 
+/// The setups before setup `id` in the document, by id and name: those its
+/// stock may carry on from.
+fn earlier_setups(id: &str) -> Vec<(String, String)> {
+    setups()
+        .into_iter()
+        .take_while(|(n, _)| n.id != id)
+        .map(|(n, _)| (n.id, n.name))
+        .collect()
+}
+
 pub fn setup_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
     let Some(setup) = SetupData::from(&node.data) else {
         return vec![note(NoteKind::Error, "The setup's data does not read.")];
@@ -618,14 +628,42 @@ pub fn setup_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
             "A box round the bodies".into(),
             "A box of a fixed size".into(),
             "Cylinder".into(),
+            "From an earlier setup".into(),
         ],
         match setup.stock {
             StockKind::Around => 0,
             StockKind::Fixed => 1,
             StockKind::Cylinder => 2,
+            StockKind::Earlier => 3,
         },
     )];
     match setup.stock {
+        StockKind::Earlier => {
+            let earlier = earlier_setups(id);
+            let mut names = vec!["The setup before".to_string()];
+            names.extend(earlier.iter().map(|(_, name)| name.clone()));
+            let chosen = setup
+                .stock_from
+                .as_ref()
+                .and_then(|from| earlier.iter().position(|(e, _)| e == from))
+                .map_or(0, |i| i + 1);
+            stock.push(choice("stock_from", "From", names, chosen));
+            stock.push(Widget::Text {
+                text: "What that setup leaves after its last operation, the same material \
+                       turned as this setup sees it: the checks, the simulation, playback \
+                       and the times start from it, and it runs again when that one changes. \
+                       Seen down this setup's tool, a pocket hidden under material is taken \
+                       as material."
+                    .into(),
+                mono: false,
+            });
+            if earlier.is_empty() {
+                stock.push(note(
+                    NoteKind::Warning,
+                    "There is no setup before this one in the document.",
+                ));
+            }
+        }
         StockKind::Around => {
             stock.push(number(
                 "margin_side",
@@ -983,8 +1021,15 @@ pub fn setup_event(cam: &mut Cam, id: &str, event: PanelEvent) {
                     setup.stock = match index {
                         1 => StockKind::Fixed,
                         2 => StockKind::Cylinder,
+                        3 => StockKind::Earlier,
                         _ => StockKind::Around,
                     }
+                }
+                "stock_from" => {
+                    setup.stock_from = index
+                        .checked_sub(1)
+                        .and_then(|i| earlier_setups(id).into_iter().nth(i))
+                        .map(|(e, _)| e);
                 }
                 "cylinder_axis" => {
                     setup.cylinder_axis = CylinderAxis::ALL.get(index).copied().unwrap_or_default();

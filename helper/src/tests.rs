@@ -478,6 +478,7 @@ fn a_post_of_ones_own_writes_the_program() {
         max_points: 0,
         post: Some(mine),
         read: None,
+        from: None,
     };
     let run = answer(&request).unwrap();
     let program = run.operations[0].program.as_ref().unwrap();
@@ -691,6 +692,7 @@ selection = { edges = [
         max_points: 0,
         post: None,
         read: None,
+        from: None,
     }
 }
 
@@ -1011,6 +1013,7 @@ fn custom_request(gcode: &str, travel: &str) -> Request {
         max_points: 0,
         post: Some(mine),
         read: None,
+        from: None,
     }
 }
 
@@ -1299,6 +1302,7 @@ selection = {{ edges = [
         max_points: 0,
         post: None,
         read: None,
+        from: None,
     };
     let helixes = |same: bool| {
         let run = answer(&request(job(same))).unwrap();
@@ -1497,6 +1501,7 @@ passes = { stepover = 1.0, feed = 900.0 }
         max_points: 0,
         post,
         read: None,
+        from: None,
     };
     let run = answer(&request(None)).unwrap();
     let m = &run.machining;
@@ -1673,4 +1678,104 @@ fn a_holder_that_meets_the_part_is_a_failed_check() {
     let long = answer(&request(needs + 0.5)).unwrap();
     let f = long.findings.iter().find(|f| f.code == "CC111").unwrap();
     assert_eq!(f.level, Level::Pass, "{f:?}");
+}
+
+/// The hinge jig's first side, as [`JOB`] machines it from the top, and its
+/// second, turned over, from a fresh block of its own or carrying on from
+/// what the first left.
+fn two_sides() -> (Request, Request, Request) {
+    let shapes = BTreeMap::from([(
+        "part".to_string(),
+        Shape {
+            text: native("hinge_jig.step"),
+            placement: IDENTITY,
+        },
+    )]);
+    let top = Request {
+        version: VERSION,
+        job: JOB.to_string(),
+        shapes,
+        max_points: 2000,
+        ..Request::default()
+    };
+    let fresh = Request {
+        job: JOB.replace("name = \"top\"", "name = \"bottom\"").replace(
+            "post = \"grbl\"",
+            "post = \"grbl\"\norientation = { z = \"-z\", x = \"+x\" }",
+        ),
+        ..top.clone()
+    };
+    let carried = Request {
+        from: Some(Box::new(top.clone())),
+        ..fresh.clone()
+    };
+    (top, fresh, carried)
+}
+
+/// Turned over, the second side starts from what the first left: the first
+/// cleared the margin round the part down through the block, so the second's
+/// stock is the part, as wide as it, and roughing it takes far less time
+/// than from a fresh block; nothing goes through material.
+#[test]
+fn a_setup_carries_on_from_the_one_before() {
+    let (top, fresh, carried) = two_sides();
+    let one = answer(&top).unwrap();
+    let anew = answer(&fresh).unwrap();
+    let two = answer(&carried).unwrap();
+    let width = |r: &cam_protocol::Run| r.stock[7][0] - r.stock[0][0];
+    // The fresh block is the part's box and 2 mm each side.
+    assert!(
+        width(&two) < width(&anew) - 3.0,
+        "{} {}",
+        width(&two),
+        width(&anew)
+    );
+    assert!((width(&anew) - width(&one)).abs() < 1e-6);
+    let (s1, s2) = (two.operations[0].seconds, anew.operations[0].seconds);
+    assert!(s1 < 0.8 * s2, "{s1} s against {s2} s");
+    for run in [&one, &two] {
+        assert!(
+            !run.findings
+                .iter()
+                .any(|f| f.level == Level::Fail && f.code == "CC106"),
+            "{:?}",
+            run.findings
+        );
+    }
+    assert!(two.playback.is_some() && two.material.is_some());
+}
+
+/// What the earlier setup left is kept by what it was run from, and taken
+/// from there the next time; one that cannot run says so, as the setup it
+/// carries on from.
+#[test]
+fn what_a_setup_left_is_kept_for_the_next() {
+    let (top, _, carried) = two_sides();
+    let folder = std::env::temp_dir().join(format!("cam-left-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&folder);
+    let ran = crate::left::left_by(&top, Some(&folder)).unwrap();
+    let kept: Vec<_> = std::fs::read_dir(&folder).unwrap().flatten().collect();
+    assert_eq!(kept.len(), 1);
+    let again = crate::left::left_by(&top, Some(&folder)).unwrap();
+    assert_eq!(again.stock, ran.stock);
+    assert_eq!(again.within, ran.within);
+    assert_eq!(again.to_model, ran.to_model);
+    // A later setup's run takes it from there, and answers as it would
+    // without.
+    let kept_run = crate::answer_kept(&carried, &mut |_, _| {}, Some(&folder)).unwrap();
+    assert_eq!(
+        kept_run.operations[0].seconds,
+        answer(&carried).unwrap().operations[0].seconds
+    );
+    let _ = std::fs::remove_dir_all(&folder);
+
+    let broken = Request {
+        from: Some(Box::new(Request {
+            job: "not a job".into(),
+            ..top
+        })),
+        ..carried
+    };
+    let why = answer(&broken).unwrap_err();
+    assert!(why.contains("carries on from"), "{why}");
 }
