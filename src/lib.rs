@@ -31,6 +31,7 @@ mod picking;
 mod playback;
 mod runs;
 mod session;
+mod sheet;
 mod sketches;
 mod tools;
 
@@ -70,6 +71,7 @@ const RUN: &str = "run";
 const STATUS: &str = "status";
 const GCODE: &str = "gcode";
 const ENABLE: &str = "enable";
+const SETUP_SHEET: &str = "setup_sheet";
 
 /// The package's id for `suffix`.
 fn id(suffix: &str) -> String {
@@ -954,6 +956,59 @@ impl Cam {
         });
     }
 
+    /// Ask where to save a setup's sheet, `html`, named after it.
+    fn save_sheet(setup: &str, html: String) {
+        host::request(Request::SaveFile {
+            name: format!(
+                "{}-setup-sheet.html",
+                camcraft_session::setup_program_name(setup)
+            ),
+            kind: "Setup sheet".into(),
+            extension: "html".into(),
+            contents: html.into_bytes(),
+        });
+    }
+
+    /// The sheet of the setup of `id` (the setup, or one of its operations),
+    /// as HTML, and the setup's name, once it has run: failed checks and
+    /// all, which the sheet says first.
+    fn sheet_of(&self, id: &str) -> Result<(String, String), String> {
+        let setup = self
+            .setup_of(id)
+            .ok_or("no setup or operation by that id")?;
+        let (node, data) = setup_node(&setup).ok_or("no such setup")?;
+        if !data.enabled {
+            return Err("The setup is turned off.".into());
+        }
+        let computed = self.runs.get(&setup).ok_or("The setup has not been run.")?;
+        let run = match &computed.state {
+            State::Ready(run) => run,
+            State::Queued | State::Running(_) => {
+                return Err("The setup is being run; ask again when it is done.".into());
+            }
+            State::Stopped => return Err("The setup's run was stopped.".into()),
+            State::Failed(e) => return Err(e.clone()),
+        };
+        let bodies = host::bodies();
+        let html = sheet::Sheet {
+            name: &node.name,
+            setup: &data,
+            bodies: data
+                .bodies
+                .iter()
+                .map(|b| {
+                    bodies
+                        .iter()
+                        .find(|x| &x.id == b)
+                        .map_or_else(|| b.clone(), |x| x.name.clone())
+                })
+                .collect(),
+            run,
+        }
+        .html();
+        Ok((node.name, html))
+    }
+
     /// The program of operation `op`, or of its setup when it is posted as
     /// one; or of setup `op`, posted as one; when the setup has run.
     fn program_of(&self, op: &str, force: bool) -> Result<cam_protocol::Program, String> {
@@ -1147,6 +1202,12 @@ impl Bench for Cam {
                             ParamKind::Number,
                             false,
                             "the program's number, @number@ in a post's lines; 1001",
+                        ),
+                        param(
+                            "material",
+                            ParamKind::String,
+                            false,
+                            "what the stock is, for its setup sheet: 6061 aluminium, MDF",
                         ),
                         param("name", ParamKind::String, false, "the setup's name"),
                     ],
@@ -1447,7 +1508,7 @@ impl Bench for Cam {
                     summary: "Where a setup's run stands: its checks and its operations".into(),
                     params: id_only("the setup, or one of its operations"),
                     returns: "{state = none|queued|running|stopped|failed|ready, error?, passed?, \
-                              findings?, operations?}"
+                              findings?, operations?, machining_seconds?, tool_changes?}"
                         .into(),
                     read_only: true,
                     see_also: vec![id(GCODE)],
@@ -1474,6 +1535,28 @@ impl Bench for Cam {
                     ],
                     returns: "the program's text".into(),
                     read_only: true,
+                    see_also: vec![id(SETUP_SHEET)],
+                    ..Default::default()
+                },
+                Command {
+                    id: id(SETUP_SHEET),
+                    summary: "A setup's sheet, for the shop floor, once it has run: the part, \
+                              stock and material, work zero and offset, tool axis, post and \
+                              program, each tool and operation, machining time, and the checks"
+                        .into(),
+                    params: id_only("the setup, or one of its operations"),
+                    returns: "the sheet, a self-contained HTML page to print".into(),
+                    notes: vec![
+                        "A setup that failed its checks has a sheet too, which says so first."
+                            .into(),
+                        "Machining time is the moves at their feeds and the post's rapid \
+                         rates ([rapid] in its profile, 5000 mm/min an axis unless it says), \
+                         plus its tool_change_seconds a change: nothing accelerates, so a \
+                         machine takes longer."
+                            .into(),
+                    ],
+                    read_only: true,
+                    see_also: vec![id(GCODE), id(STATUS)],
                     ..Default::default()
                 },
                 Command {
@@ -1810,6 +1893,9 @@ impl Bench for Cam {
                     if let Some(n) = number("number") {
                         data.program_number = n;
                     }
+                    if let Some(m) = text("material") {
+                        data.material = m;
+                    }
                     host::set_feature_data(&id, data.to_value())?;
                 }
                 Ok(json!({ "feature": id }))
@@ -2021,6 +2107,10 @@ impl Bench for Cam {
                 let id = text("id").unwrap_or_default();
                 let force = args.get("force").and_then(Value::as_bool).unwrap_or(false);
                 Ok(Value::String(self.program_of(&id, force)?.text))
+            }
+            SETUP_SHEET => {
+                let id = text("id").unwrap_or_default();
+                Ok(Value::String(self.sheet_of(&id)?.1))
             }
             _ => Err(format!("no command `{command}`")),
         }
@@ -2439,9 +2529,12 @@ impl Cam {
                     "made": o.made,
                     "summary": o.summary,
                     "cut_mm": o.cut_mm,
+                    "machining_seconds": o.seconds,
                     "lines": o.program.as_ref().map(|p| p.lines),
                 })).collect::<Vec<_>>(),
                 "lines": run.program.as_ref().map(|p| p.lines),
+                "machining_seconds": run.machining.total(),
+                "tool_changes": run.machining.tool_changes,
             }),
         }
     }

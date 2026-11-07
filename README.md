@@ -213,7 +213,7 @@ panels, the drawing and the helper that runs camcraft.
   start, the operation before, a step back, play backwards, play, a step on,
   the next operation and the end, at ¼× to 10,000×. Playing stops by itself
   at problems (on unless turned off) or after each operation. The clock is
-  machining time: moves at their feeds, rapids at 5000 mm/min. Keys: Space
+  machining time, as below. Keys: Space
   plays and pauses; J, K and L shuttle back, pause and forward (again for
   faster); Left and Right step (Shift: ten); Up and Down go to the operation
   before and after; Home and End; Minus and Equals change the speed.
@@ -231,6 +231,43 @@ panels, the drawing and the helper that runs camcraft.
 
   ![3D finishing half way: the passes still to run, over the material roughing left](docs/screenshots/finishing.png)
 
+- **Machining time**, for each operation and the setup, in their panels:
+  the moves at their feeds and rapids at the post's rates, each axis at
+  its own, a move done when its slowest axis is, and no feed quicker than
+  its axes go; and each tool change the program makes, at the post's time
+  for one. Nothing speeds up or slows down, so a machine takes longer, the
+  more so the shorter its moves, and the panel says so. A profile gives
+  them as
+
+  ```toml
+  tool_change_seconds = 30   # chip to chip; left out, changes are not timed
+  [rapid]                    # mm/min, whatever the program's units
+  x = 5000                   # an axis left out: 5000
+  y = 5000
+  z = 3000
+  ```
+
+  Every built-in post has them, typical of its kind of machine (a hobby
+  router's 5000 mm/min and a minute to change a tool by hand, a Haas VF's
+  1000 in/min and five seconds), not of yours: its file says where your
+  machine keeps its own. Copy it as a post of your own to set them.
+- **Setup sheet,** as Fusion's: Save setup sheet…, beside Save G-code, writes
+  what goes to the shop floor with the program as one HTML page to print,
+  its style inside it. The part's and the stock's sizes and the stock's
+  material (the setup's Material, under Stock), where the stock goes from
+  the work zero, the work zero and its work offset, and where that is on
+  the machine when the setup says; the tool axis, and what a tilt asks of
+  whoever sets the part up; the post, the program's name and number; each
+  tool with its number, kind (a thread mill with its pitches), diameter, flutes, flute length, stickout and
+  length, holder, the operations that use it, the lowest it goes and the
+  fastest it is fed and turned; each operation with its strategy, tool,
+  speed and feeds, stepover, stepdown, stock to leave, the lowest and
+  highest it goes, its time, and its own settings (a bore's helix, a
+  thread's pitch and hand, a tap or a peck, rest machining, dogbones or
+  T-bones, a pattern's copies), one turned off listed as off; the machining time, as above; and every
+  failed check and warning. A setup that failed its checks has a sheet too,
+  which says so first, at the top. The setup's panel lists its tools with
+  what each does too.
 - **Drawn over the model.** The stock's box or cylinder, the work zero, each operation's
   toolpath (rapids dashed while it is edited), and the material left.
 - **G-code through the save dialog,** one program for the whole setup, as
@@ -365,6 +402,7 @@ local cam = pc.io.github.gilbertorconde.cam
 local setup = cam.setup{bodies = {"<body id>"}, margin = 3, post = "grbl"}
 local each = cam.setup{bodies = {"<body id>"}, programs = "operation", number = 2000}
                                         -- one program an operation, O2000 on
+local plate = cam.setup{bodies = {"<body id>"}, material = "6061 aluminium"}
 local disc = cam.setup{bodies = {"<body id>"}, stock = "cylinder", axis = "tool",
                        diameter = 80, length = 25}  -- or margin = 3 round the bodies
 local side = cam.setup{bodies = {"<body id>"}, tool_axis = "-y", machine_x = "+x"}
@@ -401,6 +439,7 @@ cam.import_tools{text = fusion_csv}     -- a Fusion tool library, exported as CS
 cam.add_post{text = profile_toml}       -- a machine profile of your own
 local program = cam.gcode{id = setup.feature}  -- the setup's; an operation's id gives it too
 local own = cam.gcode{id = each_op}             -- one program an operation: the operation's
+local sheet = cam.setup_sheet{id = setup.feature}  -- its setup sheet, as HTML
 ```
 
 ## How it works
@@ -440,6 +479,11 @@ useful there.
   written as straight moves, and cycle 203 backs off 0.25 mm to break the
   chip, whatever the operation asks: `G73` says no distance either. There
   is no Siemens Sinumerik post yet.
+- Machining time is the toolpath's: the moves a setup's program adds
+  between two operations, a drill's dwell, the spindle getting up to
+  speed and anything a machine does to speed up or slow down are not in
+  it. A setup sheet has no picture of the part, as a package cannot take
+  one of the view.
 - Travel is checked as a box of the program's moves, in the setup's
   frame: where the rotaries carry the part while they turn, the holder and
   the spindle against the part or the table, and a controller's own
@@ -498,6 +542,7 @@ tests, the helpers, and the package as a build artifact.
 | `src/panel.rs` | the task panels and the preferences page |
 | `src/draw.rs` | what the view draws |
 | `src/runs.rs` | the setups being run, one at a time |
+| `src/sheet.rs` | a setup's sheet for the shop floor, as HTML |
 | `protocol/` | what the package and the helper say to each other |
 | `helper/` | `camcraft-helper`, the native program that machines |
 | `camcraft/` | camcraft's engine, copied in (its README says from where) |

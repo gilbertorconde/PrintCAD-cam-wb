@@ -241,6 +241,9 @@ pub struct SetupData {
     pub diameter: f64,
     #[serde(default = "hundred")]
     pub length: f64,
+    /// What the stock is, in words, for the setup sheet: `6061 aluminium`.
+    #[serde(default)]
+    pub material: String,
     /// The document direction the spindle points away from the part along.
     pub z_axis: Axis,
     /// The document direction that becomes the machine's X.
@@ -339,6 +342,7 @@ impl SetupData {
             margin_ends: two(),
             diameter: hundred(),
             length: hundred(),
+            material: String::new(),
             z_axis: Axis::PosZ,
             x_axis: Axis::PosX,
             tool_axis: ToolAxis::Square,
