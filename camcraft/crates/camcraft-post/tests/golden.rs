@@ -30,8 +30,9 @@ use camcraft_core::path::toolpath::Toolpath;
 use camcraft_post::op::{ProgramSpec, lower};
 use camcraft_post::profile::Profile;
 use camcraft_post::readback;
-use camcraft_post::render::{render, render_dated};
-use common::{chip_breaking, drilling, engraving, fixture, slot, spec, tapping};
+use camcraft_post::render::{Title, render, render_dated, render_program};
+use camcraft_post::setup::{Joining, Section, lower_setup};
+use common::{chip_breaking, drilling, engraving, fixture, setup, slot, spec, tapping};
 use glam::dvec3;
 
 fn check(profile_name: &str) {
@@ -71,7 +72,29 @@ fn check_dated(
     if let Err(p) = readback::check(&got, path, spec, profile) {
         panic!("{profile_name}.nc does not read back to its path: {p}\n{got}");
     }
+    compare(&got, file);
+}
 
+/// `sections` posted as one program for `profile`, compared with
+/// `tests/golden/<file>.nc`; it must read back to every section's path.
+fn check_setup_against(profile: &Profile, sections: &[Section], file: &str) {
+    let (ops, _) = lower_setup(sections, Joining::of(profile)).unwrap();
+    let title = Title {
+        name: "golden",
+        number: 2207,
+        date: None,
+    };
+    let (got, _) = render_program(&ops, profile, &title);
+    if let Err(p) = readback::check_setup(&got, sections, profile) {
+        panic!("{file}.nc does not read back to its paths: {p}\n{got}");
+    }
+    compare(&got, file);
+}
+
+/// `got` against `tests/golden/<file>.nc`, or written there with
+/// `UPDATE_GOLDEN`.
+fn compare(got: &str, file: &str) {
+    let profile_name = file;
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/golden")
         .join(format!("{file}.nc"));
@@ -80,7 +103,7 @@ fn check_dated(
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).unwrap();
         }
-        std::fs::write(&path, &got).unwrap();
+        std::fs::write(&path, got).unwrap();
         return;
     }
 
@@ -515,6 +538,89 @@ fn an_extended_work_offset_is_stable() {
         "{past:?}"
     );
     check_against(&profile, &fixture(), &spec, "linuxcnc-g59-2");
+}
+
+/// A setup of three operations on two tools as one program: the header and
+/// footer once, the tool changed once, the second tool kept turning into
+/// the engraving at its own speed with the coolant off, on a machine that
+/// changes tools itself and one where the operator does.
+#[test]
+fn a_setup_is_one_program() {
+    let ops = setup();
+    let sections: Vec<Section> = ops
+        .iter()
+        .map(|(path, spec)| Section { path, spec })
+        .collect();
+    for name in ["linuxcnc", "grbl"] {
+        let p = Profile::builtin(name).unwrap().unwrap();
+        check_setup_against(&p, &sections, &format!("{name}-setup"));
+    }
+}
+
+/// The setup as one program for a Fanuc, numbered as the setup is, the
+/// second tool called up after the first change, and for a Heidenhain in
+/// Klartext: one BEGIN and END PGM, the stock once, a TOOL CALL a change
+/// and the engraving's speed by a TOOL CALL of its own.
+#[test]
+fn a_setup_is_one_program_on_industrial_controls() {
+    let mut ops = setup();
+    for (_, spec) in &mut ops {
+        spec.stock = Some((dvec3(-5.0, -5.0, -20.0), dvec3(60.0, 50.0, 0.0)));
+    }
+    let sections: Vec<Section> = ops
+        .iter()
+        .map(|(path, spec)| Section { path, spec })
+        .collect();
+    for name in ["fanuc", "heidenhain", "haas"] {
+        let p = Profile::builtin(name).unwrap().unwrap();
+        check_setup_against(&p, &sections, &format!("{name}-setup"));
+    }
+}
+
+/// The setup with two tapping operations after it, the tap kept turning
+/// from one to the other: on a Fanuc each takes rigid mode (`M29 S..`)
+/// again, since it ends with its cycles at `G80`; on LinuxCNC each hole is
+/// tapped by `G33.1`.
+#[test]
+fn a_setup_taps_in_each_posts_form() {
+    use camcraft_post::profile::TapStyle;
+    for (name, style) in [("fanuc", TapStyle::M29), ("linuxcnc", TapStyle::G331)] {
+        let mut ops = setup();
+        for op_name in ["threads", "more threads"] {
+            let mut spec = common::tapping(ThreadHand::Right);
+            spec.op_name = op_name.into();
+            if let Some(d) = &mut spec.drill {
+                d.tap_style = style;
+            }
+            ops.push((Toolpath::new(), spec));
+        }
+        let sections: Vec<Section> = ops
+            .iter()
+            .map(|(path, spec)| Section { path, spec })
+            .collect();
+        let p = Profile::builtin(name).unwrap().unwrap();
+        check_setup_against(&p, &sections, &format!("{name}-setup-taps"));
+    }
+}
+
+/// The same with optional stops between operations, which restart the same
+/// tool, and custom G-code before the engraving and at the end.
+#[test]
+fn a_setup_stops_between_operations_where_asked() {
+    use camcraft_post::op::CustomGcode;
+    let mut ops = setup();
+    ops[2].1.before = vec![CustomGcode::new(
+        "Check depth",
+        "(MSG, measure the pocket before @operation@)\nM0",
+    )];
+    ops[2].1.after = vec![CustomGcode::new("Air off", "M9")];
+    let sections: Vec<Section> = ops
+        .iter()
+        .map(|(path, spec)| Section { path, spec })
+        .collect();
+    let mut p = Profile::builtin("masso").unwrap().unwrap();
+    p.optional_stop = true;
+    check_setup_against(&p, &sections, "masso-setup-stop");
 }
 
 /// Every builtin profile must have a golden file. Adding a profile without one

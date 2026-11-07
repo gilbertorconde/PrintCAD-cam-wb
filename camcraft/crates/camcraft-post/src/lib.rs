@@ -26,3 +26,4 @@ pub mod profile;
 pub mod readback;
 pub mod render;
 pub mod rotary;
+pub mod setup;

@@ -9,7 +9,7 @@ use std::fmt::Write as _;
 
 use std::f64::consts::{FRAC_PI_2, PI};
 
-use camcraft_core::job::{Coolant, SpindleDirection};
+use camcraft_core::job::{Coolant, DEFAULT_NUMBER, SpindleDirection};
 use camcraft_core::path::toolpath::Arc;
 use glam::{DVec2, DVec3};
 
@@ -39,7 +39,8 @@ pub struct RenderReport {
     pub op_lines: Vec<u64>,
 }
 
-/// Render a stream into G-code, `@date@` left empty.
+/// Render a stream into G-code, `@date@` left empty and `@number@` the
+/// default.
 pub fn render(ops: &[Op], profile: &Profile, program_name: &str) -> (String, RenderReport) {
     render_dated(ops, profile, program_name, None)
 }
@@ -52,17 +53,47 @@ pub fn render_dated(
     program_name: &str,
     date: Option<&str>,
 ) -> (String, RenderReport) {
+    render_program(
+        ops,
+        profile,
+        &Title {
+            name: program_name,
+            number: DEFAULT_NUMBER,
+            date,
+        },
+    )
+}
+
+/// What a program is called, for its placeholders.
+#[derive(Debug, Clone, Copy)]
+pub struct Title<'a> {
+    /// Its name, `@name@`.
+    pub name: &'a str,
+    /// Its number, `@number@`.
+    pub number: u32,
+    /// The day it is posted, as `2026-11-03`, `@date@`, where it is given.
+    pub date: Option<&'a str>,
+}
+
+/// Render a stream into G-code, called as `title` says.
+pub fn render_program(ops: &[Op], profile: &Profile, title: &Title) -> (String, RenderReport) {
     if profile.dialect == Dialect::Heidenhain {
-        return crate::heidenhain::render(ops, profile, program_name, date);
+        return crate::heidenhain::render(ops, profile, title);
     }
     let mut w = Writer::new(profile);
-    w.values = values(ops, profile, program_name, date);
+    let mut sections = values(ops, profile, title).into_iter().peekable();
+    if let Some((_, v)) = sections.peek() {
+        w.values = v.clone();
+    }
     let p = w.p;
     for line in &p.header {
         w.filled(line);
     }
     w.report.op_lines.reserve(ops.len());
-    for op in ops {
+    for (i, op) in ops.iter().enumerate() {
+        if let Some((_, v)) = sections.next_if(|(start, _)| *start <= i) {
+            w.values = v;
+        }
         w.op(op);
         w.report.op_lines.push(w.report.lines);
     }
@@ -72,15 +103,25 @@ pub fn render_dated(
     (w.out, w.report)
 }
 
-/// What the placeholders of a program of `ops` called `name` stand for: the
-/// values of its operation, as its instructions give them.
-pub(crate) fn values(ops: &[Op], profile: &Profile, name: &str, date: Option<&str>) -> Values {
+/// What the placeholders stand for in each operation of a program of `ops`
+/// called as `title` says, as its instructions give them, with the
+/// instruction each begins at: an operation's run from just after the one
+/// before ends, so the custom G-code before it is filled with its values.
+/// What an operation does not set again, as a tool kept spinning for the
+/// next, is the one before's.
+pub(crate) fn values(ops: &[Op], profile: &Profile, title: &Title) -> Vec<(usize, Values)> {
     let mut v = Values {
-        name: name.to_string(),
-        date: date.map(str::to_string),
+        name: title.name.to_string(),
+        number: title.number,
+        date: title.date.map(str::to_string),
         ..Values::default()
     };
-    for op in ops {
+    let mut out = Vec::new();
+    let mut start = 0;
+    // The coolant left on, which an operation that does not turn it again
+    // runs with.
+    let mut coolant = Coolant::Off;
+    for (i, op) in ops.iter().enumerate() {
         match op {
             Op::SectionStart {
                 op_name,
@@ -92,18 +133,28 @@ pub(crate) fn values(ops: &[Op], profile: &Profile, name: &str, date: Option<&st
                 v.tool = *tool;
                 v.strategy.clone_from(strategy);
                 v.wcs = profile.wcs_word(*wcs).unwrap_or_else(|| format!("G{wcs}"));
+                v.coolant = coolant;
             }
             Op::ToolChange { comment, .. } => v.tool_comment.clone_from(comment),
             Op::SpindleOn { rpm, dir } => {
                 v.rpm = *rpm;
                 v.spindle = *dir;
             }
-            Op::CoolantOn(c) => v.coolant = *c,
+            Op::CoolantOn(c) => {
+                v.coolant = *c;
+                coolant = *c;
+            }
+            Op::CoolantOff => coolant = Coolant::Off,
             Op::Units(u) => v.units = *u,
+            Op::SectionEnd => {
+                out.push((start, v.clone()));
+                start = i + 1;
+            }
             _ => {}
         }
     }
-    v
+    out.push((start, v));
+    out
 }
 
 /// The comment custom G-code is written after, which says whose it is:
@@ -274,6 +325,11 @@ impl<'a> Writer<'a> {
             Op::Home => {
                 let p = self.p;
                 self.lines(&p.end_home);
+            }
+            Op::OptionalStop => {
+                self.raw("M1");
+                // The operator may jog anywhere while it waits.
+                self.lost();
             }
             Op::ToolChange { tool, comment } => {
                 if self.p.length_offset {

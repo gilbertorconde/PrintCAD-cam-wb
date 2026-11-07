@@ -16,7 +16,7 @@ pub const HELPER: &str = "camcraft-helper";
 
 /// Bumped whenever a request or response changes shape, so a package never
 /// reads an answer from a helper of another build.
-pub const VERSION: u32 = 5;
+pub const VERSION: u32 = 6;
 
 /// One setup to run.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -105,6 +105,10 @@ pub struct Run {
     /// The material and the tool along the run, for playing it back.
     #[serde(default)]
     pub playback: Option<Playback>,
+    /// The setup's program, every operation in it, when the setup is posted
+    /// as one; then no operation has a program of its own.
+    #[serde(default)]
+    pub program: Option<Program>,
     /// How long it took, in seconds.
     pub seconds: f64,
     /// When each move ends, as one number ([`timing`]): a playback session
@@ -299,6 +303,11 @@ pub struct Program {
     /// before's. Empty when it is not known.
     #[serde(default)]
     pub moves: Vec<u32>,
+    /// For a setup's program, each line's operation, by its index among the
+    /// run's, whose moves [`Program::moves`] counts: never one before the
+    /// line before's. Empty for an operation's own program.
+    #[serde(default)]
+    pub operations: Vec<u32>,
 }
 
 impl Program {
@@ -317,6 +326,44 @@ impl Program {
     /// How many moves are made once line `line` has run.
     pub fn made_by(&self, line: usize) -> Option<usize> {
         self.moves.get(line).map(|m| *m as usize)
+    }
+
+    /// Whether it is a setup's program, of every operation.
+    pub fn is_setups(&self) -> bool {
+        !self.operations.is_empty()
+    }
+
+    /// The line the tool stands on once `made` moves of operation `op` are
+    /// made, in a setup's program; in an operation's own, `op` is its own.
+    /// `None` when the lines' moves are not known.
+    pub fn line_at(&self, op: usize, made: usize) -> Option<usize> {
+        if !self.is_setups() {
+            return self.line_of(made);
+        }
+        let last = self.moves.len().min(self.operations.len()).checked_sub(1)?;
+        // The first line at or past it, by halves: a program's lines are in
+        // order of operation and move.
+        let at = Some((op, made));
+        let (mut low, mut high) = (0, last + 1);
+        while low < high {
+            let mid = low + (high - low) / 2;
+            if self.moment(mid) < at {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        Some(low.min(last))
+    }
+
+    /// The operation, in a setup's program, and how many of its moves are
+    /// made once line `line` has run; `None` past the end, or for an
+    /// operation's own program.
+    pub fn moment(&self, line: usize) -> Option<(usize, usize)> {
+        Some((
+            *self.operations.get(line)? as usize,
+            *self.moves.get(line)? as usize,
+        ))
     }
 }
 
@@ -539,6 +586,33 @@ mod tests {
         assert_eq!(program.made_by(4), Some(2));
         assert_eq!(program.made_by(7), None);
         assert_eq!(Program::default().line_of(0), None, "not known");
+    }
+
+    #[test]
+    fn a_setups_line_and_its_operations_move_find_each_other() {
+        // Operation 0's header and two moves, operation 2's tool change and
+        // three moves (operation 1 made none), and the footer.
+        let program = Program {
+            operations: vec![0, 0, 0, 2, 2, 2, 2, 2],
+            moves: vec![0, 1, 2, 0, 1, 2, 3, 3],
+            ..Program::default()
+        };
+        assert!(program.is_setups());
+        assert_eq!(program.line_at(0, 0), Some(0));
+        assert_eq!(program.line_at(0, 2), Some(2));
+        assert_eq!(program.line_at(1, 0), Some(3), "none of its own: the next");
+        assert_eq!(program.line_at(2, 0), Some(3));
+        assert_eq!(program.line_at(2, 3), Some(6), "the first of its lines");
+        assert_eq!(program.line_at(9, 0), Some(7), "past the end, the last");
+        assert_eq!(program.moment(4), Some((2, 1)));
+        assert_eq!(program.moment(8), None);
+        let own = Program {
+            moves: vec![0, 1, 1],
+            ..Program::default()
+        };
+        assert!(!own.is_setups());
+        assert_eq!(own.line_at(5, 1), Some(1), "its own operation's");
+        assert_eq!(own.moment(1), None);
     }
 
     #[test]
