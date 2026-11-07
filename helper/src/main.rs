@@ -27,6 +27,7 @@ fn main() -> std::process::ExitCode {
             }
         };
     }
+    yield_to_the_app();
     if let Err(e) = input.read_to_string(&mut text) {
         eprintln!("cannot read the request: {e}");
         return std::process::ExitCode::FAILURE;
@@ -82,6 +83,19 @@ fn main() -> std::process::ExitCode {
         cache::put(folder, key, &answer);
     }
     write(&answer)
+}
+
+/// Run below the app's priority, every thread of the run started after it
+/// taking it too. A run takes every core, and printCAD stops a package
+/// whose drawing, or the clock that times it, waits behind them past its
+/// few milliseconds: the app comes first, and the run still has every core
+/// the app leaves. A playback session is not lowered; it answers the app.
+fn yield_to_the_app() {
+    #[cfg(unix)]
+    // SAFETY: it changes only this process's niceness, and reads nothing.
+    unsafe {
+        libc::setpriority(libc::PRIO_PROCESS, 0, 10);
+    }
 }
 
 fn write(answer: &[u8]) -> std::process::ExitCode {

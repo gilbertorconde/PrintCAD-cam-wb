@@ -159,6 +159,7 @@ dependencies = [
  "camcraft-session",
  "camcraft-sim",
  "glam 0.33.12",
+ "libc",
  "ogeom-core",
  "ogeom-io",
  "serde_json",
