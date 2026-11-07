@@ -14,7 +14,7 @@ use camcraft_core::job::{
     Along, BarAxis, Boundary, BoxOf, Containment, Curve, Depths, FeatureRef, FixedBox,
     FixedCylinder, Height, HeightRef, Heights, Job, Leave, MachiningBoundary, ModelDef, Operation,
     Origin, Outline, Place, PointRef, Preset, Programs, Selection, Setup, Snap, StockDef,
-    StockSpec, StockToLeave, StrategySpec, ToolSpec,
+    StockSpec, StockToLeave, StrategySpec, ToolSpec, ZCorrection,
 };
 use camcraft_core::setup::frame::{Axis, Direction, Orientation};
 use printcad_bench_sdk::serde_json;
@@ -331,6 +331,21 @@ pub struct SetupData {
     /// them is worked out, simulated, checked or posted.
     #[serde(default = "yes")]
     pub enabled: bool,
+    /// Whether every cut's depth is corrected to probe results.
+    #[serde(default)]
+    pub probe_correct: bool,
+    /// The probe results, each x, y and z in the program's coordinates and
+    /// units, as read from the file picked: kept in the document, so it
+    /// cuts the same wherever it is opened.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub probe_points: Vec<[f64; 3]>,
+    /// The file they came from, by name; with no points, a path the helper
+    /// reads them from each run, as a script gives it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub probe_file: String,
+    /// The longest piece a corrected move is split into, millimetres.
+    #[serde(default = "one")]
+    pub probe_segment: f64,
 }
 
 impl SetupData {
@@ -380,7 +395,48 @@ impl SetupData {
             tolerance,
             tools: BTreeMap::new(),
             enabled: true,
+            probe_correct: false,
+            probe_points: Vec::new(),
+            probe_file: String::new(),
+            probe_segment: one(),
         }
+    }
+
+    /// The probe results in `text`, from the file `name`, as its points:
+    /// refused, saying why, where they make no map.
+    pub fn load_probe_results(&mut self, name: &str, text: &str) -> Result<String, String> {
+        let points = camcraft_core::probe::parse(text).map_err(|e| e.to_string())?;
+        let map =
+            camcraft_core::probe::ProbeMap::from_points(&points, 1.0).map_err(|e| e.to_string())?;
+        let (columns, rows) = map.size();
+        self.probe_points = points;
+        self.probe_file = name.to_string();
+        self.probe_correct = true;
+        Ok(format!(
+            "Read {} point(s) from {name}: {columns} x {rows}.",
+            columns * rows
+        ))
+    }
+
+    /// The units its post writes, which its probe results are in.
+    fn program_units(&self) -> camcraft_core::job::LengthUnit {
+        match self.profile().map(|p| p.units) {
+            Some(camcraft_post::profile::ProgramUnits::Inch) => {
+                camcraft_core::job::LengthUnit::Inch
+            }
+            _ => camcraft_core::job::LengthUnit::Mm,
+        }
+    }
+
+    /// Its depths corrected to its probe results, as camcraft has it; `None`
+    /// when they are not.
+    pub fn z_correction(&self) -> Option<ZCorrection> {
+        self.probe_correct.then(|| ZCorrection {
+            points: self.probe_points.clone(),
+            file: (!self.probe_file.is_empty()).then(|| self.probe_file.clone()),
+            units: self.program_units(),
+            segment: self.probe_segment,
+        })
     }
 
     pub fn from(data: &serde_json::Value) -> Option<Self> {
@@ -621,6 +677,21 @@ impl SetupData {
         }
         if !positive(self.tolerance) {
             return Some("The tolerance must be more than 0.".into());
+        }
+        if self.probe_correct {
+            if self.probe_points.is_empty() && self.probe_file.is_empty() {
+                return Some(
+                    "Load the probe results to correct Z from, or turn the correction off.".into(),
+                );
+            }
+            if !positive(self.probe_segment) {
+                return Some("The segment length must be more than 0.".into());
+            }
+            if !self.probe_points.is_empty()
+                && let Err(e) = camcraft_core::probe::ProbeMap::from_points(&self.probe_points, 1.0)
+            {
+                return Some(format!("The probe results from {}: {e}.", self.probe_file));
+            }
         }
         if self.zero == Zero::Picked && self.zero_point.is_none() {
             return Some("Pick the work zero on the part: a corner or a hole's centre.".into());
@@ -1105,7 +1176,7 @@ fn positive(v: f64) -> bool {
 
 /// The strategies a new operation may have, in the order the panel lists them,
 /// with what the panel calls them.
-pub const STRATEGIES: [(&str, &str); 21] = [
+pub const STRATEGIES: [(&str, &str); 22] = [
     ("adaptive", "Adaptive clearing (3D roughing)"),
     ("pocket-clearing", "Pocket clearing (3D roughing)"),
     ("parallel", "Parallel (3D finishing)"),
@@ -1127,6 +1198,7 @@ pub const STRATEGIES: [(&str, &str); 21] = [
     ("chamfer", "Deburr / chamfer (along edges)"),
     ("v-carve", "V-carve"),
     ("custom-gcode", "Custom G-code"),
+    ("probe", "Probe (a grid over the top)"),
 ];
 
 /// The panel's word for `strategy`.
@@ -1161,6 +1233,7 @@ pub fn strategy_word(strategy: &StrategySpec) -> &'static str {
         StrategySpec::Slot { .. } => "Slot",
         StrategySpec::Chamfer { .. } => "Chamfer",
         StrategySpec::CustomGcode {} => "Custom G-code",
+        StrategySpec::Probe { .. } => "Probe",
     }
 }
 
@@ -1188,7 +1261,9 @@ fn start_on_silhouette(op: &mut Operation) {
         | StrategySpec::VCarve { .. }
         | StrategySpec::Slot { .. }
         | StrategySpec::Chamfer { .. }
-        | StrategySpec::CustomGcode {} => return,
+        | StrategySpec::CustomGcode {}
+        // Over the stock's top, all of it, unless kept to less.
+        | StrategySpec::Probe { .. } => return,
     };
     op.boundary.kind = Boundary::Silhouette;
     op.boundary.containment = containment;
@@ -1287,6 +1362,7 @@ pub fn job(
     camcraft.programs = setup.programs;
     camcraft.number = setup.program_number.round().clamp(1.0, 99_999.0) as u32;
     camcraft.post = setup.post.clone();
+    camcraft.z_correction = setup.z_correction();
     camcraft.orientation = setup.orientation(model_of);
     let offset = [setup.offset_x, setup.offset_y, setup.offset_z];
     camcraft.origin = match (&setup.zero, &setup.zero_point) {
@@ -2053,5 +2129,36 @@ mod tests {
             panic!();
         };
         assert_eq!((c.axis, c.place), (BarAxis::Y, Place::Center {}));
+    }
+
+    /// Probe results loaded from a file are kept in the setup and reach its
+    /// job in the post's units; results that are no grid are refused, and a
+    /// correction with none loaded is said.
+    #[test]
+    fn probe_results_reach_the_job() {
+        let mut setup = SetupData::new(vec!["b1".into()], "linuxcnc-inch", 0.05);
+        setup.probe_correct = true;
+        assert!(setup.problem().unwrap().contains("Load the probe results"));
+        let log = "0 0 0.01 0 0 0 0 0 0\n2 0 0.02 0 0 0 0 0 0\n0 1 0.0 0 0 0 0 0 0\n2 1 0.0 0 0 0 0 0 0\n";
+        let said = setup.load_probe_results("probe.txt", log).unwrap();
+        assert!(said.contains("4 point(s) from probe.txt: 2 x 2"), "{said}");
+        assert_eq!(setup.problem(), None);
+        let back = SetupData::from(&setup.to_value()).unwrap();
+        assert_eq!(back, setup);
+        let job = job("s", &setup, &[], &[]);
+        let z = job.setups[0].z_correction.clone().unwrap();
+        assert_eq!(z.points.len(), 4);
+        assert_eq!(z.units, camcraft_core::job::LengthUnit::Inch);
+        assert_eq!(z.file.as_deref(), Some("probe.txt"));
+        let e = setup
+            .load_probe_results("bad.csv", "0,0,0\n1,0,0\n0,1,0\n")
+            .unwrap_err();
+        assert!(e.contains("not a grid"), "{e}");
+        setup.probe_correct = false;
+        assert!(job_of(&setup).setups[0].z_correction.is_none());
+    }
+
+    fn job_of(setup: &SetupData) -> Job {
+        job("s", setup, &[], &[])
     }
 }

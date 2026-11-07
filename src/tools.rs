@@ -39,6 +39,22 @@ pub fn open_post() -> Request {
     }
 }
 
+/// The dialogs asking for a setup's probe results, by the setup's id after
+/// this.
+pub const OPEN_PROBE: &str = "probe-results:";
+
+/// The dialog asking for setup `setup`'s probe results.
+pub fn open_probe_results(setup: &str) -> Request {
+    Request::OpenFile {
+        id: format!("{OPEN_PROBE}{setup}"),
+        kinds: vec![FileKind {
+            label: "Probe results (LinuxCNC log, CSV)".into(),
+            extensions: vec!["txt".into(), "csv".into(), "log".into()],
+        }],
+        multiple: false,
+    }
+}
+
 /// What the files picked for dialog `id` did to `tools` and `posts`, in
 /// words; `None` for a dialog not the page's.
 pub fn files_opened(
@@ -120,13 +136,14 @@ pub fn add_post(posts: &mut BTreeMap<String, String>, text: &str) -> Result<Stri
 }
 
 /// The tool kinds, as the editor lists them.
-const KINDS: [(ToolKind, &str); 6] = [
+const KINDS: [(ToolKind, &str); 7] = [
     (ToolKind::Flat, "Flat end mill"),
     (ToolKind::Ball, "Ball end mill"),
     (ToolKind::Bullnose, "Bull nose end mill"),
     (ToolKind::Cone, "V-bit or chamfer mill"),
     (ToolKind::Drill, "Drill"),
     (ToolKind::ThreadMill, "Thread mill"),
+    (ToolKind::Probe, "Touch probe (its ball's diameter)"),
 ];
 
 /// A number of a tool, by the editor's field, for showing: zero for none.
@@ -216,8 +233,11 @@ fn fields(kind: ToolKind) -> Vec<(&'static str, &'static str, Dim, usize)> {
     if kind == ToolKind::Cone {
         out.push(("tip_diameter", "Tip diameter", Dim::Length, 3));
     }
+    // A probe has no flutes.
+    if kind != ToolKind::Probe {
+        out.push(("flutes", "Flutes (0: not given)", Dim::Number, 0));
+    }
     out.extend([
-        ("flutes", "Flutes (0: not given)", Dim::Number, 0),
         (
             "flute_length",
             "Flute length (0: not given)",

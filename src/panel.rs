@@ -265,6 +265,7 @@ fn kind_label(kind: ToolKind) -> &'static str {
         ToolKind::Cone => "V-bit",
         ToolKind::Drill => "drill",
         ToolKind::ThreadMill => "thread mill",
+        ToolKind::Probe => "touch probe",
     }
 }
 
@@ -835,6 +836,7 @@ pub fn setup_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
         ],
     ));
     panel.push(group("Work offset", work_offset_rows(id, &setup)));
+    panel.push(group("Probed surface", probe_rows(id, &setup)));
     let ops = operations_of(id);
     let run = cam.runs.get(id).and_then(|c| c.shown());
     let items = ops
@@ -915,6 +917,74 @@ pub fn setup_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
     });
     panel.extend(run_widgets(cam, id, None));
     panel
+}
+
+/// Whether a setup's cut depths are corrected to probe results, and from
+/// which.
+fn probe_rows(id: &str, setup: &SetupData) -> Vec<Widget> {
+    let mut rows = vec![Widget::Toggle {
+        id: "probe_correct".into(),
+        label: "Correct Z from probe results".into(),
+        on: setup.probe_correct,
+    }];
+    if !setup.probe_correct {
+        return rows;
+    }
+    let units = match setup.profile().map(|p| p.units) {
+        Some(camcraft_post::profile::ProgramUnits::Inch) => "in",
+        _ => "mm",
+    };
+    let results = if !setup.probe_points.is_empty() {
+        match camcraft_core::probe::ProbeMap::from_points(&setup.probe_points, 1.0) {
+            Ok(map) => {
+                let (columns, rows) = map.size();
+                let (low, high) = map.heights();
+                format!(
+                    "{}: {columns} x {rows} points, Z {low:.3} to {high:.3} {units}",
+                    setup.probe_file
+                )
+            }
+            Err(e) => format!("{}: {e}", setup.probe_file),
+        }
+    } else if !setup.probe_file.is_empty() {
+        format!("{}, read each run", setup.probe_file)
+    } else {
+        "none loaded".into()
+    };
+    rows.push(Widget::Value {
+        label: "Results".into(),
+        value: results,
+        mono: false,
+    });
+    rows.push(button(
+        "load_probe",
+        "Load probe results…",
+        ButtonStyle::Secondary,
+        true,
+    ));
+    rows.push(number(
+        "probe_segment",
+        "Segment length",
+        setup.probe_segment,
+        Dim::Length,
+        2,
+        id,
+    ));
+    rows.push(Widget::Text {
+        text: format!(
+            "Every move of every operation but a probe's goes up or down by the probed \
+             surface's height there, from the work zero, bilinearly between the points; \
+             a cut is split into pieces no longer than the segment length, and an arc \
+             into straight pieces where the surface is not level under it. Outside the \
+             probed area the surface is taken as at its nearest edge, and the operation \
+             says how far it went. The stock's top and the part follow it in the \
+             simulation and the checks. Results are a LinuxCNC probe log (x y z ...) or \
+             a CSV of x, y, z, in the post's units ({units}) and the setup's work \
+             coordinates."
+        ),
+        mono: false,
+    });
+    rows
 }
 
 /// The work offset a setup's programs select, from those its post has, and
@@ -1010,6 +1080,7 @@ pub fn setup_event(cam: &mut Cam, id: &str, event: PanelEvent) {
                 "wcs_z" => &mut setup.wcs_z,
                 "program_number" => &mut setup.program_number,
                 "tolerance" => &mut setup.tolerance,
+                "probe_segment" => &mut setup.probe_segment,
                 _ => return,
             };
             *slot = value;
@@ -1173,6 +1244,13 @@ pub fn setup_event(cam: &mut Cam, id: &str, event: PanelEvent) {
         PanelEvent::Toggle { id: t, on } if t == "wcs_known" => {
             setup.wcs_known = on;
             cam.write_setup(id, &setup);
+        }
+        PanelEvent::Toggle { id: t, on } if t == "probe_correct" => {
+            setup.probe_correct = on;
+            cam.write_setup(id, &setup);
+        }
+        PanelEvent::Button { id: b } if b == "load_probe" => {
+            host::request(crate::tools::open_probe_results(id));
         }
         PanelEvent::Toggle { id: t, on } if t == "show_material" => cam.show_material = on,
         PanelEvent::Button { id: b } if b == "generate" => cam.refresh(id, true),
@@ -1402,7 +1480,8 @@ impl HeightKey {
     fn shown(data: &OperationData) -> Vec<Self> {
         let uses = data.strategy().uses();
         let mut out = vec![Self::Clearance];
-        if uses.stay_down {
+        // A probe comes down to touch from the retract height.
+        if uses.stay_down || matches!(data.strategy(), StrategySpec::Probe { .. }) {
             out.push(Self::Retract);
         }
         if uses.top.is_some() {
@@ -1547,6 +1626,39 @@ fn sketch_rows(data: &OperationData) -> Vec<Widget> {
     rows
 }
 
+/// An operation's spindle speed and feeds.
+fn feeds_group(data: &OperationData, id: &str) -> Widget {
+    group(
+        "Feeds and speeds",
+        vec![
+            number(
+                "rpm",
+                "Spindle, rev/min (0: the tool's)",
+                data.rpm,
+                Dim::Number,
+                0,
+                id,
+            ),
+            number(
+                "feed",
+                "Cutting feed, mm/min",
+                data.feed,
+                Dim::Number,
+                0,
+                id,
+            ),
+            number(
+                "plunge",
+                "Plunge feed, mm/min",
+                data.plunge,
+                Dim::Number,
+                0,
+                id,
+            ),
+        ],
+    )
+}
+
 pub fn operation_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
     let Some(data) = OperationData::from(&node.data) else {
         return vec![note(NoteKind::Error, "The operation's data does not read.")];
@@ -1649,36 +1761,12 @@ pub fn operation_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
     }
     panel.push(group("Tool", tool_widgets));
 
-    panel.push(group(
-        "Feeds and speeds",
-        vec![
-            number(
-                "rpm",
-                "Spindle, rev/min (0: the tool's)",
-                data.rpm,
-                Dim::Number,
-                0,
-                id,
-            ),
-            number(
-                "feed",
-                "Cutting feed, mm/min",
-                data.feed,
-                Dim::Number,
-                0,
-                id,
-            ),
-            number(
-                "plunge",
-                "Plunge feed, mm/min",
-                data.plunge,
-                Dim::Number,
-                0,
-                id,
-            ),
-        ],
-    ));
-
+    // A probe goes down at its own feed, set with its grid, and is not
+    // turned.
+    let probing = matches!(strategy, StrategySpec::Probe { .. });
+    if !probing {
+        panel.push(feeds_group(&data, id));
+    }
     // The passes.
     let mut passes = Vec::new();
     if uses.stepover {
@@ -1887,8 +1975,12 @@ pub fn operation_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
         panel.push(group("Geometry", geometry));
     }
     panel.push(heights_group(&data, id));
-    panel.push(linking_group(&data, spec, id));
-    panel.push(pattern_group(&data, id));
+    // Its touches are its own, each straight down from the retract height,
+    // and a grid is not repeated.
+    if !probing {
+        panel.push(linking_group(&data, spec, id));
+        panel.push(pattern_group(&data, id));
+    }
 
     if let Some(problem) = setup_data.and_then(|s| data.problem(&s.tools)) {
         panel.push(note(NoteKind::Warning, problem));
