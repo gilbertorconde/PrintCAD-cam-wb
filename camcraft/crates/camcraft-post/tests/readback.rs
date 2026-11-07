@@ -15,8 +15,10 @@ use camcraft_core::path::toolpath::{Arc, MoveRole, Toolpath};
 use camcraft_post::op::{ProgramSpec, lower};
 use camcraft_post::profile::{ArcStyle, Profile, ProgramUnits, ToolChangeStyle};
 use camcraft_post::readback::check;
+use camcraft_post::readback::check_setup;
 use camcraft_post::render::render;
-use common::{chip_breaking, drilling, fixture, spec, tapping};
+use camcraft_post::setup::{Joining, Section, lower_setup};
+use common::{chip_breaking, drilling, fixture, setup, spec, tapping};
 use glam::{DVec3, dvec3};
 
 fn post(path: &Toolpath, spec: &ProgramSpec, profile: &Profile) -> String {
@@ -128,6 +130,141 @@ fn every_post_reads_back_to_its_path() {
             }
         }
     }
+}
+
+/// A setup's operations as one program for `profile`, in `units`, with an
+/// optional stop between them or not.
+fn post_setup(ops: &[(Toolpath, ProgramSpec)], profile: &Profile) -> (String, Vec<ProgramSpec>) {
+    let specs: Vec<ProgramSpec> = ops
+        .iter()
+        .map(|(_, s)| ProgramSpec {
+            units: profile.units,
+            ..s.clone()
+        })
+        .collect();
+    let sections: Vec<Section> = ops
+        .iter()
+        .zip(&specs)
+        .map(|((path, _), spec)| Section { path, spec })
+        .collect();
+    let (lowered, _) = lower_setup(&sections, Joining::of(profile)).unwrap();
+    (render(&lowered, profile, "setup").0, specs)
+}
+
+fn sections<'a>(ops: &'a [(Toolpath, ProgramSpec)], specs: &'a [ProgramSpec]) -> Vec<Section<'a>> {
+    ops.iter()
+        .zip(specs)
+        .map(|((path, _), spec)| Section { path, spec })
+        .collect()
+}
+
+/// A setup of three operations on two tools as one program, every profile
+/// set every way, in both units, with optional stops and without, and
+/// holes drilled as cycles after them: each operation cut as it was posted,
+/// the tool going between them only up, across clear and down.
+#[test]
+fn every_post_reads_back_a_setup_as_one_program() {
+    let mut ops = setup();
+    ops.push((Toolpath::new(), drilling(Some(2.0), None)));
+    for (name, profile) in profiles() {
+        for units in [ProgramUnits::Mm, ProgramUnits::Inch] {
+            for stop in [false, true] {
+                let mut p = profile.clone();
+                p.units = units;
+                p.optional_stop = stop;
+                p.drill_cycles = true;
+                let (text, specs) = post_setup(&ops, &p);
+                if let Err(e) = check_setup(&text, &sections(&ops, &specs), &p) {
+                    panic!(
+                        "the setup for {name} in {units:?}, stop {stop}, does not read back: {e}\n{text}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// A setup's program broken on purpose, one fault each: each is caught,
+/// and said of the operation it is in.
+#[test]
+fn a_setups_program_broken_is_refused() {
+    let ops = setup();
+    let fault = |profile: &Profile, from: &str, to: &str, what: &str| {
+        let (text, specs) = post_setup(&ops, profile);
+        let sections = sections(&ops, &specs);
+        check_setup(&text, &sections, profile).unwrap();
+        assert_eq!(text.matches(from).count(), 1, "{from:?} in\n{text}");
+        let broken = text.replacen(from, to, 1);
+        let e = check_setup(&broken, &sections, profile).unwrap_err();
+        assert!(e.what.contains(what), "{from:?} -> {to:?}: {e}\n{broken}");
+    };
+    let linuxcnc = Profile::builtin("linuxcnc").unwrap().unwrap();
+    // The second tool never changed to.
+    fault(
+        &linuxcnc,
+        "T3 M6\n",
+        "",
+        "finish (operation 2): moves before tool 3",
+    );
+    // The engraving cut at the finishing's speed.
+    fault(
+        &linuxcnc,
+        "S12000 M3\n",
+        "",
+        "engrave (operation 3): cuts before the spindle",
+    );
+    // Or with the coolant still on.
+    fault(&linuxcnc, "S12000 M3\nM9\n", "S12000 M3\n", "coolant");
+    // Or its first operation's moves left out.
+    fault(&linuxcnc, "Y40\n", "", "rough (operation 1)");
+    // A tool changed with the spindle turning.
+    fault(
+        &linuxcnc,
+        "M9\nM5\nG53 G0 Z0\n(finish",
+        "M9\nG53 G0 Z0\n(finish",
+        "without stopping",
+    );
+    // With no way up of its own, the tool goes up and across between
+    // operations: across low, or down before it is over the next, is
+    // refused.
+    let mut low = linuxcnc.clone();
+    low.safe_retract.clear();
+    fault(
+        &low,
+        "G0 X0 Y0\n(engrave",
+        "G0 X0 Y0 Z10\n(engrave",
+        "across and down",
+    );
+    fault(
+        &low,
+        "G0 X0 Y0\n(engrave - engrave - T3 G54)\nS12000 M3\nM9\nZ10\n",
+        "G0 Z10\n(engrave - engrave - T3 G54)\nS12000 M3\nM9\nX0 Y0\n",
+        "down between operations",
+    );
+    // In Klartext, the second tool never called, or the engraving's speed
+    // never set.
+    let heidenhain = Profile::builtin("heidenhain").unwrap().unwrap();
+    fault(
+        &heidenhain,
+        "TOOL CALL 3 Z S18000",
+        ";gone",
+        "moves before tool 3",
+    );
+    fault(
+        &heidenhain,
+        "TOOL CALL Z S12000",
+        ";gone",
+        "engrave (operation 3)",
+    );
+    // An optional stop with the spindle turning.
+    let mut stop = linuxcnc;
+    stop.optional_stop = true;
+    fault(
+        &stop,
+        "M5\nG53 G0 Z0\nM1\n(finish",
+        "G53 G0 Z0\nM1\n(finish",
+        "spindle",
+    );
 }
 
 /// Holes as canned cycles, plain, with a pause, pecked, breaking the chip and

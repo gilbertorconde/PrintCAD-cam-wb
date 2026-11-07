@@ -92,7 +92,7 @@ pub use operation::Operation;
 pub use passes::{Finishing, FinishingSizes, Passes, StockToLeave, TabShape, Tabs};
 pub use pattern::{Linear, MOST_COPIES, Mirror, MirrorAxis, Pattern, Polar};
 pub use pick::{FeatureRef, PointRef, Snap};
-pub use setup::{Along, BoxOf, LAST_WCS, Origin, Setup};
+pub use setup::{Along, BoxOf, DEFAULT_NUMBER, LAST_WCS, Origin, Programs, Setup};
 pub use strategy_spec::{
     ChamferSide, ContourOrder, CutDirection, FaceDirection, PassOrder, ProfileSide,
     RadialDirection, SlotPattern, StrategySpec, ThreadHand, TraceDirection,

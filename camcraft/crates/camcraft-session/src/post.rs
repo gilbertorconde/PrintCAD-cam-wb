@@ -1,5 +1,9 @@
 //! Posting: a setup's programs named, rendered and written.
 //!
+//! A setup is posted as one program, every operation in it, or as one
+//! program an operation, as it says ([`Programs`]) unless the posting says
+//! otherwise.
+//!
 //! A [`Posting`] is made first, with every program rendered, then written in one
 //! go. It says what stands in the way — setups that did not pass their checks, and
 //! files that would be replaced — so a front end can ask before anything is
@@ -9,13 +13,14 @@
 
 use std::path::{Path, PathBuf};
 
-use camcraft_core::job::Setup;
+use camcraft_core::job::{Programs, Setup};
 use camcraft_core::run::{Made, OperationResult, SetupResult, StrategyDetail};
 use camcraft_core::setup::bounds_all;
 use camcraft_core::setup::frame::Frame;
 use camcraft_post::op::{CustomGcode, DrillCycles, LowerError, ProgramSpec, extents, lower};
 use camcraft_post::profile::{Placement, Profile, TravelCheck};
-use camcraft_post::render::{RenderReport, render};
+use camcraft_post::render::{RenderReport, Title, render, render_program};
+use camcraft_post::setup::{Joining, Section, lower_setup};
 use glam::DVec3;
 
 use crate::{Ran, SessionError, fs};
@@ -75,6 +80,11 @@ pub fn program_name(setup: &str, index: usize, op_name: &str) -> String {
         index + 1,
         file_safe(op_name)
     )
+}
+
+/// The program name for the whole of a setup posted as one: `top`.
+pub fn setup_program_name(setup: &str) -> String {
+    file_safe(setup)
 }
 
 /// Everything one operation's program needs besides its path, for `profile`,
@@ -217,6 +227,79 @@ pub fn program_with(
     Ok(render(&ops, profile, name))
 }
 
+/// Each of a setup's operations that has a program, by its index among the
+/// setup's operations as run (`result`), with everything its part of a
+/// program needs besides its path, its custom G-code and the stock among
+/// it; or the first
+/// that cannot be posted, by its index, and why.
+pub fn setup_specs(
+    setup: &Setup,
+    result: &SetupResult,
+    profile: &Profile,
+) -> Result<Vec<(usize, ProgramSpec)>, (usize, LowerError)> {
+    let custom = custom_gcode(setup, &result.operations);
+    let stock = stock_box(result);
+    let mut out = Vec::new();
+    for (k, op) in result.operations.iter().enumerate() {
+        if !op.made.has_paths() {
+            continue;
+        }
+        let mut spec = program_spec(op, setup.wcs, &result.frame, profile).map_err(|e| (k, e))?;
+        if let Some((before, after)) = custom.get(k) {
+            spec.before.clone_from(before);
+            spec.after.clone_from(after);
+        }
+        // The next tool is the joined program's to call up; the stock is
+        // the setup's.
+        spec.stock = stock;
+        out.push((k, spec));
+    }
+    Ok(out)
+}
+
+/// A setup posted as one program.
+#[derive(Debug, Clone)]
+pub struct SetupProgram {
+    /// What it says.
+    pub text: String,
+    /// What rendering wrote.
+    pub report: RenderReport,
+    /// For each instruction, the operation it is of, by its index among the
+    /// setup's as run, and how many of that operation's moves are made once
+    /// it has run: with `report.op_lines`, which operation and move each
+    /// line is of.
+    pub made: Vec<(usize, usize)>,
+}
+
+/// Every operation of `setup` that has a program, as run (`result`),
+/// posted as one program for `profile`, called as `title` says; or the
+/// first operation that cannot be posted, by its index, and why.
+pub fn setup_program(
+    setup: &Setup,
+    result: &SetupResult,
+    profile: &Profile,
+    title: &Title,
+) -> Result<SetupProgram, (usize, LowerError)> {
+    let specs = setup_specs(setup, result, profile)?;
+    let sections: Vec<Section> = specs
+        .iter()
+        .filter_map(|(k, spec)| {
+            let path = &result.operations.get(*k)?.path;
+            Some(Section { path, spec })
+        })
+        .collect();
+    let (ops, made) = lower_setup(&sections, Joining::of(profile)).map_err(|e| {
+        let k = specs.get(e.section).map_or(0, |(k, _)| *k);
+        (k, e.error)
+    })?;
+    let (text, report) = render_program(&ops, profile, title);
+    let made = made
+        .into_iter()
+        .map(|(section, n)| (specs.get(section).map_or(0, |(k, _)| *k), n))
+        .collect();
+    Ok(SetupProgram { text, report, made })
+}
+
 /// One program, rendered.
 #[derive(Debug, Clone)]
 pub struct Program {
@@ -224,7 +307,7 @@ pub struct Program {
     pub path: PathBuf,
     /// What it says.
     pub text: String,
-    /// The operation it cuts.
+    /// The operation it cuts, or the setup, posted as one program.
     pub op: String,
     /// The machine profile it was rendered for.
     pub profile: String,
@@ -256,12 +339,14 @@ impl Posting {
 /// nothing.
 ///
 /// A setup's `post` names a builtin profile or a file, found from `job_dir`;
-/// `profile`, when given, is used for every setup instead.
+/// `profile`, when given, is used for every setup instead. Each setup is
+/// posted as its `programs` says, or as `programs` says when it is given.
 pub fn plan_posting(
     setups: &[(&Setup, &Ran)],
     job_dir: &Path,
     dir: &Path,
     profile: Option<&str>,
+    programs: Option<Programs>,
 ) -> Result<Posting, SessionError> {
     let mut out = Posting {
         dir: dir.to_path_buf(),
@@ -272,6 +357,7 @@ pub fn plan_posting(
     // Each program's file, by what a file system that ignores case sees, and
     // whose it is: two names can come to one file.
     let mut taken: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let programs_given = programs;
     for (setup, ran) in setups {
         let in_setup = |source| SessionError::InSetup {
             setup: setup.name.clone(),
@@ -300,12 +386,28 @@ pub fn plan_posting(
             why.extend(past);
             out.refused.push((setup.name.clone(), why));
         }
+        // Each program's name, whose it is, the operation it cuts (the
+        // setup, for one of them all), and what it says.
+        let mut programs = Vec::new();
+        let one_each = programs_given.unwrap_or(setup.programs) == Programs::Operation;
+        if !one_each && ran.result.operations.iter().any(|op| op.made.has_paths()) {
+            let name = setup_program_name(&setup.name);
+            let title = Title {
+                name: &name,
+                number: setup.number,
+                date: None,
+            };
+            let p = setup_program(setup, &ran.result, &loaded, &title)
+                .map_err(|(_, e)| in_setup(e.into()))?;
+            let whose = format!("setup '{}'", setup.name);
+            programs.push((name, whose, setup.name.clone(), p.text, p.report));
+        }
         let custom = custom_gcode(setup, &ran.result.operations);
         let next = next_tools(&ran.result.operations);
         let stock = stock_box(&ran.result);
         // An operation turned off or left out of the run has no program.
         let made = ran.result.operations.iter().enumerate();
-        for (k, op) in made.filter(|(_, op)| op.made.has_paths()) {
+        for (k, op) in made.filter(|(_, op)| one_each && op.made.has_paths()) {
             let name = program_name(&setup.name, k, &op.name);
             let mut spec = program_spec(op, setup.wcs, &ran.result.frame, &loaded)
                 .map_err(|e| in_setup(e.into()))?;
@@ -315,9 +417,21 @@ pub fn plan_posting(
             }
             spec.next_tool = next.get(k).copied().flatten();
             spec.stock = stock;
-            let (text, report) = program_with(op, &spec, &loaded, &name).map_err(in_setup)?;
-            let path = dir.join(format!("{name}.{}", loaded.extension));
+            // Numbered on from the setup's, one a program.
+            let title = Title {
+                name: &name,
+                number: setup
+                    .number
+                    .saturating_add(u32::try_from(programs.len()).unwrap_or(u32::MAX)),
+                date: None,
+            };
+            let ops = lower(&op.path, &spec).map_err(|e| in_setup(e.into()))?;
+            let (text, report) = render_program(&ops, &loaded, &title);
             let whose = format!("setup '{}' operation '{}'", setup.name, op.name);
+            programs.push((name, whose, op.name.clone(), text, report));
+        }
+        for (name, whose, op, text, report) in programs {
+            let path = dir.join(format!("{name}.{}", loaded.extension));
             let key = path.display().to_string().to_lowercase();
             if let Some(first) = taken.insert(key, whose.clone()) {
                 return Err(SessionError::SameProgram {
@@ -332,7 +446,7 @@ pub fn plan_posting(
             out.programs.push(Program {
                 path,
                 text,
-                op: op.name.clone(),
+                op,
                 profile: loaded.name.clone(),
                 report,
             });

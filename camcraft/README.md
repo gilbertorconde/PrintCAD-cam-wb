@@ -253,6 +253,49 @@ Y. `Profile::number` is public, for the dialect's own numbers. In
 `camcraft-session`, `next_tools` and `stock_box` give each program its
 next tool and the stock, which `plan_posting` and the helper pass on.
 
+And a setup posted as one program, as Fusion posts one. In
+`camcraft-core`, a `Setup` has `programs` (`Programs`: `setup`, the
+default, or `operation`, one an operation as before) and `number` (1001
+unless set). In `camcraft-post`, `setup::lower_setup` lowers its
+operations, each a `Section` (its path and its `ProgramSpec`), into one
+stream: the units once; each operation's custom G-code, its section and its
+moves; the tool changed only where it changes (or after custom G-code, or
+an optional stop), the same tool kept turning, its speed and coolant set
+again only where they change; between two, the profile's safe retract, or,
+with none, rapids straight up as high as either goes and across, so the
+next starts straight down; the end and home once. `Joining` says, from the
+profile, whether it takes the tool up itself and whether it stops between
+operations: a profile's new `optional_stop` writes `Op::OptionalStop`
+(`M1`) between every two, the spindle and coolant stopped and the tool clear
+first. It says of each instruction which section it is of and how many of
+that section's moves are made once it has run. `op::refuse` is what
+`lower_counted` refused, split out so both refuse alike. The renderer fills
+each operation's lines with its own values (an operation runs from just
+after the one before ends, its custom G-code with it), the header with the
+first's and the footer with the last's; what one operation does not set
+again, as a tool kept turning, is the one before's. `render_program` renders
+with a `Title`, giving `@number@` and `@number5@` (five digits), new
+placeholders, which the Fanuc and Haas profiles' `O` lines now take;
+`render_dated` gives 1001. A Klartext program, which `render_program` hands
+to `heidenhain::render`, fills each operation's lines as G-code's do, and
+calls each tool at its operation's speed. In a joined program the stock
+(`Op::Stock`) and the work offset are written once (the offset again only
+after custom G-code), and after each tool change the next other tool an
+operation takes is called up (`Op::PreSelect`), where the profile does.
+`readback::check_setup` reads a setup's program, G-code or Klartext, back
+against every section in turn, each checked as `check` checks one (its tool, work
+offset, length offset, spindle and coolant in force before it cuts, its
+moves or holes), and between two allows only rapids up, across as high as
+the one before went and the next begins, and down where the next begins.
+In `camcraft-session`, `setup_specs` and `setup_program` post a setup as one
+(`setup_program_name`, after the setup), saying which operation and move
+each instruction is of, and `plan_posting` takes `programs` to post every
+setup one way or the other, else as each says; programs one an operation are
+numbered on from the setup's. `setup_specs` gives each the setup's stock.
+Golden programs:
+`linuxcnc-setup.nc`, `grbl-setup.nc`, `masso-setup-stop.nc`,
+`fanuc-setup.nc`, `haas-setup.nc` and `heidenhain-setup.nc`.
+
 And one test: ogeom is 0.11.1 here, which printCAD's shapes need, and it
 meshes `round_edge_loose_fit.step`'s seam that 0.11.0 drew off the torus, so
 `a_loose_fit_is_refused_for_ogeoms_seam` became

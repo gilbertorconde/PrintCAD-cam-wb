@@ -38,10 +38,34 @@ pub struct Setup {
     /// Where the work zero is.
     #[serde(default, skip_serializing_if = "is_default")]
     pub origin: Origin,
+    /// Whether it is posted as one program, or one an operation.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub programs: Programs,
+    /// Its program's number, for a control that files programs by number
+    /// (`O1001`): each program of a setup posted one an operation takes the
+    /// next.
+    #[serde(default = "default_number", skip_serializing_if = "is_default_number")]
+    pub number: u32,
     /// Operations, in the order they run.
     #[serde(default, rename = "operation")]
     pub operations: Vec<Operation>,
 }
+
+/// How a setup's operations are posted.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Programs {
+    /// One program for the whole setup, as Fusion posts one: a header, each
+    /// operation in order, the tool changed only where it changes, and a
+    /// footer.
+    #[default]
+    Setup,
+    /// One program an operation, each with its own header and footer.
+    Operation,
+}
+
+/// The number a setup's program takes unless it is given one.
+pub const DEFAULT_NUMBER: u32 = 1001;
 
 impl Setup {
     /// An empty setup with the usual defaults.
@@ -55,6 +79,8 @@ impl Setup {
             post: default_post(),
             orientation: Orientation::default(),
             origin: Origin::default(),
+            programs: Programs::default(),
+            number: DEFAULT_NUMBER,
             operations: Vec::new(),
         }
     }
@@ -70,6 +96,14 @@ fn default_wcs() -> u8 {
 
 fn default_post() -> String {
     "masso".into()
+}
+
+fn default_number() -> u32 {
+    DEFAULT_NUMBER
+}
+
+fn is_default_number(n: &u32) -> bool {
+    *n == DEFAULT_NUMBER
 }
 
 /// Where a setup's work zero is.
