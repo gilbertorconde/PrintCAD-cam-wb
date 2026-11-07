@@ -343,7 +343,10 @@ panels, the drawing and the helper that runs camcraft.
   which says so first, at the top. The setup's panel lists its tools with
   what each does too.
 - **Drawn over the model.** The stock's box or cylinder, the work zero, each operation's
-  toolpath (rapids dashed while it is edited), and the material left.
+  toolpath (rapids dashed while it is edited), and the material left. The
+  view draws 30,000 of the toolpaths' points at most, so a frame stays
+  quick on a big document: the edited operation's first, then the rest of
+  its setup, then the other setups, each thinned to its share.
 - **G-code through the save dialog,** one program for the whole setup, as
   Fusion posts one, or one program per operation (every one of a setup into
   a folder at once), as the setup's Programs says, for GRBL,

@@ -65,6 +65,14 @@ impl Lines {
     fn count(&mut self, text: &str) -> usize {
         self.of(text).len() - 1
     }
+
+    /// Find where the lines start of the program operation `op` of `run`
+    /// is listed in, ahead of listing it.
+    pub fn find(&mut self, run: &Run, op: usize) {
+        if let Some(program) = program_of(run, op) {
+            self.of(&program.text);
+        }
+    }
 }
 
 /// The lines to show of `lines`, round line `at`: as many before and after
