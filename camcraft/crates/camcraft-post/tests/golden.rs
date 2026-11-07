@@ -32,14 +32,18 @@ use camcraft_post::profile::Profile;
 use camcraft_post::readback;
 use camcraft_post::render::{render, render_dated};
 use common::{chip_breaking, drilling, engraving, fixture, slot, spec, tapping};
+use glam::dvec3;
 
 fn check(profile_name: &str) {
     let profile = Profile::builtin(profile_name)
         .unwrap_or_else(|| panic!("no builtin profile {profile_name}"))
         .unwrap();
-    // Written in the profile's units, as a session posts it.
+    // Written in the profile's units, as a session posts it, with the tool
+    // the next program takes and the stock, for the profiles that say them.
     let spec = ProgramSpec {
         units: profile.units,
+        next_tool: Some(5),
+        stock: Some((dvec3(-20.0, -10.0, -12.0), dvec3(20.0, 20.0, 0.0))),
         ..spec()
     };
     check_against(&profile, &fixture(), &spec, profile_name);
@@ -136,6 +140,122 @@ fn linuxcnc_output_is_stable() {
 #[test]
 fn linuxcnc_inch_output_is_stable() {
     check("linuxcnc-inch");
+}
+
+#[test]
+fn fanuc_output_is_stable() {
+    check("fanuc");
+}
+
+#[test]
+fn fanuc_inch_output_is_stable() {
+    check("fanuc-inch");
+}
+
+#[test]
+fn haas_output_is_stable() {
+    check("haas");
+}
+
+#[test]
+fn haas_inch_output_is_stable() {
+    check("haas-inch");
+}
+
+#[test]
+fn mach_output_is_stable() {
+    check("mach");
+}
+
+#[test]
+fn mach_inch_output_is_stable() {
+    check("mach-inch");
+}
+
+#[test]
+fn heidenhain_output_is_stable() {
+    check("heidenhain");
+}
+
+#[test]
+fn heidenhain_inch_output_is_stable() {
+    check("heidenhain-inch");
+}
+
+/// Fanuc's canned cycles, as the G-code profiles' are, but a pause in
+/// milliseconds.
+#[test]
+fn fanuc_drilling_cycles_are_stable() {
+    let mut p = Profile::builtin("fanuc").unwrap().unwrap();
+    p.drill_cycles = true;
+    check_against(
+        &p,
+        &Toolpath::new(),
+        &drilling(Some(2.0), None),
+        "fanuc-peck",
+    );
+    check_against(
+        &p,
+        &Toolpath::new(),
+        &drilling(None, Some(0.5)),
+        "fanuc-dwell",
+    );
+}
+
+/// Heidenhain's cycles: each kind of hole a cycle defined once and called at
+/// each hole, in millimetres and inches.
+#[test]
+fn heidenhain_drilling_cycles_are_stable() {
+    for name in ["heidenhain", "heidenhain-inch"] {
+        let mut p = Profile::builtin(name).unwrap().unwrap();
+        p.drill_cycles = true;
+        let units = p.units;
+        let with = |s: ProgramSpec| ProgramSpec { units, ..s };
+        check_against(
+            &p,
+            &Toolpath::new(),
+            &with(drilling(None, Some(0.5))),
+            &format!("{name}-dwell"),
+        );
+        check_against(
+            &p,
+            &Toolpath::new(),
+            &with(drilling(Some(2.0), None)),
+            &format!("{name}-peck"),
+        );
+        check_against(
+            &p,
+            &Toolpath::new(),
+            &with(chip_breaking()),
+            &format!("{name}-chip-break"),
+        );
+        check_against(
+            &p,
+            &Toolpath::new(),
+            &with(tapping(ThreadHand::Left)),
+            &format!("{name}-tap-left"),
+        );
+    }
+}
+
+/// An engraving's arcs in Klartext: round the circle by its centre, `CC`
+/// and `C`, and down the helix as `CP`, by the angle it turns.
+#[test]
+fn heidenhain_writes_arcs_and_helices() {
+    let p = Profile::builtin("heidenhain").unwrap().unwrap();
+    let spec = ProgramSpec {
+        strategy: "engrave".into(),
+        ..spec()
+    };
+    check_against(&p, &engraving(), &spec, "heidenhain-engrave");
+    let (text, _) = render(&lower(&engraving(), &spec).unwrap(), &p, "golden");
+    let blocks = |w: &str| {
+        text.lines()
+            .filter(|l| l.split_whitespace().nth(1) == Some(w))
+            .count()
+    };
+    assert!(blocks("CC") >= 1 && blocks("C") >= 1, "{text}");
+    assert!(blocks("CP") >= 1, "no helix: {text}");
 }
 
 fn masso_with_cycles() -> Profile {

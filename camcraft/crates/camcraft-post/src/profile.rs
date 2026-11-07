@@ -84,6 +84,18 @@ pub enum ToolChangeStyle {
     Pause,
 }
 
+/// The language a program is written in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Dialect {
+    /// G-code, ISO 6983 as Fanuc, LinuxCNC and the rest write it.
+    #[default]
+    Iso,
+    /// Heidenhain's conversational Klartext (`.h`): `L X+10 R0 F500`, arcs
+    /// by `CC` and `C`, drilling by `CYCL DEF` ([`crate::heidenhain`]).
+    Heidenhain,
+}
+
 /// How arc centres are written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -229,6 +241,10 @@ pub struct TravelCheck {
 pub struct Profile {
     /// Display name.
     pub name: String,
+    /// The language its programs are written in: G-code unless it says
+    /// otherwise.
+    #[serde(default)]
+    pub dialect: Dialect,
     /// File extension, without the dot.
     pub extension: String,
     /// How comments are wrapped, as a pair of strings.
@@ -265,6 +281,16 @@ pub struct Profile {
     /// [`LowerError::TapsAsMoves`]: crate::op::LowerError::TapsAsMoves
     #[serde(default)]
     pub drill_cycles: bool,
+    /// Whether the tool the next program changes to is called up to the
+    /// changer's ready place after the change, `T<n>` (Heidenhain's `TOOL
+    /// DEF <n>`), so the next change is quicker. Where no next tool is known,
+    /// nothing is written.
+    #[serde(default)]
+    pub preselect_tool: bool,
+    /// Whether a pause's `P` word is in milliseconds, a whole number, as
+    /// Fanuc reads it in `G4` and `G82`; otherwise in seconds.
+    #[serde(default)]
+    pub dwell_milliseconds: bool,
     /// The slowest and fastest the spindle turns, in rev/min. A tool asked to
     /// turn outside them is warned about. Absent, any speed goes.
     #[serde(default)]
@@ -349,6 +375,17 @@ const BUILTIN: &[(&str, &str)] = &[
     (
         "linuxcnc-inch",
         include_str!("../profiles/linuxcnc-inch.toml"),
+    ),
+    ("fanuc", include_str!("../profiles/fanuc.toml")),
+    ("fanuc-inch", include_str!("../profiles/fanuc-inch.toml")),
+    ("haas", include_str!("../profiles/haas.toml")),
+    ("haas-inch", include_str!("../profiles/haas-inch.toml")),
+    ("mach", include_str!("../profiles/mach.toml")),
+    ("mach-inch", include_str!("../profiles/mach-inch.toml")),
+    ("heidenhain", include_str!("../profiles/heidenhain.toml")),
+    (
+        "heidenhain-inch",
+        include_str!("../profiles/heidenhain-inch.toml"),
     ),
 ];
 
@@ -492,6 +529,27 @@ impl Profile {
                 reason: why,
             });
         }
+        if self.dialect == Dialect::Heidenhain {
+            // Every block is numbered, from 0 by ones, the program's first
+            // line `BEGIN PGM`: the control reads nothing else.
+            if !self.numbering.enabled || self.numbering.start != 0 || self.numbering.increment != 1
+            {
+                return Err(ProfileError::BadValue {
+                    field: "numbering",
+                    reason: "a Heidenhain program numbers every block from 0 by 1: \
+                             enabled = true, start = 0, increment = 1"
+                        .into(),
+                });
+            }
+            if self.comment != (";".to_string(), String::new()) {
+                return Err(ProfileError::BadValue {
+                    field: "comment",
+                    reason: "a Heidenhain comment runs from \";\" to the line's end: \
+                             comment = [\";\", \"\"]"
+                        .into(),
+                });
+            }
+        }
         for (field, lines) in self.blocks() {
             for (i, line) in lines.iter().enumerate() {
                 if let Some(why) = placeholder::problem(line) {
@@ -534,7 +592,14 @@ impl Profile {
         for (field, lines) in self.blocks() {
             for (i, line) in lines.iter().enumerate() {
                 let words = crate::custom::words(line);
-                let g53 = words.iter().any(|(c, v, _)| *c == 'G' && *v == Some(53.0));
+                // G53, or in Klartext M91: a move in machine coordinates.
+                let (letter, code) = match self.dialect {
+                    Dialect::Iso => ('G', 53.0),
+                    Dialect::Heidenhain => ('M', 91.0),
+                };
+                let g53 = words
+                    .iter()
+                    .any(|(c, v, _)| *c == letter && *v == Some(code));
                 if !g53 {
                     continue;
                 }
@@ -705,6 +770,16 @@ impl Profile {
         self.number(v, self.format.feed_decimals.saturating_add(3))
     }
 
+    /// Format a pause of `seconds` for a `P` word: in milliseconds where the
+    /// profile says, else in seconds.
+    pub fn dwell(&self, seconds: f64) -> String {
+        if self.dwell_milliseconds {
+            format!("{:.0}", seconds * 1000.0)
+        } else {
+            self.seconds(seconds)
+        }
+    }
+
     /// Format a value for a feed word.
     pub fn feed(&self, v: f64) -> String {
         self.number(v, self.format.feed_decimals)
@@ -716,7 +791,8 @@ impl Profile {
         self.number(v, 3)
     }
 
-    fn number(&self, v: f64, decimals: u8) -> String {
+    /// Format a value to `decimals` places, as the profile formats numbers.
+    pub fn number(&self, v: f64, decimals: u8) -> String {
         let mut s = format!("{v:.*}", decimals as usize);
         // "-0.000" is the same position as "0.000" and reads like an error.
         if s.starts_with('-') && s[1..].chars().all(|c| c == '0' || c == '.') {
@@ -835,6 +911,70 @@ mod tests {
             ..mm
         };
         assert_eq!(inch, expected);
+    }
+
+    /// Each industrial profile in inches is its own file, and the millimetre
+    /// one in everything but its name, units and how finely it writes a feed.
+    #[test]
+    fn each_inch_profile_is_its_millimetre_one_in_inches() {
+        for (mm, name, feed_decimals) in [
+            ("fanuc", "Fanuc (inch)", 1),
+            ("haas", "Haas (NGC, inch)", 2),
+            ("mach", "Mach3 / Mach4 (inch)", 1),
+            ("heidenhain", "Heidenhain TNC (Klartext, inch)", 1),
+        ] {
+            let p = Profile::builtin(mm).unwrap().unwrap();
+            let inch = Profile::builtin(&format!("{mm}-inch")).unwrap().unwrap();
+            let expected = Profile {
+                name: name.into(),
+                units: ProgramUnits::Inch,
+                format: Format {
+                    feed_decimals,
+                    ..p.format.clone()
+                },
+                ..p
+            };
+            assert_eq!(inch, expected, "{mm}");
+        }
+    }
+
+    /// A Heidenhain profile numbers every block from 0 by 1 and comments to
+    /// the line's end, or the control could not read its programs.
+    #[test]
+    fn a_heidenhain_profile_numbers_from_nought_and_comments_with_a_semicolon() {
+        let text = include_str!("../profiles/heidenhain.toml");
+        assert!(Profile::from_toml(text).is_ok());
+        for (from, to, field) in [
+            ("start     = 0", "start     = 1", "numbering"),
+            ("enabled   = true", "enabled   = false", "numbering"),
+            (
+                "comment   = [\";\", \"\"]",
+                "comment   = [\"(\", \")\"]",
+                "comment",
+            ),
+        ] {
+            assert!(text.contains(from), "{from}");
+            let e = Profile::from_toml(&text.replace(from, to)).unwrap_err();
+            assert!(
+                matches!(e, ProfileError::BadValue { field: f, .. } if f == field),
+                "{to}: {e}"
+            );
+        }
+    }
+
+    /// In Klartext a move in machine coordinates is `M91`'s: one of the
+    /// profile's own outside a machine travel makes it invalid, as G53's does.
+    #[test]
+    fn a_heidenhain_m91_move_is_kept_inside_the_machine_travel() {
+        let text = include_str!("../profiles/heidenhain.toml");
+        let travel = "\n[travel]\ncoordinates = \"machine\"\nz = [-300, 0]\n";
+        assert!(Profile::from_toml(&format!("{text}{travel}")).is_ok());
+        let high = text.replace("L Z+0 R0 FMAX M91", "L Z+50 R0 FMAX M91");
+        let e = Profile::from_toml(&format!("{high}{travel}")).unwrap_err();
+        assert!(
+            e.to_string().contains("outside the machine's travel"),
+            "{e}"
+        );
     }
 
     /// A speed outside the machine's range is a problem; inside it, or with no

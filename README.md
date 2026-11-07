@@ -179,9 +179,22 @@ panels, the drawing and the helper that runs camcraft.
   toolpath (rapids dashed while it is edited), and the material left.
 - **G-code through the save dialog,** one program per operation, or every
   program of a setup into a folder at once, for GRBL,
-  Masso, Centroid CNC12 (Avid) or LinuxCNC, in millimetres or inches, or through a
+  Masso, Centroid CNC12 (Avid), LinuxCNC, Fanuc (0i, 31i), Haas (NGC) or
+  Mach3 and Mach4, or in Klartext for a Heidenhain TNC, each in millimetres
+  or inches, or through a
   machine profile of your own in camcraft's TOML, which a setup carries a
-  copy of. A profile can give the spindle's range (`spindle = [6000, 24000]`),
+  copy of. Fanuc's and Haas's programs are tapes, `%` round them and an `O`
+  number first (every one `O1001`, or `O01001`: number each as it goes into
+  the control), and call up the next program's tool after the change (`T5`
+  after `T3 M6`), where the profile says `preselect_tool = true`. A
+  Heidenhain program (`.h`) is Klartext, not G-code (`dialect =
+  "heidenhain"`): numbered blocks from `BEGIN PGM` to `END PGM`, the stock
+  as `BLK FORM`, `TOOL CALL 3 Z S18000`, `L X+10 Y+5 R0 F1200` and `FMAX`,
+  arcs by their centre (`CC`, then `C .. DR+`), a helix by its angle (`CP
+  IPA+360 IZ-1`), the work offset as a preset row (`CYCL DEF 247`, G54 its
+  first), feeds in tenths of an inch a minute in inches, and holes as
+  `CYCL DEF 200`, `203` and `207` called at each by `M99`. It is read back,
+  as every program is, and the same checks run on it. A profile can give the spindle's range (`spindle = [6000, 24000]`),
   and an operation whose tool turns outside it is warned about. It can give
   its travel, in the program's units, in the machine's own coordinates:
 
@@ -217,8 +230,8 @@ panels, the drawing and the helper that runs camcraft.
   there, like the simulator's failures (Save anyway still writes it).
   A setup picks its work offset from those its post has: `G54` to `G59`,
   and any past them the profile lists (`extended_offsets = ["G59.1",
-  "G59.2", "G59.3"]` on LinuxCNC; a Fanuc-like one could list `"G54.1
-  P1"` on), which its programs select. The lines a profile gives, `header`, `footer`,
+  "G59.2", "G59.3"]` on LinuxCNC, Fanuc's `G54.1 P1` to `P48`, Haas's
+  `G154 P1` to `P99`), which its programs select. The lines a profile gives, `header`, `footer`,
   `safe_retract`, `end_home` and its own tool change, `tool_change_lines`
   (written in place of `T.. M6` or the pause, and naming `@tool@`), take
   placeholders: `@name@` (the program), `@operation@`, `@strategy@`,
@@ -317,6 +330,13 @@ useful there.
   macro it calls does is not known, only warned about. A profile's own
   blocks are written as it gives them, and only the built-in posts' are
   read back in the tests.
+- The Fanuc, Haas, Mach and Heidenhain posts are written from their
+  manuals and from how Fusion's posts write for them, and read back in the
+  tests; none has been run on its machine yet. Klartext's arcs out of the
+  XY plane turn as G-code's `G18` and `G19` do, a helix about X or Y is
+  written as straight moves, and cycle 203 backs off 0.25 mm to break the
+  chip, whatever the operation asks: `G73` says no distance either. There
+  is no Siemens Sinumerik post yet.
 - Travel is checked as a box of the program's moves, in the setup's
   frame: where the rotaries carry the part while they turn, the holder and
   the spindle against the part or the table, and a controller's own

@@ -15,16 +15,16 @@ use glam::{DVec2, DVec3};
 
 use crate::op::{CycleKind, Op};
 use crate::placeholder::{Values, fill};
-use crate::profile::{ArcStyle, Profile, ProgramUnits, ToolChangeStyle};
+use crate::profile::{ArcStyle, Dialect, Profile, ProgramUnits, ToolChangeStyle};
 
 /// Arcs shorter than this across their chord, in millimetres, are written as
 /// straight moves, as Fusion's posts write them (`minimumChordLength`): an arc
 /// whose ends round to the same point reads as a full circle.
-const SHORTEST_CHORD: f64 = 0.25;
+pub(crate) const SHORTEST_CHORD: f64 = 0.25;
 
 /// How far the straight moves written for such an arc may stray from it, in
 /// millimetres: Fusion's posts' `tolerance`.
-const STRAIGHTENED: f64 = 0.002;
+pub(crate) const STRAIGHTENED: f64 = 0.002;
 
 /// What rendering produced besides the text.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -52,6 +52,9 @@ pub fn render_dated(
     program_name: &str,
     date: Option<&str>,
 ) -> (String, RenderReport) {
+    if profile.dialect == Dialect::Heidenhain {
+        return crate::heidenhain::render(ops, profile, program_name, date);
+    }
     let mut w = Writer::new(profile);
     w.values = values(ops, profile, program_name, date);
     let p = w.p;
@@ -71,7 +74,7 @@ pub fn render_dated(
 
 /// What the placeholders of a program of `ops` called `name` stand for: the
 /// values of its operation, as its instructions give them.
-fn values(ops: &[Op], profile: &Profile, name: &str, date: Option<&str>) -> Values {
+pub(crate) fn values(ops: &[Op], profile: &Profile, name: &str, date: Option<&str>) -> Values {
     let mut v = Values {
         name: name.to_string(),
         date: date.map(str::to_string),
@@ -254,6 +257,14 @@ impl<'a> Writer<'a> {
                 self.raw(&s);
                 // Another offset puts the same point at other coordinates.
                 self.at = None;
+            }
+            // G-code has no word for the stock.
+            Op::Stock { .. } => {}
+            Op::PreSelect(tool) => {
+                if self.p.preselect_tool {
+                    let s = format!("T{tool}");
+                    self.raw(&s);
+                }
             }
             Op::SafeRetract => {
                 let p = self.p;
@@ -662,7 +673,7 @@ impl<'a> Writer<'a> {
         }
         if let Some(p) = dwell {
             // Seconds, whatever the units.
-            let _ = write!(block, " P{}", self.p.seconds(p));
+            let _ = write!(block, " P{}", self.p.dwell(p));
         }
         let f = if matches!(kind, CycleKind::Tap | CycleKind::TapLeft) {
             // A tap's feed is its pitch a turn, so the spindle's speed times

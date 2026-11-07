@@ -31,8 +31,8 @@ use camcraft_post::profile::Profile;
 use camcraft_post::render::render_dated;
 use camcraft_session::checks::Level as CheckLevel;
 use camcraft_session::{
-    Model, Models, Ran, custom_gcode, load_profile, parse_job, program_spec, run_setup_planned,
-    travel_check,
+    Model, Models, Ran, custom_gcode, load_profile, next_tools, parse_job, program_spec,
+    run_setup_planned, travel_check,
 };
 use camcraft_sim::stock::{Axis, Block};
 use glam::{DAffine3, DMat4, DVec2, DVec3};
@@ -196,6 +196,7 @@ pub(crate) fn execute(
     // Machining seconds before the operation under way.
     let mut elapsed = 0.0;
     let custom = custom_gcode(setup, &ran.result.operations);
+    let next = next_tools(&ran.result.operations);
     let date = today();
     for (k, op) in ran.result.operations.iter().enumerate() {
         let heights = match (setup.operations.get(k), stock_box) {
@@ -231,6 +232,8 @@ pub(crate) fn execute(
                     spec.before.clone_from(before);
                     spec.after.clone_from(after);
                 }
+                spec.next_tool = next.get(k).copied().flatten();
+                spec.stock = stock_box.map(|b| (b.min, b.max));
                 lower_counted(&op.path, &spec)
             });
             match posted {

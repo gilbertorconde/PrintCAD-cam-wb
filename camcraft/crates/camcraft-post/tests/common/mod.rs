@@ -84,6 +84,8 @@ pub fn spec() -> ProgramSpec {
         taps: false,
         tilt: None,
         rotary: Vec::new(),
+        next_tool: None,
+        stock: None,
         before: Vec::new(),
         after: Vec::new(),
     }

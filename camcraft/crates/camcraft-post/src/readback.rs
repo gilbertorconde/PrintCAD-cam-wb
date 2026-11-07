@@ -4,7 +4,8 @@
 //! The renderer's tests say what it means to write; this says what the text does.
 //! [`read`] interprets the words a program holds — units, distance mode, planes,
 //! arcs by centre or by radius, helices, drilling cycles, `G28` and `G53`,
-//! the work offsets `G54` to `G59` and `G59.1` to `G59.3` (60 to 62),
+//! the work offsets `G54` to `G59`, `G59.1` to `G59.3` (60 to 62), and
+//! Fanuc's `G54.1 P1` and Haas's `G154 P1` on (60 on),
 //! length offsets, tool changes, rotaries positioned at rapid (`G0 A.. B..`,
 //! alone in their block) — into steps in millimetres, and refuses
 //! anything it does not understand rather than step over it. [`check`] replays
@@ -41,13 +42,13 @@
 use std::f64::consts::TAU;
 use std::fmt;
 
-use camcraft_core::job::{Coolant, SpindleDirection};
+use camcraft_core::job::{Coolant, LAST_WCS, SpindleDirection};
 use camcraft_core::path::toolpath::{Move, MoveKind, Toolpath};
 use glam::{DVec2, DVec3, dvec3};
 
 use crate::custom::{Concern, concern};
 use crate::op::{DrillCycles, ProgramSpec};
-use crate::profile::{Profile, ProgramUnits};
+use crate::profile::{Dialect, Profile, ProgramUnits};
 use crate::render::{custom_end, custom_mark};
 
 /// Millimetres in an inch.
@@ -74,14 +75,14 @@ pub struct Problem {
 }
 
 impl Problem {
-    fn at(line: usize, what: impl Into<String>) -> Self {
+    pub(crate) fn at(line: usize, what: impl Into<String>) -> Self {
         Self {
             line: Some(line),
             what: what.into(),
         }
     }
 
-    fn whole(what: impl Into<String>) -> Self {
+    pub(crate) fn whole(what: impl Into<String>) -> Self {
         Self {
             line: None,
             what: what.into(),
@@ -176,12 +177,12 @@ pub struct Turn {
 }
 
 /// `v` less its part along the unit `n`.
-fn flat(v: DVec3, n: DVec3) -> DVec3 {
+pub(crate) fn flat(v: DVec3, n: DVec3) -> DVec3 {
     v - n * v.dot(n)
 }
 
 /// `v` turned `angle` about the unit `n`; `v` square to it.
-fn turned(v: DVec3, n: DVec3, angle: f64) -> DVec3 {
+pub(crate) fn turned(v: DVec3, n: DVec3, angle: f64) -> DVec3 {
     let (s, c) = angle.sin_cos();
     v * c + n.cross(v) * s
 }
@@ -210,7 +211,7 @@ impl Turn {
 }
 
 /// Every axis of `p`, where every one is known.
-fn known(p: &Position) -> Option<DVec3> {
+pub(crate) fn known(p: &Position) -> Option<DVec3> {
     match *p {
         [Some(x), Some(y), Some(z)] => Some(dvec3(x, y, z)),
         _ => None,
@@ -262,7 +263,20 @@ pub fn read(text: &str) -> Result<Vec<Step>, Problem> {
 /// `blocks` lines (from one): those are only checked for what custom G-code
 /// may not do ([`concern`]), and are [`Action::Custom`] once they end.
 pub fn read_around(text: &str, blocks: &[(usize, usize)]) -> Result<Vec<Step>, Problem> {
-    let mut r = Reader::default();
+    read_dwelling(text, blocks, 1.0)
+}
+
+/// [`read_around`], a pause's `P` word `dwell` seconds a unit: a thousandth
+/// for a controller that reads it in milliseconds, as Fanuc does.
+pub fn read_dwelling(
+    text: &str,
+    blocks: &[(usize, usize)],
+    dwell: f64,
+) -> Result<Vec<Step>, Problem> {
+    let mut r = Reader {
+        dwell,
+        ..Reader::default()
+    };
     for (i, line) in text.lines().enumerate() {
         r.line = i + 1;
         if blocks.iter().any(|(b, e)| r.line > *b && r.line < *e) {
@@ -380,6 +394,8 @@ struct Block {
     s: Option<f64>,
     t: Option<f64>,
     h: Option<f64>,
+    /// Haas's smoothing tolerance, with `G187`.
+    e: Option<f64>,
 }
 
 impl Block {
@@ -387,12 +403,20 @@ impl Block {
         let mut b = Self::default();
         for &(letter, v) in words {
             let slot = match letter {
-                'N' => continue,
+                // A line's number, and a program's (`O1001`, Fanuc's).
+                'N' | 'O' => continue,
+                // Arc centres measured from the arc's start, as they are
+                // read here: Mach's way of saying so.
+                'G' if (v - 91.1).abs() < 1e-9 => continue,
                 'G' => {
                     // The standard's three work offsets past G59, G59.1 to
                     // G59.3, as 591 to 593.
+                    // Fanuc's G54.1 (with a P), as 541.
                     let tenths = (v * 10.0).round();
-                    if (591.0..=593.0).contains(&tenths) && (v * 10.0 - tenths).abs() < 1e-9 {
+                    let exact = (v * 10.0 - tenths).abs() < 1e-9;
+                    if exact
+                        && ((591.0..=593.0).contains(&tenths) || (540.5..541.5).contains(&tenths))
+                    {
                         b.g.push(whole('G', tenths)?);
                     } else {
                         b.g.push(whole('G', v)?);
@@ -419,6 +443,7 @@ impl Block {
                 'S' => &mut b.s,
                 'T' => &mut b.t,
                 'H' => &mut b.h,
+                'E' => &mut b.e,
                 other => return Err(format!("{other} words are not understood")),
             };
             if slot.is_some() {
@@ -481,6 +506,8 @@ struct Reader {
     cycle: Cycle,
     /// Which way the spindle turns, if it does.
     spin: Option<SpindleDirection>,
+    /// Seconds in a unit of a pause's `P` word.
+    dwell: f64,
 }
 
 impl Default for Reader {
@@ -500,6 +527,7 @@ impl Default for Reader {
             to_initial: true,
             cycle: Cycle::default(),
             spin: None,
+            dwell: 1.0,
         }
     }
 }
@@ -546,9 +574,15 @@ impl Reader {
                 98 => self.to_initial = true,
                 99 => self.to_initial = false,
                 4 | 28 | 40 | 43 | 49 | 53 | 94 => {}
-                54..=59 | 591..=593 => {}
+                // Haas's look-ahead limit and smoothing: how closely the
+                // path is followed, not where it goes.
+                103 | 187 => {}
+                54..=59 | 591..=593 | 541 | 154 => {}
                 other => return Err(format!("G{other} is not understood")),
             }
+        }
+        if b.e.is_some() && !b.has_g(187) {
+            return Err("an E word without G187".into());
         }
         let cycling = self.motion.is_some_and(|g| CYCLES.contains(&g));
         if !cycling {
@@ -599,7 +633,7 @@ impl Reader {
         }
         if b.has_g(4) {
             let p = b.p.ok_or("G4 with no time")?;
-            self.push(Action::Dwell(p));
+            self.push(Action::Dwell(p * self.dwell));
         }
         if b.has_g(49) {
             self.push(Action::LengthOffset(None));
@@ -613,10 +647,26 @@ impl Reader {
         }
         if let Some(&g) =
             b.g.iter()
-                .find(|g| (54..=59).contains(*g) || (591..=593).contains(*g))
+                .find(|g| matches!(g, 54..=59 | 591..=593 | 541 | 154))
         {
-            // G59.1 is the seventh, 60, as a setup numbers them.
-            let g = if g > 59 { g - 591 + 60 } else { g };
+            // G59.1 is the seventh, 60, as a setup numbers them; so are
+            // Fanuc's G54.1 P1 and Haas's G154 P1, the one each has first.
+            let g = match g {
+                591..=593 => g - 591 + 60,
+                541 | 154 => {
+                    let p = whole(
+                        'P',
+                        b.p.ok_or_else(|| {
+                            format!("G{} with no P", if g == 541 { "54.1" } else { "154" })
+                        })?,
+                    )?;
+                    if !(1..=u32::from(LAST_WCS - 59)).contains(&p) {
+                        return Err(format!("work offset P{p} is out of range"));
+                    }
+                    59 + p
+                }
+                g => g,
+            };
             let n = u8::try_from(g).map_err(|_| "a work offset out of range")?;
             if self.wcs != Some(n) {
                 self.at = [None; 3];
@@ -855,7 +905,7 @@ impl Reader {
             c.q = Some(q * scale);
         }
         if let Some(p) = b.p {
-            c.p = Some(p);
+            c.p = Some(p * self.dwell);
         }
         let bottom = c.z.ok_or("a drilling cycle with no depth")?;
         let r = c.r.ok_or("a drilling cycle with no R")?;
@@ -966,9 +1016,14 @@ impl Tolerance {
             ProgramUnits::Inch => (profile.format.inch_axis_decimals, MM_PER_INCH),
         };
         let half = |places: u8| 0.5 * 10f64.powi(-i32::from(places)) * scale;
+        // Klartext's inch feeds are in tenths of an inch a minute.
+        let feed_scale = match (profile.dialect, units) {
+            (Dialect::Heidenhain, ProgramUnits::Inch) => 0.1,
+            _ => 1.0,
+        };
         Self {
             at: 6.0 * half(places) + 1.0e-9,
-            feed: half(profile.format.feed_decimals) * 1.0001 + 1.0e-9,
+            feed: half(profile.format.feed_decimals) * feed_scale * 1.0001 + 1.0e-9,
             angle: 0.5 * 10f64.powi(-i32::from(profile.format.axis_decimals)) * 1.0001 + 1.0e-9,
         }
     }
@@ -983,7 +1038,10 @@ pub fn check(
     spec: &ProgramSpec,
     profile: &Profile,
 ) -> Result<(), Problem> {
-    let blocks = custom_blocks(text, profile);
+    let blocks = match profile.dialect {
+        Dialect::Iso => custom_blocks(text, profile),
+        Dialect::Heidenhain => crate::heidenhain::custom_blocks(text, profile),
+    };
     let wanted = spec.before.len() + spec.after.len();
     if blocks.len() != wanted {
         return Err(Problem::whole(format!(
@@ -991,8 +1049,22 @@ pub fn check(
             blocks.len()
         )));
     }
-    let steps = read_around(text, &blocks)?;
+    let steps = match profile.dialect {
+        Dialect::Iso => read_dwelling(
+            text,
+            &blocks,
+            if profile.dwell_milliseconds {
+                0.001
+            } else {
+                1.0
+            },
+        )?,
+        Dialect::Heidenhain => crate::heidenhain::read_around(text, &blocks)?,
+    };
     let mut c = Checker::new(&steps, spec, Tolerance::of(profile, spec.units));
+    c.wcs_word = profile
+        .wcs_word(spec.wcs)
+        .unwrap_or_else(|| offset_word(spec.wcs));
     if let Some(d) = &spec.drill {
         c.holes(d)?;
     } else if let Some(first) = path.moves().first() {
@@ -1024,6 +1096,8 @@ enum Spindle {
 
 struct Checker<'a> {
     steps: &'a [Step],
+    /// How the profile writes the program's work offset, to say so.
+    wcs_word: String,
     next: usize,
     spec: &'a ProgramSpec,
     tol: Tolerance,
@@ -1065,6 +1139,7 @@ impl<'a> Checker<'a> {
             dwells: Vec::new(),
             ended: false,
             rotary: Vec::new(),
+            wcs_word: offset_word(spec.wcs),
         }
     }
 
@@ -1083,8 +1158,7 @@ impl<'a> Checker<'a> {
                             step.line,
                             format!(
                                 "moves before tool {} is in and {} is selected",
-                                self.spec.tool,
-                                offset_word(self.spec.wcs)
+                                self.spec.tool, self.wcs_word
                             ),
                         ));
                     }
@@ -1398,7 +1472,9 @@ impl<'a> Checker<'a> {
                 Some(s) if reached && begun && swept > s - 0.5 => break,
                 _ => {}
             }
-            let limit = if sweep.is_some() { 64 } else { 1 };
+            // An arc may be written as straight moves along it, as a helix
+            // Klartext has no block for is: a long one's are many.
+            let limit = if sweep.is_some() { 4096 } else { 1 };
             if group.len() >= limit {
                 let line = group.last().map_or(0, |(l, _)| *l);
                 return Err(Problem::at(

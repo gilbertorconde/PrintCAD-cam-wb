@@ -227,6 +227,32 @@ holder's segments, and `OperationResult::tool_length` carries it. In
 `program_spec` copies the profile's extended offsets. A golden program on
 `G59.2` (`linuxcnc-g59-2.nc`).
 
+And posts for industrial controllers. In `camcraft-post`, profiles for
+Fanuc (`fanuc.toml`, `fanuc-inch.toml`), Haas's NGC (`haas.toml`,
+`haas-inch.toml`), Mach3 and Mach4 (`mach.toml`, `mach-inch.toml`) and
+Heidenhain's TNC (`heidenhain.toml`, `heidenhain-inch.toml`), each with
+golden programs. A profile has a `dialect`, `profile::Dialect`: `iso`,
+G-code, unless it says `heidenhain`, which `render_dated` hands to the new
+`heidenhain` module to write Klartext, and `readback::check` to read it back
+(`heidenhain::read_around`, `custom_blocks` and `concern`, for custom lines)
+into the same `Step`s G-code is read into, so the same checks run. Its
+programs are numbered from 0 by 1 with `;` comments, which `validate`
+insists on; its `M91` moves are kept inside a machine travel as `G53`'s
+are. `preselect_tool` calls up the next program's tool after the
+change, `Op::PreSelect` (`T<n>`, `TOOL DEF <n>`), from
+`ProgramSpec::next_tool`; `ProgramSpec::stock` is lowered as `Op::Stock`,
+which only Klartext writes (`BLK FORM`); G-code writes neither unless asked.
+`dwell_milliseconds` writes a pause's `P` in milliseconds, as Fanuc reads
+it in `G82` and `G4`, and `readback::read_dwelling` reads it so. `readback`
+also reads an `O` program number, Mach's `G91.1` (the arc centres it
+reads), Haas's `G103` and `G187` (with its `E`), the work offsets Fanuc's
+and Haas's profiles list past G59 (`G54.1 P1` to `P48`, `G154 P1` to
+`P99`, a setup's 60 on), and takes up to 4096 moves
+for an arc written as straight ones, as Klartext writes a helix about X or
+Y. `Profile::number` is public, for the dialect's own numbers. In
+`camcraft-session`, `next_tools` and `stock_box` give each program its
+next tool and the stock, which `plan_posting` and the helper pass on.
+
 And one test: ogeom is 0.11.1 here, which printCAD's shapes need, and it
 meshes `round_edge_loose_fit.step`'s seam that 0.11.0 drew off the torus, so
 `a_loose_fit_is_refused_for_ogeoms_seam` became
