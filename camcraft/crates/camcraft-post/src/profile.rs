@@ -321,6 +321,11 @@ pub struct Profile {
     /// Absent, with the other cycles, as `G84` and `G74`; else not at all.
     #[serde(default)]
     pub tap: Option<TapStyle>,
+    /// Whether a program of several operations stops between them where the
+    /// operator has asked it to (`M1`, optional stop), the spindle and the
+    /// coolant stopped and the tool clear first.
+    #[serde(default)]
+    pub optional_stop: bool,
     /// The slowest and fastest the spindle turns, in rev/min. A tool asked to
     /// turn outside them is warned about. Absent, any speed goes.
     #[serde(default)]

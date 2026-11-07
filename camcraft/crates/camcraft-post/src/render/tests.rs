@@ -677,3 +677,55 @@ fn custom_gcode_goes_where_it_stands() {
         "{g}"
     );
 }
+
+/// In a program of several operations, each operation's lines are filled
+/// with its own values: its tool change with its tool, its custom G-code
+/// with its name; the header with the first's and the footer with the
+/// last's. `@number@` is the program's number.
+#[test]
+fn each_operation_fills_its_own_placeholders() {
+    use crate::op::CustomGcode;
+    use crate::setup::{Joining, Section, lower_setup};
+    let mut p = masso();
+    p.header = vec!["O@number@ (@name@ @operation@)".into()];
+    p.tool_change_lines = vec![
+        "(T@tool@ for @operation@ at @rpm@)".into(),
+        "T@tool@ M6".into(),
+    ];
+    p.footer = vec!["(@operation@ @coolant@)".into(), "M30".into()];
+    let rough = ProgramSpec {
+        op_name: "rough".into(),
+        tool: 1,
+        coolant: Coolant::Flood,
+        ..ProgramSpec::default()
+    };
+    let finish = ProgramSpec {
+        op_name: "finish".into(),
+        tool: 2,
+        rpm: 9000,
+        before: vec![CustomGcode::new("Look", "(look before @operation@)")],
+        ..rough.clone()
+    };
+    let last = ProgramSpec {
+        op_name: "last".into(),
+        rpm: 12000,
+        before: Vec::new(),
+        ..finish.clone()
+    };
+    let path = path();
+    let sections = [&rough, &finish, &last].map(|spec| Section { path: &path, spec });
+    let (ops, _) = lower_setup(&sections, Joining::of(&p)).unwrap();
+    let title = Title {
+        name: "top",
+        number: 1234,
+        date: None,
+    };
+    let g = render_program(&ops, &p, &title).0;
+    assert!(g.starts_with("O1234 (top rough)\n"), "{g}");
+    assert!(g.contains("(T1 for rough at 18000)\nT1 M6"), "{g}");
+    assert!(g.contains("(look before finish)"), "{g}");
+    assert!(g.contains("(T2 for finish at 9000)\nT2 M6"), "{g}");
+    assert_eq!(g.matches(" M6").count(), 2, "{g}");
+    // The last keeps tool 2 turning, and the flood on.
+    assert!(g.ends_with("(last flood)\nM30\n"), "{g}");
+}
