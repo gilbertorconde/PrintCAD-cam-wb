@@ -1537,7 +1537,8 @@ impl Bench for Cam {
                             ParamKind::List,
                             false,
                             "a list of sketch ids: their closed loops, text among them, are \
-                             what it follows or cuts within (a 2D cut's outline then)",
+                             what it follows or cuts within (a 2D cut's outline then, and a \
+                             3D cut's boundary unless one is given)",
                         ),
                         param(
                             "faces",
@@ -2240,13 +2241,7 @@ impl Bench for Cam {
                     if let Some(bad) = ids.iter().find(|s| host::profile(s).is_none()) {
                         return Err(format!("sketches: '{bad}' is no sketch that closes a loop"));
                     }
-                    data.sketches = ids;
-                    // A 2D cut given sketches cuts what they enclose, as
-                    // ticking them in its panel with the picks as its
-                    // outline does.
-                    if data.strategy().uses().outline && !data.sketches.is_empty() {
-                        data.operation.outline = camcraft_core::job::Outline::Selection;
-                    }
+                    data.take_sketches(ids);
                 }
                 // `boundary = "selection"`, or `{kind = "selection", containment =
                 // "inside", margin = 1}`.

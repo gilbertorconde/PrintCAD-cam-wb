@@ -210,7 +210,9 @@ panels, the drawing and the helper that runs camcraft.
   wide; and its holes are cut nearest first, by X then Y back and forth,
   or as picked. It can take
   the document's sketches too, ticked in its panel: what their closed loops
-  enclose, or the loops themselves for an engraving. A sketch's text is its
+  enclose, or the loops themselves for an engraving. Given in a script,
+  they are a 2D cut's outline and a 3D cut's boundary, so an adaptive
+  clearing given one pocket's sketch clears that pocket alone. A sketch's text is its
   letters' outlines. Its open curves close nothing, and a package cannot
   read them, so only picked edges give an engraving an open curve. A setup's
   work zero can be a corner or a round edge's centre picked on the part,
