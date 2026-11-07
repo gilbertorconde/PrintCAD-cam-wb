@@ -162,6 +162,10 @@ pub enum StrategySpec {
         /// leave down. Fusion's flat area detection.
         #[serde(default = "yes", skip_serializing_if = "is_yes")]
         flat_areas: bool,
+        /// Clear only what the operations before it left, not the stock's
+        /// blocks whole. Fusion's rest machining; off unless asked.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rest: Option<Rest>,
     },
     /// A 2D contour: the tool run round the boundary, beside it or on it, level
     /// by level down to its floor. Fusion's 2D Contour.
@@ -578,6 +582,29 @@ pub enum FaceDirection {
     Climb,
     /// Every pass conventional.
     Conventional,
+}
+
+/// Rest machining: what an operation clears is what is left, not the
+/// stock it started from. Fusion's Rest Machining group.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Rest {
+    /// Where what is left is read from.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub source: RestSource,
+    /// Rest material thinner than this, in millimetres, is taken as cleared:
+    /// Fusion's adjustment. Zero takes all of it.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub adjustment: f64,
+}
+
+/// Where rest machining reads what is left from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RestSource {
+    /// The material as the operations before it in the setup left it.
+    #[default]
+    FromPreviousOperations,
 }
 
 /// Which way a strategy's passes cut, where it has the choice: scallop, contour,

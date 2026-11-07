@@ -1163,9 +1163,19 @@ impl Bench for Cam {
                              hand: right|left; depth: engrave's and slot's, mm; chamfer_width, \
                              tip_offset: a chamfer's, mm; bore_pitch: a bore's helix, mm a \
                              turn; boss_width: circular's, mm; thread_pitch, thread_passes: \
-                             a milled thread's; outer_radius, peck, chip_break, dwell, pitch, \
+                             a milled thread's; rest: adaptive's rest machining, a boolean, \
+                             from the operations before it; rest_adjustment: mm, rest thinner \
+                             than it left; outer_radius, peck, chip_break, dwell, pitch, \
                              max_depth, finishing_stepover, finishing_feed, thread_diameter: \
                              {value, given}}",
+                        ),
+                        param(
+                            "boundary",
+                            ParamKind::Any,
+                            false,
+                            "what a 3D cut is kept to: stock|bounding-box|silhouette|selection \
+                             (the picks and sketches), or {kind, containment: \
+                             center|inside|outside, margin: mm, none unless given}",
                         ),
                         param(
                             "transform",
@@ -1274,8 +1284,9 @@ impl Bench for Cam {
                         "A transform (its Pattern group) repeats the operation's toolpath before it is linked: in \
                          rows, then each round a centre, then all mirrored with the originals \
                          kept; a mirrored copy's rings are turned round so it still climbs. \
-                         Every copy is simulated and checked, and one outside the stock is a \
-                         warning."
+                         Adaptive and pocket clearing are worked out again for each copy, \
+                         against the material where it is. Every copy is simulated and \
+                         checked, and one outside the stock is a warning."
                             .into(),
                         "A library tool's first preset sets its feeds and speeds.".into(),
                         "Custom G-code (strategy custom-gcode) has no tool and no toolpath: its \
@@ -1771,6 +1782,27 @@ impl Bench for Cam {
                     if data.strategy().uses().outline && !data.sketches.is_empty() {
                         data.operation.outline = camcraft_core::job::Outline::Selection;
                     }
+                }
+                // `boundary = "selection"`, or `{kind = "selection", containment =
+                // "inside", margin = 1}`.
+                if let Some(given) = args.get("boundary") {
+                    let given = match given {
+                        Value::String(kind) => json!({ "kind": kind }),
+                        other => other.clone(),
+                    };
+                    let mut given = given
+                        .as_object()
+                        .cloned()
+                        .ok_or("boundary: a kind, or a table of kind, containment and margin")?;
+                    // None given is none: not the channel a new operation
+                    // gets round the part, which would shrink any other
+                    // boundary by the tool's width.
+                    data.margin = match given.remove("margin") {
+                        Some(m) => m.as_f64().ok_or("boundary: margin, a number")?,
+                        None => 0.0,
+                    };
+                    data.operation.boundary = over(&data.operation.boundary, &Value::Object(given))
+                        .map_err(|e| format!("boundary: {e}"))?;
                 }
                 if let StrategySpec::Engrave {
                     direction, reverse, ..

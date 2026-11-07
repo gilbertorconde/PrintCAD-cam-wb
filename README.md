@@ -112,9 +112,24 @@ panels, the drawing and the helper that runs camcraft.
   the material, simulated and checked, and drawn. A mirrored copy would
   cut conventional where the original climbs, so each of its rings, and
   each pass all at one level, is run the other way round; what cannot be
-  (a ramp, an adaptive pass, steered by the material ahead of it) is said.
-  A copy that goes further outside the stock than the original is a
-  warning.
+  (a ramp) is said. Adaptive clearing and pocket clearing, which the
+  material steers, are worked out again for each copy, against the
+  material where it is, as the copies before it left it, and with rest
+  machining (pocket clearing always) as the operations before it left it
+  too: a copy where an earlier cut took the material cuts no air there, and
+  one where more stands than at the original goes down a helix rather than
+  taking the tool's whole width; a mirrored one is worked out mirrored, so
+  it climbs too. Without rest machining an adaptive clearing's copies clear
+  the stock's blocks less what each other cut, so its original is what it
+  is alone. Copies apart are worked out at once, on every core. A
+  copy that goes further outside the stock than the original is a
+  warning, and copies that find nothing to clear are said.
+- **Rest machining,** as Fusion's, on adaptive clearing: off unless
+  ticked; on, it clears only what the operations before it in the setup
+  left (from previous operations), say the corners a bigger tool could not
+  reach, not the whole area again. Its adjustment leaves rest thinner than
+  it alone, so it does not go round a sliver for nothing. Pocket clearing
+  always clears only what is left.
 - **Picking in the view,** as camcraft's: a pick row in the panel arms it,
   and while it is armed, hovering shows what a click takes. An operation
   takes faces, and edges by the loop they go round at their height (an edge
@@ -336,6 +351,10 @@ local tilted = cam.setup{bodies = {"<body id>"}, tilt = {x = 30, y = 0}}
                                         -- or tool_axis = {x = 0, y = -0.5, z = 0.866}
 local rough = cam.operation{setup = setup.feature, strategy = "adaptive", tool = "1/4 upcut",
                            heights = {bottom_from = "model-top", bottom = -6}}
+local corners = cam.operation{setup = setup.feature, strategy = "adaptive", tool = "1/8 upcut",
+                              sketches = {"<sketch id>"},
+                              boundary = {kind = "selection", containment = "inside"},
+                              passes = {rest = true, rest_adjustment = 0.2}}
 local name = cam.operation{setup = setup.feature, strategy = "engrave", tool = "60° V-bit",
                            sketches = {"<sketch id>"}, passes = {depth = 0.4}}
 local keyway = cam.operation{setup = setup.feature, strategy = "slot", tool = "1/4 upcut",

@@ -149,119 +149,208 @@ pub fn pocket_clearing(
     cutter: &Cutter,
     params: &ClearingParams,
 ) -> Result<(Toolpath, ClearingReport), StrategyError> {
-    check("stepdown", params.stepdown)?;
-    check("stepover", params.stepover)?;
-    check("feed", params.feed)?;
-    check_levels(params.top, params.bottom)?;
-    let area = match limit {
-        Some(l) => sweep.intersection(l)?,
-        None => sweep.clone(),
-    };
+    ClearingLevels::new(reach, sweep, limit, stock.pitch(), params)?.clear(
+        &|z| contour_above(stock, z),
+        cutter,
+        params,
+    )
+}
 
-    // Material counts for a ring wherever the cutter would touch it: within the
-    // real tool's radius, plus a cell's diagonal because the outline is only
-    // known to the grid.
-    let slop = stock.pitch() * std::f64::consts::SQRT_2;
-    let touch = reach.cutter_radius() + slop;
-    // The stock to leave beside: what an operation before this one that left it
-    // left standing on the walls, which no ring here may cut.
-    let leave = reach.max_radius() - reach.cutter_radius();
-    // Rings off the walls are drawn to half the chordal tolerance: their arcs err
-    // away from the walls, so never toward the part, and a finer arc on a
-    // clearing ring buys nothing but points. The ring on the walls is their
-    // boundary itself, drawn as finely as the forbidden region was.
-    let arc = reach.tolerance() * 0.5;
+/// Where the material stands at or above a height, seen from above: traced
+/// from the stock's grid.
+pub type Standing<'a> = dyn Fn(f64) -> Region + Sync + 'a;
 
-    let levels = levels(params);
+/// Pocket clearing worked out as far as the model takes it: its levels, and
+/// where the tool may be and what is kept on the part at each. The material
+/// is given after ([`ClearingLevels::clear`]), so one model's levels clear
+/// any material: a pattern's copies each the material where it is.
+#[derive(Debug, Clone)]
+pub struct ClearingLevels {
+    /// Where the tool's centre may go at all.
+    sweep: Region,
+    /// The levels in the order they are cut, each with the level below a
+    /// flat one.
+    levels: Vec<(f64, Option<f64>)>,
+    /// Each level's reachable region, and what is kept on the part there.
+    regions: Vec<(f64, Region, Option<Region>)>,
+    /// A cell's diagonal of the stock's grid.
+    slop: f64,
+    /// How near a ring material counts.
+    touch: f64,
+    /// Arc tolerance for the rings.
+    arc: f64,
+}
 
-    // Where the tool may not be at every level, from the top: the shadows are
-    // cheapest asked for in descending order. What is left of the area, and what
-    // is kept on the part, each level's own, in parallel.
-    let mut all: Vec<f64> = levels.iter().map(|&(z, _)| z).collect();
-    all.sort_by(|a, b| b.total_cmp(a));
-    let mut forbidden = Vec::with_capacity(all.len());
-    for &z in &all {
-        forbidden.push((z, reach.forbidden(z)?));
-    }
-    let radius = reach.cutter_radius();
-    let regions: Vec<(f64, Region, Option<Region>)> = forbidden
-        .into_par_iter()
-        .map(|(z, forbidden)| {
-            let reachable = area.difference(&forbidden)?;
-            // The part and the stock left on it: where the tool's centre may not
-            // go, less the real tool's reach, and a cell for the grid.
-            let kept = (leave > 0.0).then(|| forbidden.offset(-(radius - slop), arc));
-            Ok((z, reachable, kept))
-        })
-        .collect::<Result<_, StrategyError>>()?;
-    let regions_at = |z: f64| {
-        regions
-            .iter()
-            .find(|(at, ..)| (at - z).abs() < SAME_LEVEL)
-            .map(|(_, reachable, kept)| (reachable, kept.as_ref()))
-    };
-
-    // Each level's rings depend on nothing but its own regions, so the levels are
-    // worked in parallel and emitted in order: the result is the same on any number
-    // of cores.
-    let worked: Vec<Result<Option<Level>, StrategyError>> = levels
-        .par_iter()
-        .map(|&(z, below)| {
-            let Some((reachable, kept)) = regions_at(z) else {
-                return Ok(None);
-            };
-            // Where there is material to remove: stock still standing above this
-            // level. Standing *on* it is nothing to cut; a cut to `z` leaves the
-            // stock at `z`, give or take the grid's f32 storage. What is kept on
-            // the part is not.
-            let mut material = contour_above(stock, z + MATERIAL_THICKNESS);
-            // A flat level is cut after the level below it, over what that left:
-            // the tool there went everywhere it could, as wide as it is this far
-            // above its tip.
-            if let Some(b) = below
-                && let Some((cleared, _)) = regions_at(b)
-            {
-                let wide = cutter.radius_at(z - b);
-                if wide > 0.0 {
-                    material = material.difference(&cleared.offset(wide, arc))?;
-                }
-            }
-            let material = match kept {
-                // Less what is kept, the slivers the two outlines leave between
-                // them taken back off with a cell's width, and given back after.
-                Some(kept) => material
-                    .difference(kept)?
-                    .offset(-slop, arc)
-                    .grow_covering(touch + slop),
-                None => material.grow_covering(touch),
-            };
-            if reachable.is_empty() || material.is_empty() {
-                return Ok(None);
-            }
-            clear_level(sweep, reachable, &material, z, arc, params).map(Some)
-        })
-        .collect();
-
-    let mut report = ClearingReport::default();
-    let mut cut = Cut {
-        emit: Emit::new(params.feed),
-    };
-    for (level, &(_, below)) in worked.into_iter().zip(&levels) {
-        let Some(level) = level? else {
-            report.empty_levels += 1;
-            continue;
+impl ClearingLevels {
+    /// The levels `params` asks for, and where `reach` lets the tool be at
+    /// each, within `sweep` and `limit`, for material traced from a grid
+    /// `pitch` apart.
+    pub fn new(
+        reach: &mut LevelReach<'_>,
+        sweep: &Region,
+        limit: Option<&Region>,
+        pitch: f64,
+        params: &ClearingParams,
+    ) -> Result<Self, StrategyError> {
+        check("stepdown", params.stepdown)?;
+        check("stepover", params.stepover)?;
+        check("feed", params.feed)?;
+        check_levels(params.top, params.bottom)?;
+        let area = match limit {
+            Some(l) => sweep.intersection(l)?,
+            None => sweep.clone(),
         };
-        report.rings_too_short += level.too_short;
-        if level.pieces.is_empty() {
-            report.empty_levels += 1;
-            continue;
+
+        // Material counts for a ring wherever the cutter would touch it: within the
+        // real tool's radius, plus a cell's diagonal because the outline is only
+        // known to the grid.
+        let slop = pitch * std::f64::consts::SQRT_2;
+        let touch = reach.cutter_radius() + slop;
+        // The stock to leave beside: what an operation before this one that left it
+        // left standing on the walls, which no ring here may cut.
+        let leave = reach.max_radius() - reach.cutter_radius();
+        // Rings off the walls are drawn to half the chordal tolerance: their arcs err
+        // away from the walls, so never toward the part, and a finer arc on a
+        // clearing ring buys nothing but points. The ring on the walls is their
+        // boundary itself, drawn as finely as the forbidden region was.
+        let arc = reach.tolerance() * 0.5;
+
+        let levels = levels(params);
+
+        // Where the tool may not be at every level, from the top: the shadows are
+        // cheapest asked for in descending order. What is left of the area, and what
+        // is kept on the part, each level's own, in parallel.
+        let mut all: Vec<f64> = levels.iter().map(|&(z, _)| z).collect();
+        all.sort_by(|a, b| b.total_cmp(a));
+        let mut forbidden = Vec::with_capacity(all.len());
+        for &z in &all {
+            forbidden.push((z, reach.forbidden(z)?));
         }
-        report.levels += 1;
-        report.flat_levels += u64::from(below.is_some());
-        cut.pieces(level.pieces)?;
+        let radius = reach.cutter_radius();
+        let regions: Vec<(f64, Region, Option<Region>)> = forbidden
+            .into_par_iter()
+            .map(|(z, forbidden)| {
+                let reachable = area.difference(&forbidden)?;
+                // The part and the stock left on it: where the tool's centre may not
+                // go, less the real tool's reach, and a cell for the grid.
+                let kept = (leave > 0.0).then(|| forbidden.offset(-(radius - slop), arc));
+                Ok((z, reachable, kept))
+            })
+            .collect::<Result<_, StrategyError>>()?;
+        Ok(Self {
+            sweep: sweep.clone(),
+            levels,
+            regions,
+            slop,
+            touch,
+            arc,
+        })
     }
-    report.rings = cut.emit.passes;
-    Ok((cut.emit.path, report))
+
+    /// Every height the material is asked for at: each level's, a sliver
+    /// above it.
+    pub fn heights(&self) -> Vec<f64> {
+        self.levels
+            .iter()
+            .map(|&(z, _)| z + MATERIAL_THICKNESS)
+            .collect()
+    }
+
+    /// Clear the material `standing` gives at these levels: `params` as the
+    /// levels were found with, but for which way the rings cut. `cutter` is
+    /// the real tool, whose width at each height says how much the level below
+    /// a flat one cleared.
+    pub fn clear(
+        &self,
+        standing: &Standing<'_>,
+        cutter: &Cutter,
+        params: &ClearingParams,
+    ) -> Result<(Toolpath, ClearingReport), StrategyError> {
+        let (slop, touch, arc) = (self.slop, self.touch, self.arc);
+        let regions_at = |z: f64| {
+            self.regions
+                .iter()
+                .find(|(at, ..)| (at - z).abs() < SAME_LEVEL)
+                .map(|(_, reachable, kept)| (reachable, kept.as_ref()))
+        };
+
+        // Each level's rings depend on nothing but its own regions, so the levels are
+        // worked in parallel and emitted in order: the result is the same on any number
+        // of cores.
+        let worked: Vec<Result<Option<Level>, StrategyError>> = self
+            .levels
+            .par_iter()
+            .map(|&(z, below)| {
+                let Some((reachable, kept)) = regions_at(z) else {
+                    return Ok(None);
+                };
+                // Where there is material to remove: stock still standing above this
+                // level. Standing *on* it is nothing to cut; a cut to `z` leaves the
+                // stock at `z`, give or take the grid's f32 storage. What is kept on
+                // the part is not.
+                let mut material = standing(z + MATERIAL_THICKNESS);
+                // A flat level is cut after the level below it, over what that left:
+                // the tool there went everywhere it could, as wide as it is this far
+                // above its tip.
+                if let Some(b) = below
+                    && let Some((cleared, _)) = regions_at(b)
+                {
+                    let wide = cutter.radius_at(z - b);
+                    if wide > 0.0 {
+                        material = material.difference(&cleared.offset(wide, arc))?;
+                    }
+                }
+                let material = match kept {
+                    // Less what is kept, the slivers the two outlines leave between
+                    // them taken back off with a cell's width, and given back after.
+                    Some(kept) => material
+                        .difference(kept)?
+                        .offset(-slop, arc)
+                        .grow_covering(touch + slop),
+                    None => material.grow_covering(touch),
+                };
+                if reachable.is_empty() || material.is_empty() {
+                    return Ok(None);
+                }
+                clear_level(&self.sweep, reachable, &material, z, arc, params).map(Some)
+            })
+            .collect();
+
+        let mut report = ClearingReport::default();
+        let mut cut = Cut {
+            emit: Emit::new(params.feed),
+        };
+        for (level, &(_, below)) in worked.into_iter().zip(&self.levels) {
+            let Some(level) = level? else {
+                report.empty_levels += 1;
+                continue;
+            };
+            report.rings_too_short += level.too_short;
+            if level.pieces.is_empty() {
+                report.empty_levels += 1;
+                continue;
+            }
+            report.levels += 1;
+            report.flat_levels += u64::from(below.is_some());
+            cut.pieces(level.pieces)?;
+        }
+        report.rings = cut.emit.passes;
+        Ok((cut.emit.path, report))
+    }
+}
+
+impl ClearingReport {
+    /// What two clearings did together.
+    #[must_use]
+    pub fn and(self, other: Self) -> Self {
+        Self {
+            levels: self.levels + other.levels,
+            flat_levels: self.flat_levels + other.flat_levels,
+            empty_levels: self.empty_levels + other.empty_levels,
+            rings: self.rings + other.rings,
+            rings_too_short: self.rings_too_short + other.rings_too_short,
+        }
+    }
 }
 
 /// The levels, in the order they are cut, each with the level below it if it is
