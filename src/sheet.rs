@@ -321,6 +321,20 @@ impl Sheet<'_> {
     fn time(&self) -> String {
         let m = &self.run.machining;
         let mut rows = vec![("Moves", duration(m.moves))];
+        let parts = self.run.placements.len();
+        if parts > 1 {
+            rows.push((
+                "Parts",
+                format!("{parts}, each operation cut at each: its time below is one part's"),
+            ));
+            rows.push((
+                "Between parts",
+                format!(
+                    "{}, the tool sent clear and across",
+                    duration(between_parts(self.run))
+                ),
+            ));
+        }
         rows.push((
             "Tool changes",
             match m.tool_change {
@@ -625,6 +639,17 @@ pub fn num(v: f64) -> String {
 
 fn dash() -> String {
     "—".into()
+}
+
+/// How long the tool takes going from part to part, in a setup of several:
+/// its moves' time less each part's operations'.
+pub fn between_parts(run: &Run) -> f64 {
+    let parts = run.placements.len();
+    if parts < 2 {
+        return 0.0;
+    }
+    let each: f64 = run.operations.iter().map(|o| o.seconds).sum();
+    (run.machining.moves - each * parts as f64).max(0.0)
 }
 
 /// A time in hours, minutes and seconds, as a person reads it: `45 s`,

@@ -5,8 +5,12 @@
 //!
 //! Until the session has run the setup again, and wherever it cannot, the
 //! coarse moments of the run's own answer play instead.
+//!
+//! A setup of several parts has a mesh a part, each where its part is.
 
-use cam_protocol::{SessionIn, SessionOut, SessionReady, StockPatch, class, is_bare, unbase64};
+use cam_protocol::{
+    GridPatch, SessionIn, SessionOut, SessionReady, StockPatch, class, is_bare, unbase64,
+};
 use printcad_bench_sdk::api::*;
 use printcad_bench_sdk::{host, serde_json};
 
@@ -37,7 +41,8 @@ pub struct Session {
     pub key: u64,
     /// The run's [`cam_protocol::timing`]: the session's must be the same.
     timing: u64,
-    ready: Option<(SessionReady, u64)>,
+    /// The grid, and its kept mesh at each part.
+    ready: Option<(SessionReady, Vec<u64>)>,
     /// A seek asked for and not yet answered.
     waiting: bool,
     /// The playhead the material was last asked for.
@@ -86,12 +91,13 @@ impl Session {
         self.ready.as_ref().map(|(r, _)| r.times.as_slice())
     }
 
-    /// The kept mesh of the material, once it has heights.
-    pub fn mesh(&self) -> Option<u64> {
+    /// The kept meshes of the material, a part each, once they have
+    /// heights.
+    pub fn meshes(&self) -> Option<&[u64]> {
         self.ready
             .as_ref()
             .filter(|_| self.at.is_some())
-            .map(|(_, m)| *m)
+            .map(|(_, m)| m.as_slice())
     }
 
     /// Take what the helper said, and ask for the material at `playhead`
@@ -131,17 +137,36 @@ impl Session {
                     self.failed = Some(e);
                     return;
                 }
-                match grid(&ready) {
-                    Ok(mesh) => self.ready = Some((*ready, mesh)),
-                    Err(e) => self.failed = Some(e),
+                let parts = ready.parts.len().max(1);
+                let mut meshes = Vec::with_capacity(parts);
+                for part in 0..parts {
+                    match grid(&ready, part) {
+                        Ok(mesh) => meshes.push(mesh),
+                        Err(e) => {
+                            for m in meshes.drain(..) {
+                                host::mesh_remove(m);
+                            }
+                            self.failed = Some(e);
+                            return;
+                        }
+                    }
                 }
+                self.ready = Some((*ready, meshes));
             }
             Ok(SessionOut::Stock(patch)) => {
                 self.waiting = false;
-                if let Some((ready, mesh)) = &self.ready
-                    && let Err(e) = apply(ready, *mesh, &patch)
-                {
-                    self.failed = Some(e);
+                if let Some((ready, meshes)) = &self.ready {
+                    for g in &patch.changed {
+                        let applied = meshes
+                            .get(g.part)
+                            .ok_or_else(|| {
+                                "the session's part is not one of the grid's".to_string()
+                            })
+                            .and_then(|mesh| apply(ready, *mesh, g));
+                        if let Err(e) = applied {
+                            self.failed = Some(e);
+                        }
+                    }
                 }
                 self.at = Some(*patch);
             }
@@ -154,8 +179,10 @@ impl Session {
 impl Drop for Session {
     fn drop(&mut self) {
         host::helper_close(self.handle);
-        if let Some((_, mesh)) = &self.ready {
-            host::mesh_remove(*mesh);
+        if let Some((_, meshes)) = &self.ready {
+            for mesh in meshes {
+                host::mesh_remove(*mesh);
+            }
         }
     }
 }
@@ -172,24 +199,26 @@ fn agrees(ready: &SessionReady, timing: u64) -> Result<(), String> {
     }
 }
 
-fn point(r: &SessionReady, col: u32, row: u32, h: u16) -> [f32; 3] {
+/// Point `(col, row)` of part `part`'s grid at height `h`.
+fn point(r: &SessionReady, part: usize, col: u32, row: u32, h: u16) -> [f32; 3] {
     let z = r.low + r.step * f32::from(h);
     let (c, w) = (col as f32, row as f32);
     // On a rotary the grid stands on its axis, each point out its own way.
     let up = r.round.map_or(r.up, |g| g.out(r.up, c, w));
-    std::array::from_fn(|i| r.origin[i] + c * r.across[i] + w * r.along[i] + z * up[i])
+    let moved = r.parts.get(part).copied().unwrap_or_default();
+    std::array::from_fn(|i| r.origin[i] + c * r.across[i] + w * r.along[i] + z * up[i] + moved[i])
 }
 
-/// The material's mesh for `ready`'s grid, flat at the stock's foot until
-/// the first answer gives it heights.
-fn grid(ready: &SessionReady) -> Result<u64, String> {
+/// The material's mesh for part `part` of `ready`'s grid, flat at the
+/// stock's foot until the first answer gives it heights.
+fn grid(ready: &SessionReady, part: usize) -> Result<u64, String> {
     let (cols, rows) = (ready.cols, ready.rows);
     if cols < 2 || rows < 2 {
         return Err("the material's grid is too small".into());
     }
     let positions: Vec<[f32; 3]> = (0..rows)
         .flat_map(|r| (0..cols).map(move |c| (c, r)))
-        .map(|(c, r)| point(ready, c, r, 0))
+        .map(|(c, r)| point(ready, part, c, r, 0))
         .collect();
     let colours = vec![STOCK; positions.len()];
     let bare = unbase64(&ready.bare).ok_or("the session's bare squares are not base64")?;
@@ -207,8 +236,8 @@ fn grid(ready: &SessionReady) -> Result<u64, String> {
     host::mesh_create(&positions, &indices, &colours)
 }
 
-/// The rectangle a seek changed, into the kept mesh.
-fn apply(ready: &SessionReady, mesh: u64, patch: &StockPatch) -> Result<(), String> {
+/// The rectangle a seek changed, into its part's kept mesh.
+fn apply(ready: &SessionReady, mesh: u64, patch: &GridPatch) -> Result<(), String> {
     if patch.width == 0 || patch.height == 0 {
         return Ok(());
     }
@@ -230,7 +259,7 @@ fn apply(ready: &SessionReady, mesh: u64, patch: &StockPatch) -> Result<(), Stri
         let positions: Vec<[f32; 3]> = heights[line.clone()]
             .iter()
             .enumerate()
-            .map(|(c, h)| point(ready, patch.col + c as u32, row, *h))
+            .map(|(c, h)| point(ready, patch.part, patch.col + c as u32, row, *h))
             .collect();
         let colours: Vec<Rgb> = classes[line].iter().map(|c| colour(*c)).collect();
         host::mesh_update(mesh, row * ready.cols + patch.col, &positions, &colours)?;

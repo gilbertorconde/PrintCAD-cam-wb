@@ -175,7 +175,7 @@ struct Cam {
     /// The played-back setup's run, kept in a helper at full resolution.
     session: Option<session::Session>,
     /// A line of the program listing clicked before the session knew when
-    /// each move ends: its operation and moves, and the playhead it was
+    /// each move ends: its section and moves, and the playhead it was
     /// sent to meanwhile, between the run's moments. Once the session
     /// knows, the playhead goes to the move itself, unless it has moved.
     aim: Option<(usize, usize, f64)>,
@@ -789,8 +789,8 @@ impl Cam {
         playback::steps(run, times)
     }
 
-    /// The operation under way in the playback of `setup`'s run, and how
-    /// many of its moves are made.
+    /// The section under way in the playback of `setup`'s run (an
+    /// operation at a part), and how many of its moves are made.
     fn under_way(&self, setup: &str) -> Option<(usize, usize)> {
         let run = self.runs.get(setup)?.shown()?;
         let exact = self
@@ -798,7 +798,7 @@ impl Cam {
             .as_ref()
             .filter(|s| s.setup == setup)
             .and_then(|s| s.at.as_ref())
-            .map(|a| (a.op, a.moves, a.of));
+            .map(|a| (a.section, a.moves, a.of));
         let playing = self.playing.as_ref().filter(|p| p.setup == setup);
         playback::under_way(run, playing, exact).map(|(op, made, _)| (op, made))
     }
@@ -812,17 +812,18 @@ impl Cam {
         let Some(run) = self.runs.get(&setup).and_then(|c| c.shown()) else {
             return false;
         };
-        let Some((op, made)) = listing::clicked(run, event, &self.listing.borrow()) else {
+        let Some((section, made)) = listing::clicked(run, event, &self.listing.borrow()) else {
             return false;
         };
-        self.seek_move(&setup, op, made);
+        self.seek_move(&setup, section, made);
         true
     }
 
-    /// Take the playhead of `setup`'s playback to where operation `op` has
-    /// made `made` moves: exactly once the session knows when each move
-    /// ends, between the run's moments until then.
-    fn seek_move(&mut self, setup: &str, op: usize, made: usize) {
+    /// Take the playhead of `setup`'s playback to where section `section`
+    /// (an operation at a part) has made `made` moves: exactly once the
+    /// session knows when each move ends, between the run's moments until
+    /// then.
+    fn seek_move(&mut self, setup: &str, section: usize, made: usize) {
         let Some(run) = self.runs.get(setup).and_then(|c| c.shown()) else {
             return;
         };
@@ -831,7 +832,7 @@ impl Cam {
             .as_ref()
             .filter(|s| s.setup == setup)
             .and_then(|s| s.times());
-        let at = playback::time_of(run, times, op, made);
+        let at = playback::time_of(run, times, section, made);
         let steps = self.steps(setup, run);
         playback::apply(
             &mut self.playing,
@@ -841,13 +842,13 @@ impl Cam {
             playback::Command::Seek(at),
             &steps,
         );
-        self.aim = times.is_none().then_some((op, made, at));
+        self.aim = times.is_none().then_some((section, made, at));
     }
 
     /// Once the session knows the moves, a line clicked before it did gets
     /// its own move, if the playhead still stands where the click left it.
     fn take_aim(&mut self, setup: Option<&str>) {
-        let Some((op, made, at)) = self.aim else {
+        let Some((section, made, at)) = self.aim else {
             return;
         };
         let standing = self
@@ -863,7 +864,7 @@ impl Cam {
             .as_ref()
             .is_some_and(|s| Some(s.setup.as_str()) == setup && s.times().is_some());
         if let (true, Some(setup)) = (known, setup) {
-            self.seek_move(setup, op, made);
+            self.seek_move(setup, section, made);
         }
     }
 
@@ -1141,12 +1142,13 @@ impl Cam {
         if self.played_setup().as_deref() != Some(setup) {
             return;
         }
-        let (Some(run), Some((op, _))) = (
+        let (Some(run), Some((section, _))) = (
             self.runs.get(setup).and_then(|c| c.shown()),
             self.under_way(setup),
         ) else {
             return;
         };
+        let op = playback::section_of(run, section).map_or(0, |s| s.op);
         self.listing.borrow_mut().find(run, op);
     }
 
@@ -3206,7 +3208,7 @@ impl Cam {
                 .session
                 .as_ref()
                 .and_then(|s| s.at.as_ref())
-                .map(|a| (a.op, a.moves, a.of));
+                .map(|a| (a.section, a.moves, a.of));
             frame.transport =
                 playback::transport_widgets(run, self.playing.as_ref(), &self.transport, exact);
             // Playing, or waiting on the session's answer to a seek.

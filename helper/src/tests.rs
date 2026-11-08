@@ -376,7 +376,7 @@ fn a_run_plays_back_as_it_cut() {
     };
     let run = answer(&request).unwrap();
     let play = run.playback.as_ref().expect("a playback");
-    assert!(play.moments.len() > 10 && play.moments.len() <= 60 + run.operations.len());
+    assert!(play.moments.len() > 10 && play.moments.len() <= 61 + run.operations.len());
     assert_eq!(play.indices.len() % 3, 0);
     let cells = play.base.len();
     let mut last: Option<&cam_protocol::Moment> = None;
@@ -390,6 +390,7 @@ fn a_run_plays_back_as_it_cut() {
         assert!(m.drawn <= drawn, "{} of {drawn}", m.drawn);
         if let Some(l) = last {
             assert!((l.op, l.moves) < (m.op, m.moves), "out of order");
+            assert_eq!(m.section, m.op, "one part: a section an operation");
             let grew = l
                 .heights
                 .iter()
@@ -530,17 +531,19 @@ fn a_session_plays_back_at_full_resolution() {
     assert!(ready.cols > 100 && ready.cols <= 600, "{}", ready.cols);
     assert_eq!(ready.times.len(), 1);
     assert!(ready.bare.is_empty(), "a box has stock all over");
-    let patch = |i: usize| match &said[i] {
+    let at = |i: usize| match &said[i] {
         SessionOut::Stock(p) => p.clone(),
         other => panic!("{other:?}"),
     };
+    // One part: a rectangle of its grid, or none.
+    let patch = |i: usize| at(i).changed.first().cloned().unwrap_or_default();
     let (start, end, back) = (patch(1), patch(2), patch(3));
     assert_eq!(
         (start.width, start.height),
         (ready.cols, ready.rows),
         "all of it first"
     );
-    let heights = |p: &cam_protocol::StockPatch| -> Vec<u16> {
+    let heights = |p: &cam_protocol::GridPatch| -> Vec<u16> {
         unbase64(&p.heights)
             .unwrap()
             .chunks(2)
@@ -548,7 +551,8 @@ fn a_session_plays_back_at_full_resolution() {
             .collect()
     };
     assert_eq!(heights(&start).len(), (start.width * start.height) as usize);
-    assert_eq!((end.moves, end.of), (end.of, ready.times[0].len()));
+    let done = at(2);
+    assert_eq!((done.moves, done.of), (done.of, ready.times[0].len()));
     assert!(end.width > 0, "the run changed the material");
     let finished = unbase64(&end.classes).unwrap();
     assert!(
@@ -613,15 +617,15 @@ fn each_line_counts_the_moves_of_the_instruction_that_wrote_it() {
     // Two header lines; an instruction of two lines making none, one of a
     // line making a move, one writing nothing, one of two lines making two
     // more; a footer line.
-    let made = [0, 1, 1, 3];
+    let made = [(0, 0), (0, 1), (0, 1), (0, 3)];
     let op_lines = [4, 5, 5, 7];
     assert_eq!(
-        crate::line_moves(&made, &op_lines, 8),
+        crate::line_moments(&made, &op_lines, 8).1,
         vec![0, 0, 0, 0, 1, 3, 3, 3]
     );
     assert_eq!(
-        crate::line_moves(&[], &[], 2),
-        vec![0, 0],
+        crate::line_moments(&[], &[], 2),
+        (vec![0, 0], vec![0, 0]),
         "no instructions"
     );
 }
@@ -2374,12 +2378,16 @@ fn two_vises_are_posted_and_timed_as_two_parts() {
     let g55 = text.find("\nG55\n").expect(text);
     assert!(g54 < g55);
     assert_eq!(text.matches(" M6").count(), 1, "one tool, changed once");
+    // Twice, and the tool's way from the first part to the second.
+    let between = two.machining.moves - 2.0 * one.machining.moves;
     assert!(
-        (two.machining.moves - 2.0 * one.machining.moves).abs() < 1e-6 * one.machining.moves,
+        between > 0.0 && between < 0.05 * one.machining.moves,
         "{} {}",
         two.machining.moves,
         one.machining.moves
     );
+    let last = two.sections.last().unwrap();
+    assert!((last.start + last.seconds - two.machining.moves).abs() < 1e-9);
     assert_eq!(two.placements.len(), 2);
     assert_eq!(two.placements[1].wcs, "G55");
     assert!((two.placements[1].offset[0] - 100.0).abs() < 1e-9);
@@ -2390,5 +2398,161 @@ fn two_vises_are_posted_and_timed_as_two_parts() {
             .iter()
             .filter(|f| f.level == Level::Fail)
             .collect::<Vec<_>>()
+    );
+}
+
+/// [`JOB`] at two vises, G54 and G55 100 mm apart along X, posted for
+/// LinuxCNC as one program: roughing with the 6 mm tool, then a profile
+/// with a 3 mm one, by tool.
+fn two_vises_two_tools() -> Request {
+    let job = JOB
+        .replace("programs = \"operation\"", "post = \"linuxcnc\"")
+        .replace("post = \"grbl\"\n", "")
+        .replace(
+            "[[setup.operation]]",
+            "[[setup.placement]]\nwcs = 54\n\n[[setup.placement]]\nwcs = 55\n\
+             at = [100.0, 0.0, 0.0]\n\n[[setup.operation]]",
+        )
+        .replace(
+            "[[model]]",
+            "[tools.flat-3]\nkind = \"flat\"\ndiameter = 3.0\nnumber = 2\nrpm = 18000\n\n\
+             [[model]]",
+        )
+        + "\n[[setup.operation]]\nname = \"finish\"\nstrategy = \"profile\"\ntool = \"flat-3\"\n";
+    Request {
+        version: VERSION,
+        job,
+        shapes: BTreeMap::from([(
+            "part".to_string(),
+            Shape {
+                text: native("hinge_jig.step"),
+                placement: IDENTITY,
+            },
+        )]),
+        max_points: 2000,
+        ..Request::default()
+    }
+}
+
+/// Two parts play back as the program cuts them: by tool, the roughing at
+/// each, then the finish at each, the tool going across between, each
+/// part's moments at its own place; the program's lines say which part's
+/// move each is, and the times are each part's.
+#[test]
+fn two_parts_play_back_as_the_program_cuts_them() {
+    let run = answer(&two_vises_two_tools()).unwrap();
+    let cut: Vec<(usize, usize)> = run.sections.iter().map(|s| (s.op, s.part)).collect();
+    assert_eq!(cut, [(0, 0), (0, 1), (1, 0), (1, 1)]);
+    for w in run.sections.windows(2) {
+        let end = w[0].start + w[0].seconds;
+        assert!(w[1].start > end, "the tool goes across between parts");
+    }
+    let each: f64 = run.operations.iter().map(|o| o.seconds).sum();
+    let tools: f64 = run.tools.iter().map(|t| t.seconds).sum();
+    assert!((tools - 2.0 * each).abs() < 1e-6, "every part's, by tool");
+    // The program: each line's section, in order, the second part's after
+    // its offset is selected.
+    let program = run.program.as_ref().expect("the setup's program");
+    assert_eq!(program.sections.len(), program.lines);
+    let places: Vec<(usize, usize)> = (0..program.lines)
+        .map(|l| program.place(l).unwrap())
+        .collect();
+    assert!(places.windows(2).all(|w| w[0] <= w[1]));
+    let lines: Vec<&str> = program.text.lines().collect();
+    let g55 = lines.iter().position(|l| *l == "G55").unwrap();
+    assert_eq!(places[g55].0, 1, "{}", program.text);
+    let n = run
+        .playback
+        .as_ref()
+        .unwrap()
+        .moments
+        .iter()
+        .rfind(|m| m.op == 0)
+        .unwrap()
+        .of;
+    let line = program.line_in(1, n).unwrap();
+    assert_eq!(program.place(line), Some((1, n)));
+    // Playback: each section's moments in turn, at its part.
+    let play = run.playback.as_ref().unwrap();
+    assert!(
+        play.moments
+            .windows(2)
+            .all(|w| (w[0].section, w[0].moves) < (w[1].section, w[1].moves))
+    );
+    let x0 = run.stock.iter().map(|c| c[0]).fold(f64::INFINITY, f64::min) as f32;
+    for m in &play.moments {
+        assert_eq!((m.op, m.part), cut[m.section]);
+        if m.part == 1 {
+            assert!(m.tool[0] > x0 + 100.0 - 1.0, "{:?}", m.tool);
+        }
+    }
+    // The second part roughed is the first roughed: the same moves.
+    let roughed = |s: usize| {
+        &play
+            .moments
+            .iter()
+            .rfind(|m| m.section == s)
+            .unwrap()
+            .heights
+    };
+    assert_eq!(roughed(0), roughed(1));
+    assert_ne!(roughed(0), roughed(2), "then finished");
+}
+
+/// A session plays two parts back as the program cuts them: each part's
+/// material its own, the second roughed while the first waits for its
+/// finish, the tool on its way between, and finishing the first leaves
+/// the second as it was.
+#[test]
+fn a_session_plays_each_part_as_far_as_it_is_cut() {
+    use cam_protocol::{SessionIn, SessionOut};
+    let request = two_vises_two_tools();
+    let run = answer(&request).unwrap();
+    let s = &run.sections;
+    let link = (s[0].start + s[0].seconds + s[1].start) / 2.0;
+    let rough = s[1].start + s[1].seconds / 2.0;
+    let finish = s[2].start + s[2].seconds / 2.0;
+    let seek = |s: f64| serde_json::to_string(&SessionIn::Seek { seconds: s }).unwrap();
+    // On the way back to the first part, the second roughed.
+    let roughed = (s[1].start + s[1].seconds + s[2].start) / 2.0;
+    let lines = [rough, link, roughed, finish].map(seek).join("\n");
+    let mut out = Vec::new();
+    crate::session::serve(
+        SessionIn::Open(Box::new(request)),
+        std::io::Cursor::new(lines),
+        &mut out,
+    )
+    .unwrap();
+    let said: Vec<SessionOut> = String::from_utf8(out)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let SessionOut::Ready(ready) = &said[0] else {
+        panic!("{:?}", said[0]);
+    };
+    assert_eq!(ready.times.len(), 4);
+    assert_eq!(ready.parts.len(), 2);
+    assert!((ready.parts[1][0] - 100.0).abs() < 1e-4);
+    let at = |i: usize| match &said[i] {
+        SessionOut::Stock(p) => p.clone(),
+        other => panic!("{other:?}"),
+    };
+    let parts =
+        |p: &cam_protocol::StockPatch| -> Vec<usize> { p.changed.iter().map(|g| g.part).collect() };
+    let (roughing, between, finishing) = (at(1), at(2), at(4));
+    assert_eq!((roughing.section, roughing.op, roughing.part), (1, 0, 1));
+    assert!(roughing.moves > 0);
+    assert_eq!(parts(&roughing), [0, 1], "each part's grid, first");
+    // On its way to the second part, back from it: the tool between.
+    assert_eq!((between.section, between.moves), (1, 0));
+    assert!(between.tool[0] > 0.0 && between.tool[0] < 100.0 + 50.0);
+    // Finishing the first changes it alone: the second stays roughed.
+    assert_eq!((finishing.section, finishing.op, finishing.part), (2, 1, 0));
+    assert_eq!(at(3).section, 2);
+    assert!(
+        parts(&finishing).contains(&0) && !parts(&finishing).contains(&1),
+        "{:?}",
+        parts(&finishing)
     );
 }

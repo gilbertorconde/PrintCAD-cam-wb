@@ -1,6 +1,11 @@
 //! A setup's run as moments to play back: the material, coarsely, and where the
 //! tool is, at moments spread along its moves.
 //!
+//! A setup of several parts is played back as its program cuts them, each
+//! moment the material of the part being cut. Each part is cut as the first
+//! is, so the material at a part, so far into an operation, is the first's
+//! there: one sweep through the operations in turn gives every part's.
+//!
 //! The material is swept again from the stock, move by move, with the tools
 //! the run cut with, on a grid as coarse as the one drawn. Sweeping the run's
 //! own, as camcraft's app does to show it closely, would take longer than the
@@ -15,6 +20,7 @@ use camcraft_session::Ran;
 use camcraft_sim::stock::{Axis, Block, Carry, Stock, round_pitch};
 use glam::{DAffine3, DVec2, DVec3};
 
+use crate::cut::Cut;
 use crate::{Drawn, to_f32};
 
 /// How many moments a run is played back in, at most, besides its start.
@@ -27,12 +33,14 @@ const COLUMNS: usize = 60;
 /// drawn, so a pass narrower than a drawn column still shows.
 const SWEPT: usize = 240;
 
-/// `ran`'s setup as moments, `draws` being its operations as drawn; `None`
-/// when it cut nothing or cannot be replayed.
-pub(crate) fn playback(job: &Job, ran: &Ran, draws: &[Drawn]) -> Option<Playback> {
+/// `ran`'s setup as moments, `draws` being its operations as drawn and `cut`
+/// the order its program cuts them at its parts; `None` when it cut
+/// nothing or cannot be replayed.
+pub(crate) fn playback(job: &Job, ran: &Ran, draws: &[Drawn], cut: &Cut) -> Option<Playback> {
     let r = &ran.result;
     let setup = job.setups.first()?;
-    let total: usize = draws.iter().map(|d| d.ends.len()).sum();
+    let moves_of = |op: usize| draws.get(op).map_or(0, |d| d.ends.len());
+    let total: usize = cut.sections.iter().map(|s| moves_of(s.op)).sum();
     if total == 0 {
         return None;
     }
@@ -112,77 +120,117 @@ pub(crate) fn playback(job: &Job, ran: &Ran, draws: &[Drawn]) -> Option<Playback
         }
     };
     let floor = stock.floor();
+    let heights = |stock: &Stock| -> Vec<u16> {
+        grid.iter()
+            .map(|p| {
+                let z = stock.height_at(p.x, p.y).unwrap_or(floor);
+                ((z - low) / quantum)
+                    .round()
+                    .clamp(0.0, f64::from(u16::MAX)) as u16
+            })
+            .collect()
+    };
 
-    // The moments, spread evenly over all the moves, each operation's last
-    // among them so every operation ends on one.
-    let mut moments = Vec::new();
+    // The places shown: the start, then moments spread evenly over all the
+    // sections' moves, each section's last among them so every one ends on
+    // one.
+    let mut places = vec![(0, 0)];
     let mut done = 0;
-    let mut elapsed = 0.0;
-    for (k, drawn) in draws.iter().enumerate() {
-        let n = drawn.ends.len();
-        let ran_op = r.operations.get(k)?;
-        let sweep = if ran_op.made.has_paths() {
+    for (s, section) in cut.sections.iter().enumerate() {
+        let n = moves_of(section.op);
+        places.extend(
+            (1..=MOMENTS)
+                .map(|f| f * total / MOMENTS)
+                .filter(|g| *g > done && *g < done + n)
+                .map(|g| (s, g - done)),
+        );
+        if n > 0 {
+            places.push((s, n));
+        }
+        done += n;
+    }
+
+    // The material at each place's operation and moves, swept once through
+    // the operations in turn. The simulator's moves need not be the
+    // toolpath's one for one; they run in step.
+    let mut wanted: Vec<(usize, usize)> = places
+        .iter()
+        .filter_map(|&(s, i)| Some((cut.sections.get(s)?.op, i)))
+        .collect();
+    wanted.sort_unstable();
+    wanted.dedup();
+    let mut sweeps = Vec::with_capacity(draws.len());
+    for (k, ran_op) in r.operations.iter().enumerate().take(draws.len()) {
+        sweeps.push(if ran_op.made.has_paths() {
             let tool = cutting_tool(job, setup.operations.get(k)?).ok()?;
             Some((tool, sim_moves(&ran_op.path)))
         } else {
             None
-        };
-        let sim = sweep.as_ref().map_or(0, |(_, m)| m.len());
-        let mut swept = 0;
-        let mut at: Vec<usize> = (1..=MOMENTS)
-            .map(|f| f * total / MOMENTS)
-            .filter(|g| *g > done && *g < done + n)
-            .map(|g| g - done)
-            .collect();
-        if n > 0 {
-            at.push(n);
-        } else if k == 0 {
-            at.push(0);
-        }
-        for i in at {
-            // The simulator's moves need not be the toolpath's one for one;
-            // they run in step.
-            let target = if n == 0 { 0 } else { (i * sim).div_ceil(n) };
-            if let Some((tool, moves)) = &sweep
-                && target > swept
+        });
+    }
+    let mut swept_to = (0, 0);
+    let mut material = Vec::with_capacity(wanted.len());
+    for &(op, i) in &wanted {
+        while swept_to.0 <= op {
+            let k = swept_to.0;
+            let sim = sweeps
+                .get(k)
+                .and_then(Option::as_ref)
+                .map_or(0, |(_, m)| m.len());
+            let n = moves_of(k);
+            let target = if k < op {
+                sim
+            } else if n == 0 {
+                0
+            } else {
+                (i * sim).div_ceil(n)
+            };
+            if let Some(Some((tool, moves))) = sweeps.get(k)
+                && target > swept_to.1
             {
                 // From the move before, which the sweep starts from.
-                if let Some(slice) = moves.get(swept.saturating_sub(1)..target) {
+                if let Some(slice) = moves.get(swept_to.1.saturating_sub(1)..target) {
                     stock.sweep(slice, tool);
                 }
-                swept = target;
             }
-            let heights = grid
-                .iter()
-                .map(|p| {
-                    let z = stock.height_at(p.x, p.y).unwrap_or(floor);
-                    ((z - low) / quantum)
-                        .round()
-                        .clamp(0.0, f64::from(u16::MAX)) as u16
-                })
-                .collect();
+            if k < op {
+                swept_to = (k + 1, 0);
+            } else {
+                swept_to.1 = swept_to.1.max(target);
+                break;
+            }
+        }
+        material.push(heights(&stock));
+    }
+
+    let moments = places
+        .iter()
+        .filter_map(|&(s, i)| {
+            let section = cut.sections.get(s)?;
+            let drawn = draws.get(section.op)?;
+            let at = wanted.binary_search(&(section.op, i)).ok()?;
             let tool = match i {
                 0 => drawn.ends.first(),
                 _ => drawn.ends.get(i - 1),
             }
-            .map_or([0.0; 3], |p| to_f32(r.frame.shown(*p)));
-            moments.push(Moment {
-                op: k,
+            .map_or([0.0; 3], |p| to_f32(r.frame.shown(*p + cut.offset(s))));
+            Some(Moment {
+                section: s,
+                op: section.op,
+                part: section.part,
                 moves: i,
-                of: n,
+                of: drawn.ends.len(),
                 tool,
                 drawn: drawn.drawn_after(i),
-                seconds: elapsed
+                seconds: section.start
                     + i.checked_sub(1)
                         .and_then(|j| drawn.times.get(j))
                         .copied()
                         .unwrap_or(0.0),
-                heights,
-            });
-        }
-        done += n;
-        elapsed += drawn.times.last().copied().unwrap_or(0.0);
-    }
+                heights: material.get(at)?.clone(),
+            })
+        })
+        .collect();
     Some(Playback {
         base,
         axis,

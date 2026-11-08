@@ -2,7 +2,8 @@
 //! playhead stands on, numbered, that line marked, and a click on a line's
 //! number taking the playhead to its move. A setup posted as one program is
 //! listed whole, whichever operation is under way: each of its lines knows
-//! which operation's move it is.
+//! which section's move it is, an operation at a part, so a setup of several
+//! parts is followed into each.
 //!
 //! A program can run to a hundred thousand lines, and the panel is built
 //! again every frame while it plays, so only a window of lines round the
@@ -91,10 +92,38 @@ fn program_of(run: &Run, op: usize) -> Option<&Program> {
         .or_else(|| run.operations.get(op)?.program.as_ref())
 }
 
-/// Where the playhead stands in operation `op`'s program: the line it is on,
-/// when it is in that operation; else the program's first line when it has
-/// not started yet, or its last when it is done, unmarked. In a setup's
-/// program, the line it is on, whichever operation it is in.
+/// The section line `line` of `program` (listed for operation `op`) is
+/// of, and how many of its moves are made once it has run. A program that
+/// does not say has each operation's lines its own section's, as a run
+/// without sections has it.
+fn place(program: &Program, op: usize, line: usize) -> Option<(usize, usize)> {
+    if !program.sections.is_empty() {
+        program.place(line)
+    } else if program.is_setups() {
+        program.moment(line)
+    } else {
+        Some((op, program.made_by(line)?))
+    }
+}
+
+/// The line of `program` (listed for operation `op`) the tool stands on
+/// once section `section` has made `made` moves; `None` when no line of it
+/// is that section's.
+fn line_in(program: &Program, op: usize, section: usize, made: usize) -> Option<usize> {
+    if !program.sections.is_empty() {
+        let line = program.line_in(section, made)?;
+        (program.place(line)?.0 == section).then_some(line)
+    } else if program.is_setups() {
+        program.line_at(section, made)
+    } else {
+        (section == op).then(|| program.line_of(made)).flatten()
+    }
+}
+
+/// Where the playhead stands in operation `op`'s program, `under_way` being
+/// the section it is in and the moves made: the line it is on, when the
+/// program has that section; else the program's first line when it has
+/// not started yet, or its last when it is done, unmarked.
 fn standing(
     program: &Program,
     lines: usize,
@@ -102,25 +131,20 @@ fn standing(
     under_way: Option<(usize, usize)>,
 ) -> (usize, bool) {
     let last = lines.saturating_sub(1);
-    if program.is_setups() {
-        return match under_way.and_then(|(o, made)| program.line_at(o, made)) {
-            Some(line) => (line.min(last), true),
-            None => (last, false),
-        };
-    }
-    match under_way {
-        Some((o, made)) if o == op => match program.line_of(made) {
-            Some(line) => (line.min(last), true),
-            None => (0, false),
-        },
-        Some((o, _)) if o > op => (last, false),
-        Some(_) => (0, false),
+    let Some((section, made)) = under_way else {
         // Not played back: at its end, as the run left it.
-        None => (last, false),
+        return (last, false);
+    };
+    if let Some(line) = line_in(program, op, section, made) {
+        return (line.min(last), true);
+    }
+    match place(program, op, 0) {
+        Some((first, _)) if section < first => (0, false),
+        _ => (last, false),
     }
 }
 
-/// The listing of operation `op` of `run`, the playhead being in operation
+/// The listing of operation `op` of `run`, the playhead being in section
 /// `under_way.0` with `under_way.1` of its moves made; `kept` keeps where
 /// its lines start.
 pub fn widgets(
@@ -166,14 +190,19 @@ pub fn widgets(
         })
         .collect();
     kept.shown = Some((op, shown.start));
-    // A setup's program is named for the operation the playhead is in.
-    let name = match program.moment(at).and_then(|(k, _)| run.operations.get(k)) {
-        Some(under) if marked => &under.name,
-        _ if program.is_setups() => &program.name,
-        _ => &o.name,
+    // A setup's program is named for the operation the playhead is in, and
+    // where there are several parts, the part.
+    let section = place(program, op, at).and_then(|(s, _)| crate::playback::section_of(run, s));
+    let name = match section.and_then(|s| Some((run.operations.get(s.op)?, s.part))) {
+        Some((under, part)) if marked => match run.placements.get(part) {
+            Some(p) if run.placements.len() > 1 => format!("{} at {}", under.name, p.wcs),
+            _ => under.name.clone(),
+        },
+        _ if program.is_setups() => program.name.clone(),
+        _ => o.name.clone(),
     };
     let mut children = vec![Widget::Value {
-        label: name.clone(),
+        label: name,
         value: if marked {
             format!("line {} of {lines}", at + 1)
         } else {
@@ -197,8 +226,8 @@ pub fn widgets(
     vec![group("Program", children)]
 }
 
-/// The operation and the moves made at the line a click on the listing
-/// chose, if `event` is one, `kept` having shown it.
+/// The section (an operation at a part) and the moves made at the line a
+/// click on the listing chose, if `event` is one, `kept` having shown it.
 pub fn clicked(run: &Run, event: &PanelEvent, kept: &Lines) -> Option<(usize, usize)> {
     let PanelEvent::Select { id, index } = event else {
         return None;
@@ -208,10 +237,7 @@ pub fn clicked(run: &Run, event: &PanelEvent, kept: &Lines) -> Option<(usize, us
     }
     let (op, start) = kept.shown?;
     let program = program_of(run, op)?;
-    if program.is_setups() {
-        return program.moment(start + index);
-    }
-    Some((op, program.made_by(start + index)?))
+    place(program, op, start + index)
 }
 
 #[cfg(test)]
@@ -374,5 +400,57 @@ mod tests {
         assert_eq!(click(&kept, ID, 3), Some((0, 4)));
         kept.shown = Some((1, 0));
         assert_eq!(click(&kept, ID, 0), None, "no such operation");
+    }
+
+    /// Two parts by tool, one program: the roughing at G54 (section 0) and
+    /// G55 (section 1). A move at the second part is marked on its own
+    /// line, named for its part, and a click there finds that section.
+    #[test]
+    fn a_program_of_two_parts_follows_each() {
+        use cam_protocol::{PlacedPart, Section};
+        let text = "G21\nG54\nG1 X1\nG1 X2\nG53 G0 Z0\nG55\nG1 X1\nG1 X2\nM30\n";
+        let mut run = setups_run();
+        run.operations.truncate(1);
+        run.placements = ["G54", "G55"]
+            .map(|w| PlacedPart {
+                wcs: w.into(),
+                ..PlacedPart::default()
+            })
+            .to_vec();
+        run.sections = vec![
+            Section::default(),
+            Section {
+                part: 1,
+                start: 12.0,
+                ..Section::default()
+            },
+        ];
+        run.program = Some(Program {
+            name: "top".into(),
+            lines: 9,
+            operations: vec![0; 9],
+            sections: vec![0, 0, 0, 0, 0, 1, 1, 1, 1],
+            moves: vec![0, 0, 1, 2, 2, 0, 1, 2, 2],
+            text: text.into(),
+            ..Program::default()
+        });
+        let mut kept = Lines::default();
+        let shown = widgets(&run, 0, Some((1, 1)), &mut kept);
+        let (_, marked) = sheet(&shown);
+        assert_eq!(marked, Some(6), "the second part's first move");
+        let Some(Widget::Group { children, .. }) = shown.first() else {
+            panic!("no group");
+        };
+        assert!(
+            matches!(children.first(), Some(Widget::Value { label, .. }) if label == "Rough at G55"),
+            "{children:?}"
+        );
+        let (_, marked) = sheet(&widgets(&run, 0, Some((0, 1)), &mut kept));
+        assert_eq!(marked, Some(2), "the first part's");
+        let event = PanelEvent::Select {
+            id: ID.into(),
+            index: 7,
+        };
+        assert_eq!(clicked(&run, &event, &kept), Some((1, 2)));
     }
 }

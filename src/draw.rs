@@ -128,44 +128,57 @@ pub fn draw(cam: &Cam, frame: &mut Frame) {
             kind: MarkKind::Cross { size: 8.0 },
         });
         // The moment being played back, while the setup is open.
-        let moment = cam
-            .playing
-            .as_ref()
-            .filter(|p| mine && p.setup == node.id)
-            .and_then(|p| {
-                let play = run.playback.as_ref()?;
-                Some((play, p.moment(play)?))
-            });
+        let playing = cam.playing.as_ref().filter(|p| mine && p.setup == node.id);
+        let moment = playing.and_then(|p| {
+            let play = run.playback.as_ref()?;
+            Some((play, p.moment(play)?))
+        });
         // At full resolution once the playback session answers.
         let exact = moment.and(
             cam.session
                 .as_ref()
                 .filter(|s| s.setup == node.id)
-                .and_then(|s| Some((s.mesh()?, s.at.as_ref()?))),
+                .and_then(|s| Some((s.meshes()?, s.at.as_ref()?))),
         );
-        // How far the tool has gone: which operation, and how many of its
-        // drawn points.
+        // How far the tool has gone: which operation, how many of its drawn
+        // points, and at which part.
         let gone = match (exact, moment) {
-            (Some((_, at)), _) => Some((at.op, at.drawn)),
-            (None, Some((_, m))) => Some((m.op, m.drawn)),
+            (Some((_, at)), _) => Some((at.op, at.drawn, at.part)),
+            (None, Some((_, m))) => Some((m.op, m.drawn, m.part)),
             _ => None,
         };
-        if let Some((mesh, _)) = exact {
-            frame.kept.push(KeptMesh {
-                handle: mesh,
-                color: crate::session::TINT,
-                opacity: 0.92,
-                ..Default::default()
-            });
-        } else if let Some((play, m)) = moment {
-            let mesh = computed.shown_rc().and_then(|run| {
-                cam.material
-                    .borrow_mut()
-                    .mesh(&run, Some(m), || material_at(play, m))
-            });
-            match mesh {
-                Some(handle) => frame.kept.push(material(handle)),
-                None => frame.meshes.push(material_at(play, m)),
+        // Toolpaths are drawn at the part being cut.
+        let shift: [f32; 3] = gone
+            .and_then(|(_, _, part)| run.placements.get(part))
+            .map_or([0.0; 3], |p| p.offset.map(|v| v as f32));
+        if let Some((meshes, _)) = exact {
+            for mesh in meshes {
+                frame.kept.push(KeptMesh {
+                    handle: *mesh,
+                    color: crate::session::TINT,
+                    opacity: 0.92,
+                    ..Default::default()
+                });
+            }
+        } else if let (Some(p), Some((play, _))) = (playing, moment) {
+            // Each part's material as far as it is cut.
+            for (part, m) in p
+                .materials(play, run.placements.len())
+                .into_iter()
+                .enumerate()
+            {
+                let offset = run
+                    .placements
+                    .get(part)
+                    .map_or([0.0; 3], |p| p.offset.map(|v| v as f32));
+                let make = || material_at(play, m, offset);
+                let mesh = computed
+                    .shown_rc()
+                    .and_then(|run| cam.material.borrow_mut().mesh(&run, part, Some(m), make));
+                match mesh {
+                    Some(handle) => frame.kept.push(material(handle)),
+                    None => frame.meshes.push(make()),
+                }
             }
         } else if edited_setup
             && cam.show_material
@@ -180,7 +193,7 @@ pub fn draw(cam: &Cam, frame: &mut Frame) {
             };
             let mesh = computed
                 .shown_rc()
-                .and_then(|run| cam.material.borrow_mut().mesh(&run, None, left));
+                .and_then(|run| cam.material.borrow_mut().mesh(&run, 0, None, left));
             match mesh {
                 Some(handle) => frame.kept.push(material(handle)),
                 None => frame.meshes.push(left()),
@@ -209,8 +222,8 @@ pub fn draw(cam: &Cam, frame: &mut Frame) {
             let color = if this || edited_setup { ACCENT } else { MUTED };
             // Played back, as far as the tool has gone.
             let mut left = match gone {
-                Some((op, _)) if i > op => continue,
-                Some((op, drawn)) if i == op => drawn,
+                Some((op, _, _)) if i > op => continue,
+                Some((op, drawn, _)) if i == op => drawn,
                 _ => usize::MAX,
             };
             for stroke in &op.strokes {
@@ -222,8 +235,14 @@ pub fn draw(cam: &Cam, frame: &mut Frame) {
                 if stroke.rapid && !(this || edited_setup) {
                     continue;
                 }
+                let mut points = thinned(points, every);
+                if shift != [0.0; 3] {
+                    for p in &mut points {
+                        *p = std::array::from_fn(|k| p[k] + shift[k]);
+                    }
+                }
                 frame.lines.push(Polyline {
-                    points: thinned(points, every),
+                    points,
                     color: if stroke.rapid { RAPID } else { color },
                     width: if this { 1.5 } else { 1.0 },
                     dashed: stroke.rapid,
@@ -248,55 +267,62 @@ pub fn draw(cam: &Cam, frame: &mut Frame) {
 
 /// The material a run leaves, or leaves at a moment of its playback, kept
 /// by the host: written out with every frame it is a fifth of a megabyte
-/// and more, and a playback asks for a frame every frame.
+/// and more, and a playback asks for a frame every frame. A mesh a part.
 #[derive(Default)]
 pub struct KeptMaterial {
     /// The run it is of, kept so another run is never taken for it.
     run: Option<Rc<Run>>,
-    /// Which moment of the run's playback, by where it is; `None` for the
-    /// material the run leaves.
-    moment: Option<usize>,
-    mesh: Option<u64>,
+    /// Each part's: which moment of the run's playback, by where it is
+    /// (`None` for the material the run leaves), and its mesh.
+    parts: Vec<(Option<usize>, u64)>,
 }
 
 impl KeptMaterial {
-    /// The kept mesh of `run`'s material at `moment` (`None` at its end),
-    /// `make` making it when it is not the one kept; `None` when the host
-    /// keeps none.
+    /// The kept mesh of `run`'s material at part `part` at `moment` (`None`
+    /// at its end), `make` making it when it is not the one kept; `None`
+    /// when the host keeps none.
     fn mesh(
         &mut self,
         run: &Rc<Run>,
+        part: usize,
         moment: Option<&cam_protocol::Moment>,
         make: impl FnOnce() -> Mesh,
     ) -> Option<u64> {
         let at = moment.map(|m| std::ptr::from_ref(m) as usize);
-        let same_run = self.run.as_ref().is_some_and(|r| Rc::ptr_eq(r, run));
-        if same_run && self.moment == at && self.mesh.is_some() {
-            return self.mesh;
+        if !self.run.as_ref().is_some_and(|r| Rc::ptr_eq(r, run)) {
+            self.forget();
+            self.run = Some(run.clone());
+        }
+        if let Some(&(was, handle)) = self.parts.get(part) {
+            if was == at {
+                return Some(handle);
+            }
+            let mesh = make();
+            // Another moment of the same playback: the same grid, risen.
+            if at.is_some()
+                && was.is_some()
+                && host::mesh_update(handle, 0, &mesh.positions, &[]).is_ok()
+            {
+                self.parts[part].0 = at;
+                return Some(handle);
+            }
+            let made = host::mesh_create(&mesh.positions, &mesh.indices, &[]).ok()?;
+            host::mesh_remove(handle);
+            self.parts[part] = (at, made);
+            return Some(made);
+        }
+        // Parts are asked for in turn, the first first.
+        if part != self.parts.len() {
+            return None;
         }
         let mesh = make();
-        // Another moment of the same playback: the same grid, risen.
-        if same_run
-            && at.is_some()
-            && self.moment.is_some()
-            && let Some(handle) = self.mesh
-            && host::mesh_update(handle, 0, &mesh.positions, &[]).is_ok()
-        {
-            self.moment = at;
-            return Some(handle);
-        }
-        self.forget();
         let handle = host::mesh_create(&mesh.positions, &mesh.indices, &[]).ok()?;
-        *self = Self {
-            run: Some(run.clone()),
-            moment: at,
-            mesh: Some(handle),
-        };
+        self.parts.push((at, handle));
         Some(handle)
     }
 
     fn forget(&mut self) {
-        if let Some(handle) = self.mesh.take() {
+        for (_, handle) in self.parts.drain(..) {
             host::mesh_remove(handle);
         }
         self.run = None;
