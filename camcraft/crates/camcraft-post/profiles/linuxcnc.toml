@@ -29,6 +29,11 @@ drill_cycles = true
 # are not written. A left-hand tap is started M4; the reference does not say
 # G33.1 taps that way, so air-cut one first.
 tap = "g33.1"
+# A probe operation touches with G38.2, which stops where the probe touches
+# and stops the program with an error if it never does, and logs each point
+# to the file (PROBEOPEN name) opens, until (PROBECLOSE): a line a point,
+# X Y Z then the other axes, in the program's coordinates and units.
+probe = "g38.2-probeopen"
 
 # Work offsets past G59: a setup may use LinuxCNC's G59.1 to G59.3.
 extended_offsets = ["G59.1", "G59.2", "G59.3"]

@@ -61,6 +61,20 @@ pub enum StrategyError {
     /// A move could not be added.
     #[error(transparent)]
     Toolpath(#[from] ToolpathError),
+    /// A probe's heights in the wrong order: it comes down from the
+    /// clearance height to the retract height, and touches below that.
+    #[error(
+        "a probe comes down from the clearance height ({clearance:.3}) to the retract height \
+         ({retract:.3}) and touches at the top ({top:.3}): each must be above the next"
+    )]
+    ProbeHeights {
+        /// The clearance height.
+        clearance: f64,
+        /// The retract height.
+        retract: f64,
+        /// The top.
+        top: f64,
+    },
     /// The area is too large for the field a strategy works out over it: its grid
     /// would have to be so coarse it no longer places the passes.
     #[error(

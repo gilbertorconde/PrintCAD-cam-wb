@@ -19,7 +19,7 @@
 
 use camcraft_core::job::ThreadHand;
 use camcraft_core::job::{Coolant, SpindleDirection};
-use camcraft_core::path::toolpath::{Arc, MoveKind, MoveRole, Toolpath, principal};
+use camcraft_core::path::toolpath::{Arc, Move, MoveKind, MoveRole, Toolpath, principal};
 use camcraft_core::strategy::drilling::{Hole, Tap};
 use glam::{DVec2, DVec3, dvec3};
 
@@ -160,6 +160,21 @@ pub enum Op {
     CycleStart,
     /// End of a run of canned cycles (`G80`).
     CycleEnd,
+    /// A probing move from where the tool is towards `to`, at `feed`,
+    /// stopping where the probe touches (`G38.2`), and an error, the program
+    /// stopped, if it gets to `to` without touching. Where it stops is not
+    /// known until it does.
+    Probe {
+        /// Where it goes at most.
+        to: DVec3,
+        /// Feed in mm/min.
+        feed: f64,
+    },
+    /// Write each point probed from here on to the file `name`, as the
+    /// controller logs them (LinuxCNC's `(PROBEOPEN name)`).
+    ProbeOpen(String),
+    /// Close the file the points are written to (`(PROBECLOSE)`).
+    ProbeClose,
     /// Text passed through untouched, for manual NC and probe macros.
     Raw(String),
     /// A Custom G-code operation's lines, written as typed with their
@@ -250,12 +265,28 @@ pub struct ProgramSpec {
     /// coordinates, in millimetres, where it is known: for a control that
     /// draws the part as it cuts it.
     pub stock: Option<(DVec3, DVec3)>,
+    /// A probe operation's: each plunge of the path is a probing move
+    /// ([`Op::Probe`]) that goes on below it until it touches, and no
+    /// spindle turns.
+    pub probe: Option<Probing>,
     /// Custom G-code written before the operation's own start: the Custom
     /// G-code operations just before it in its setup.
     pub before: Vec<CustomGcode>,
     /// Custom G-code written after the operation ends, before the footer:
     /// the Custom G-code operations after the last operation of its setup.
     pub after: Vec<CustomGcode>,
+}
+
+/// How a probe operation's touches are written.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Probing {
+    /// How far below where it expects to touch each probing move may go
+    /// before the controller gives up, in millimetres.
+    pub depth: f64,
+    /// The file the controller writes each point to, where it writes them
+    /// to one named in the program (`(PROBEOPEN name)`); `None` where it
+    /// reports them itself, as GRBL does over its serial line.
+    pub log: Option<String>,
 }
 
 /// A drilling operation's holes, as canned cycles.
@@ -303,6 +334,7 @@ impl Default for ProgramSpec {
             rotary: Vec::new(),
             next_tool: None,
             stock: None,
+            probe: None,
             before: Vec::new(),
             after: Vec::new(),
         }
@@ -349,6 +381,19 @@ pub enum LowerError {
         /// The machine's name.
         machine: String,
         /// The built-in machines that tap, named.
+        can: String,
+    },
+    /// A probe operation, for a machine that has no probing move here.
+    #[error(
+        "{machine} cannot probe here: its post has no probing move whose results are \
+         known to be recorded. Post the probe for a machine that probes ({can}), or, if \
+         this one has G38.2, give its profile probe = \"g38.2\" (or \"g38.2-probeopen\" \
+         where it logs to a file)"
+    )]
+    CannotProbe {
+        /// The machine's name.
+        machine: String,
+        /// The built-in machines that probe, named.
         can: String,
     },
     /// A tap whose spindle turns against its thread.
@@ -416,11 +461,14 @@ pub fn lower_counted(
     if !spec.rotary.is_empty() {
         out.push(Op::Rotary(spec.rotary.clone()));
     }
-    out.push(Op::SpindleOn {
-        rpm: spec.rpm,
-        dir: spec.spin,
-    });
-    let coolant = spec.coolant != Coolant::Off;
+    // A probe is not turned, and nothing is cut to cool.
+    if spec.probe.is_none() {
+        out.push(Op::SpindleOn {
+            rpm: spec.rpm,
+            dir: spec.spin,
+        });
+    }
+    let coolant = spec.coolant != Coolant::Off && spec.probe.is_none();
     if coolant {
         out.push(Op::CoolantOn(spec.coolant));
     }
@@ -432,6 +480,8 @@ pub fn lower_counted(
         } else {
             cycles(d, spec.rpm, path, &mut out, &mut made);
         }
+    } else if let Some(p) = &spec.probe {
+        probes(p, path, &mut out, &mut made);
     } else {
         moves(path, &mut out, &mut made);
     }
@@ -640,8 +690,43 @@ pub fn extents(path: &Toolpath) -> Option<(DVec3, DVec3)> {
     Some((low, high))
 }
 
-pub(crate) fn moves(path: &Toolpath, out: &mut Vec<Op>, made: &mut Vec<usize>) {
+/// A probe operation's moves, each plunge a probing move that goes `p`'s
+/// depth further, between opening and closing the file the points go to,
+/// where the controller writes one. `made` as for [`moves`].
+pub(crate) fn probes(p: &Probing, path: &Toolpath, out: &mut Vec<Op>, made: &mut Vec<usize>) {
+    let mut count = made.last().copied().unwrap_or(0);
+    if let Some(name) = &p.log {
+        out.push(Op::ProbeOpen(name.clone()));
+        made.push(count);
+    }
     for (i, m) in path.moves().iter().enumerate() {
+        match (m.kind, m.role, m.feed) {
+            (MoveKind::Linear, MoveRole::Plunge, Some(feed)) => {
+                out.push(Op::Probe {
+                    to: m.to - DVec3::Z * p.depth,
+                    feed,
+                });
+                made.push(i + 1);
+            }
+            _ => moves_of(std::slice::from_ref(m), i, out, made),
+        }
+        count = i + 1;
+    }
+    if p.log.is_some() {
+        out.push(Op::ProbeClose);
+        made.push(count);
+    }
+}
+
+pub(crate) fn moves(path: &Toolpath, out: &mut Vec<Op>, made: &mut Vec<usize>) {
+    moves_of(path.moves(), 0, out, made);
+}
+
+/// `moves`, the `first`-th of a path on, as instructions; `made` as for
+/// [`lower_counted`].
+fn moves_of(moves: &[Move], first: usize, out: &mut Vec<Op>, made: &mut Vec<usize>) {
+    for (i, m) in moves.iter().enumerate() {
+        let i = first + i;
         let op = match (m.kind, m.role, m.feed) {
             (MoveKind::Linear, MoveRole::Rapid, _) => Op::Rapid { to: m.to },
             (MoveKind::Linear, role, Some(feed)) => Op::Feed {

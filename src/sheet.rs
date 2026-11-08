@@ -245,6 +245,11 @@ impl Sheet<'_> {
             )
         };
         rows.push(("Tool axis", sits));
+        // The surface every depth follows, which must be what was probed
+        // on the board as it is now clamped.
+        if let Some(probe) = layout.and_then(|l| l.probe.as_ref()) {
+            rows.push(("Z corrected to", probe.clone()));
+        }
         let mut body = list(&rows);
         if !tilt.is_empty() {
             body.push_str("<ul>\n");
@@ -507,6 +512,7 @@ fn kind(t: &ToolUse) -> String {
             Some([a, b]) => format!("thread mill, {} to {} mm pitch", num(a), num(b)),
             None => "thread mill".into(),
         },
+        "probe" => "touch probe".into(),
         other => other.into(),
     }
 }
@@ -780,6 +786,7 @@ mod tests {
                 tilt: Vec::new(),
                 post: "GRBL".into(),
                 date: "2026-11-07".into(),
+                probe: None,
             }),
             ..Run::default()
         }
@@ -804,6 +811,37 @@ mod tests {
             carried_from: None,
         }
         .html()
+    }
+
+    /// A setup corrected to probe results says which, and a probe is named
+    /// as one among the tools.
+    #[test]
+    fn a_sheet_names_the_probe_and_its_results() {
+        let mut run = run();
+        if let Some(l) = &mut run.layout {
+            l.probe = Some("board.txt: 5 x 4 points, -0.100 to 0.390 mm".into());
+        }
+        run.tools.push(ToolUse {
+            name: "2 mm touch probe".into(),
+            number: 9,
+            kind: "probe".into(),
+            diameter: 2.0,
+            ..ToolUse::default()
+        });
+        let setup = setup();
+        let html = Sheet {
+            name: "Top",
+            setup: &setup,
+            bodies: vec!["Bracket".into()],
+            run: &run,
+            carried_from: None,
+        }
+        .html();
+        assert!(
+            html.contains("<dt>Z corrected to</dt><dd>board.txt: 5 x 4 points"),
+            "{html}"
+        );
+        assert!(html.contains("touch probe"), "{html}");
     }
 
     /// The sheet says what the shop floor needs: the program, the stock and

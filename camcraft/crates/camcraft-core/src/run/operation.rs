@@ -322,6 +322,13 @@ pub(super) fn run_operation(
             // Never run as a cutting operation (`run_prepared_planned` leaves it
             // out); were it, it has nothing to cut.
             StrategySpec::CustomGcode {} => (Toolpath::new(), 0, StrategyDetail::CustomGcode),
+            // Never run as a cutting operation either: it touches and cuts
+            // nothing (`run_prepared_planned` probes).
+            StrategySpec::Probe { .. } => (
+                Toolpath::new(),
+                0,
+                StrategyDetail::Probe(Default::default()),
+            ),
         }
     };
 
@@ -632,6 +639,10 @@ pub(super) fn not_made(op: &Operation, spec: Option<&ToolSpec>, made: Made) -> O
             StrategyDetail::Holes(Default::default())
         }
         StrategySpec::CustomGcode {} => StrategyDetail::CustomGcode,
+        StrategySpec::Probe { max_depth, .. } => StrategyDetail::Probe(crate::probe::ProbeReport {
+            max_depth,
+            ..Default::default()
+        }),
         StrategySpec::Drill {
             peck,
             dwell,
@@ -652,7 +663,12 @@ pub(super) fn not_made(op: &Operation, spec: Option<&ToolSpec>, made: Made) -> O
         path: Toolpath::new(),
         tool_number: spec.map_or(0, |t| t.number),
         tool_length: spec.and_then(|t| t.gauge_length()),
-        rpm: op.passes.rpm.or(spec.map(|t| t.rpm)).unwrap_or(0),
+        // A probe is not turned.
+        rpm: if matches!(op.strategy, StrategySpec::Probe { .. }) {
+            0
+        } else {
+            op.passes.rpm.or(spec.map(|t| t.rpm)).unwrap_or(0)
+        },
         tool_comment: spec.map(|t| t.comment.clone()).unwrap_or_default(),
         // A tap turns the way its thread does, whichever way its tool says.
         spindle: match op.strategy.tap() {

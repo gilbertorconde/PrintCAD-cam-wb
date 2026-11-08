@@ -100,6 +100,7 @@ pub fn run_setup_from(
         &result.verify,
         result.verify_budget,
         &model_warnings,
+        result.probe_map.as_ref(),
     );
     let mut warnings = result.warnings();
     warnings.extend(model_warnings);
@@ -140,6 +141,14 @@ fn summary(result: &SetupResult) -> Vec<String> {
             ),
         })
         .collect();
+    if let Some(map) = &result.probe_map {
+        let (columns, rows) = map.size();
+        let (low, high) = map.heights();
+        out.push(format!(
+            "depths corrected to the probed surface: {columns} x {rows} point(s), \
+             {low:.3} to {high:.3} mm from the work zero"
+        ));
+    }
     out.push(format!(
         "verified: {} column(s) compared, gouges {}, deepest {:.3} mm, budget {:.3} mm",
         result.verify.compared,

@@ -323,6 +323,10 @@ pub enum ToolKind {
     /// across their points, cutting a thread as it goes round a helix. It
     /// cuts only threads.
     ThreadMill,
+    /// A touch probe: a ball `diameter` across on a stylus, which the
+    /// controller stops when it touches. It cuts nothing, and the spindle
+    /// does not turn it.
+    Probe,
 }
 
 /// The point angle a drill has when none is given.
@@ -335,7 +339,11 @@ impl ToolSpec {
         match self.kind {
             ToolKind::Ball => self.diameter / 2.0,
             ToolKind::Bullnose => self.corner,
-            ToolKind::Flat | ToolKind::Cone | ToolKind::Drill | ToolKind::ThreadMill => 0.0,
+            ToolKind::Flat
+            | ToolKind::Cone
+            | ToolKind::Drill
+            | ToolKind::ThreadMill
+            | ToolKind::Probe => 0.0,
         }
     }
 
@@ -639,6 +647,9 @@ impl ToolSpec {
             // so the groove the teeth cut in the wall is taken whole, as a
             // flat end mill its size takes it.
             ToolKind::ThreadMill => Flat::new(r).map(Cutter::from),
+            // Its ball, where it touches: it never goes into the material,
+            // so what it would sweep there is never asked.
+            ToolKind::Probe => Ball::new(r).map(Cutter::from),
         }
     }
 }

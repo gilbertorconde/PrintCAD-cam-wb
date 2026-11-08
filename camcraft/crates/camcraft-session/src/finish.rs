@@ -60,6 +60,7 @@ pub fn single_operation(spec: &FinishSpec, model: ModelDef) -> Job {
         ToolKind::Cone => "cone",
         ToolKind::Drill => "drill",
         ToolKind::ThreadMill => "thread-mill",
+        ToolKind::Probe => "probe",
     };
     let tool = ToolSpec {
         kind: spec.tool,

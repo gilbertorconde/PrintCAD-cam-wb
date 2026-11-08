@@ -359,6 +359,58 @@ pub enum StrategySpec {
     /// [`gcode`](super::Operation::gcode). It has no tool and no toolpath,
     /// and cuts nothing.
     CustomGcode {},
+    /// The stock's top touched with a touch probe at the points of a grid,
+    /// and where each touched recorded by the controller: the results a
+    /// setup corrects its cut depths from
+    /// ([`ZCorrection`](super::ZCorrection)). The grid covers what the
+    /// operation is kept to (its boundary: the stock's top unless picked
+    /// faces or a boundary say otherwise), `inset` in from its edges, in
+    /// columns and rows so many, or no further apart than asked. At each
+    /// point the probe goes down from the retract height at `probe_feed`,
+    /// stopping where it touches, to `max_depth` below the top at most, and
+    /// back up. It cuts nothing, and the spindle does not turn.
+    Probe {
+        /// How many columns, along X; as many as `x_spacing` makes when not
+        /// given.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        x_count: Option<u32>,
+        /// How many rows, along Y; as many as `y_spacing` makes when not
+        /// given.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        y_count: Option<u32>,
+        /// The furthest apart two columns are, in millimetres, when they are
+        /// not counted: the area's width spread evenly over as few as that
+        /// allows.
+        #[serde(
+            default = "default_probe_spacing",
+            skip_serializing_if = "is_probe_spacing"
+        )]
+        x_spacing: f64,
+        /// The furthest apart two rows are, in millimetres, when they are
+        /// not counted.
+        #[serde(
+            default = "default_probe_spacing",
+            skip_serializing_if = "is_probe_spacing"
+        )]
+        y_spacing: f64,
+        /// How far in from the area's edges the outer points are, in
+        /// millimetres, so the probe's ball lands on the top, not its edge.
+        #[serde(
+            default = "default_probe_inset",
+            skip_serializing_if = "is_probe_inset"
+        )]
+        inset: f64,
+        /// How fast it goes down to touch, in mm/min.
+        #[serde(default = "default_probe_feed", skip_serializing_if = "is_probe_feed")]
+        probe_feed: f64,
+        /// How far below the top it goes without touching before the
+        /// controller stops with an error, in millimetres.
+        #[serde(
+            default = "default_probe_depth",
+            skip_serializing_if = "is_probe_depth"
+        )]
+        max_depth: f64,
+    },
 }
 
 impl StrategySpec {
@@ -394,6 +446,7 @@ impl StrategySpec {
             StrategySpec::Slot { .. } => "slot",
             StrategySpec::Chamfer { .. } => "chamfer",
             StrategySpec::CustomGcode {} => "custom-gcode",
+            StrategySpec::Probe { .. } => "probe",
         }
     }
 
@@ -435,7 +488,8 @@ impl StrategySpec {
             | StrategySpec::VCarve { .. }
             | StrategySpec::Slot { .. }
             | StrategySpec::Chamfer { .. }
-            | StrategySpec::CustomGcode {} => false,
+            | StrategySpec::CustomGcode {}
+            | StrategySpec::Probe { .. } => false,
         }
     }
 
@@ -826,6 +880,51 @@ fn default_tip_offset() -> f64 {
 #[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_tip_offset(v: &f64) -> bool {
     (*v - 0.2).abs() < f64::EPSILON
+}
+
+/// Ten millimetres: a warped board's sag is gentle over that, and a sheet's
+/// grid stays a few hundred points.
+fn default_probe_spacing() -> f64 {
+    10.0
+}
+
+// A signature serde's `skip_serializing_if` requires.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_probe_spacing(v: &f64) -> bool {
+    (*v - 10.0).abs() < f64::EPSILON
+}
+
+/// Two millimetres: a probe's ball clear of the stock's edge.
+fn default_probe_inset() -> f64 {
+    2.0
+}
+
+// A signature serde's `skip_serializing_if` requires.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_probe_inset(v: &f64) -> bool {
+    (*v - 2.0).abs() < f64::EPSILON
+}
+
+/// 50 mm/min: slow enough that the probe stops before its stylus bends.
+fn default_probe_feed() -> f64 {
+    50.0
+}
+
+// A signature serde's `skip_serializing_if` requires.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_probe_feed(v: &f64) -> bool {
+    (*v - 50.0).abs() < f64::EPSILON
+}
+
+/// Three millimetres: more than a board warps, less than a stylus travels.
+fn default_probe_depth() -> f64 {
+    3.0
+}
+
+// A signature serde's `skip_serializing_if` requires.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_probe_depth(v: &f64) -> bool {
+    (*v - 3.0).abs() < f64::EPSILON
 }
 
 fn default_min_ring() -> f64 {

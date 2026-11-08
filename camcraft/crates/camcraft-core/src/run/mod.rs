@@ -112,10 +112,11 @@ pub fn run_prepared_planned(
     let blocks = &prepared.stocks;
     // What an earlier setup left, carried into this frame, when it carries on
     // from one; else its blocks, fresh.
-    let mut stock = match &prepared.carried {
-        Some((left, carry)) => left.carried(carry, all, ctx.stock_bottom - 1.0, sim_pitch)?,
-        None => Stock::from_blocks(blocks, ctx.stock_bottom - 1.0, sim_pitch)?,
+    let fresh = || match &prepared.carried {
+        Some((left, carry)) => left.carried(carry, all, ctx.stock_bottom - 1.0, sim_pitch),
+        None => Stock::from_blocks(blocks, ctx.stock_bottom - 1.0, sim_pitch),
     };
+    let mut stock = fresh()?;
     // The part's top on the simulator's grid: what the tool above its flutes
     // is checked against as each operation cuts, and what the result is
     // verified against at the end.
@@ -123,6 +124,18 @@ pub fn run_prepared_planned(
     let cutter = DropCutter::new(mesh);
     // Found once for the setup, when an operation first needs them.
     let flats = OnceCell::new();
+    // The probed surface the setup's depths are corrected to, if they are.
+    let probed = match setup.z_correction.as_ref().and_then(|z| z.map()) {
+        Some(Ok(map)) => Some(map),
+        Some(Err(e)) => {
+            return Err(JobError::BadProbeMap {
+                setup: setup.name.clone(),
+                why: format!("are no map: {e}"),
+            }
+            .into());
+        }
+        None => None,
+    };
 
     let mut operations = Vec::with_capacity(setup.operations.len());
     let mut keyframes = Vec::with_capacity(setup.operations.len() + 1);
@@ -154,7 +167,21 @@ pub fn run_prepared_planned(
             continue;
         }
         let (spec, tool) = tool_of(job, op)?;
-        if let Plan::Keep(before) = plan {
+        // Touched, not cut: nothing of the material changes.
+        if matches!(op.strategy, StrategySpec::Probe { .. }) {
+            operations.push(probe(job, op, spec, prepared, bodies, &ctx, (lo, hi))?);
+            let same = keyframes
+                .last()
+                .map_or_else(|| Arc::new(PackedStock::pack(&stock)), Arc::clone);
+            keyframes.push(same);
+            continue;
+        }
+        // What was kept was corrected to the surface, and is worked out again
+        // rather than cut uncorrected into the material the rest is planned
+        // against.
+        if let Plan::Keep(before) = plan
+            && probed.is_none()
+        {
             let mut kept = (**before).clone();
             (kept.sim, kept.clashes) = cut_kept(
                 &mut stock,
@@ -219,6 +246,33 @@ pub fn run_prepared_planned(
         keyframes.push(Arc::new(PackedStock::pack(&stock)));
     }
 
+    // Planned against the stock as modelled, each operation is then moved
+    // to the probed surface and cut again, in order, into a stock whose top
+    // follows it, so what is simulated and checked is what will be cut.
+    // The part follows the surface too: what the holder is checked against
+    // and what the result is verified against.
+    let surface = match &probed {
+        Some(map) => {
+            let segment = setup
+                .z_correction
+                .as_ref()
+                .map_or(crate::job::DEFAULT_SEGMENT, |z| z.segment);
+            let warped = surface.warped(|p| map.height(p));
+            let (s, k) = corrected(
+                job,
+                setup,
+                (map, segment),
+                &mut operations,
+                fresh()?.warped(|p| map.height(p)),
+                warped.field(),
+            )?;
+            stock = s;
+            keyframes = k;
+            warped
+        }
+        None => surface,
+    };
+
     // The simulator resolves the surface on a grid, so it cannot be held finer than
     // one cell plus the chordal tolerance the paths were built to; and that holds
     // across as well as down, or every vertical wall is a gouge beside it.
@@ -240,7 +294,131 @@ pub fn run_prepared_planned(
         stock_max: hi,
         heights: ctx,
         keyframes,
+        probe_map: probed,
     })
+}
+
+/// A probe operation's run: the points of its grid, over what it is kept
+/// to, the stock's footprint unless its boundary says otherwise, each
+/// touched from its retract height at its top.
+fn probe(
+    job: &Job,
+    op: &Operation,
+    spec: &ToolSpec,
+    prepared: &Prepared,
+    bodies: &Bodies<'_>,
+    ctx: &crate::job::HeightContext,
+    (lo, hi): (glam::DVec2, glam::DVec2),
+) -> Result<OperationResult, RunError> {
+    let StrategySpec::Probe {
+        x_count,
+        y_count,
+        x_spacing,
+        y_spacing,
+        inset,
+        probe_feed,
+        max_depth,
+    } = op.strategy
+    else {
+        return Ok(not_made(op, Some(spec), Made::Skipped));
+    };
+    let picking = Picking::new(&op.selection, prepared, bodies, job.tolerance);
+    let ctx = heights_of(op, &picking, ctx)?;
+    // The probe's ball centre is where it is kept to: the area's own edge.
+    let area = picking
+        .machining_boundary(&op.boundary, 0.0)
+        .map_err(in_op(op))?
+        .and_then(|r| r.bounds())
+        .map_or((lo, hi), |(a, b)| (a.max(lo), b.min(hi)));
+    let (a, b) = (area.0 + inset, area.1 - inset);
+    if a.x > b.x || a.y > b.y {
+        return Err(in_op(op)(crate::strategy::StrategyError::EmptyRegion {
+            min: a,
+            max: b,
+        }));
+    }
+    let xs = crate::probe::grid_lines(a.x, b.x, x_count, x_spacing);
+    let ys = crate::probe::grid_lines(a.y, b.y, y_count, y_spacing);
+    let clearance = op.heights.clearance.resolve(&ctx);
+    let retract = op.heights.retract.resolve(&ctx);
+    let (top, _) = op.levels_3d(&ctx);
+    if retract <= top || clearance < retract {
+        return Err(in_op(op)(crate::strategy::StrategyError::ProbeHeights {
+            clearance,
+            retract,
+            top,
+        }));
+    }
+    let path = crate::probe::probe_path(&xs, &ys, (clearance, retract, top), probe_feed)?;
+    let points = xs.len() * ys.len();
+    Ok(OperationResult {
+        path,
+        passes: points as u64,
+        detail: StrategyDetail::Probe(crate::probe::ProbeReport {
+            columns: xs.len(),
+            rows: ys.len(),
+            max_depth,
+        }),
+        clearance_z: clearance,
+        ..not_made(op, Some(spec), Made::Generated)
+    })
+}
+
+/// Every operation of `setup` with paths, but a probe's, moved to the probed
+/// surface `map`, its moves split no longer than `segment`, and cut again in
+/// order into `stock`, whose top is moved to the surface already, the holder
+/// watched against the `part` moved likewise: that stock as they leave it,
+/// and the material before the first and after each.
+fn corrected(
+    job: &Job,
+    setup: &Setup,
+    (map, segment): (&crate::probe::ProbeMap, f64),
+    operations: &mut [OperationResult],
+    mut stock: Stock,
+    part: &camcraft_geom::heightmap::HeightMap,
+) -> Result<(Stock, Vec<Arc<PackedStock>>), RunError> {
+    let mut keyframes = vec![Arc::new(PackedStock::pack(&stock))];
+    for (op, result) in setup.operations.iter().zip(operations.iter_mut()) {
+        let probing = matches!(op.strategy, StrategySpec::Probe { .. });
+        if result.made.has_paths() && !probing {
+            let c = crate::probe::correct(&result.path, map, segment, job.tolerance)?;
+            if c.outside > 0 {
+                result.warnings.push(format!(
+                    "{} point(s) of its path are outside the probed area, up to {:.1} mm: \
+                     corrected as at its nearest edge",
+                    c.outside, c.furthest
+                ));
+            }
+            result.path = c.path;
+            if let StrategyDetail::Drill(r) = &mut result.detail {
+                crate::probe::correct_holes(&mut r.holes, map);
+            }
+            let (spec, tool) = tool_of(job, op)?;
+            (result.sim, result.clashes) =
+                cut_kept(&mut stock, &result.path, spec, &tool, job.tolerance, part);
+            // What the simulator said of the path as planned is said again
+            // of it as corrected.
+            result
+                .warnings
+                .retain(|w| !w.contains("pass through material"));
+            if result.sim.rapid_contacts > 0 {
+                result.warnings.push(format!(
+                    "{} rapid move(s) pass through material, deepest {:.2} mm",
+                    result.sim.rapid_contacts, result.sim.deepest_rapid_contact_mm
+                ));
+            }
+            let start = result
+                .path
+                .moves()
+                .first()
+                .map_or(glam::DVec3::ZERO, |m| m.to);
+            let (steep, deepest) = result.path.steep_cut_descents(start, PLUNGE_RATIO);
+            result.steep_cut_descents = steep;
+            result.deepest_cut_descent_mm = deepest;
+        }
+        keyframes.push(Arc::new(PackedStock::pack(&stock)));
+    }
+    Ok((stock, keyframes))
 }
 
 /// The part as the setup's operations mean to leave it: cut past where one with

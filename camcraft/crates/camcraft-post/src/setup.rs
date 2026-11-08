@@ -19,7 +19,9 @@
 use camcraft_core::job::Coolant;
 use camcraft_core::path::toolpath::Toolpath;
 
-use crate::op::{LowerError, Op, ProgramSpec, cycles, moves, refuse, rigid_taps, tilt_notes};
+use crate::op::{
+    LowerError, Op, ProgramSpec, cycles, moves, probes, refuse, rigid_taps, tilt_notes,
+};
 use crate::profile::{Profile, TapStyle};
 
 /// One operation of a setup's program: its path, and everything else a
@@ -159,12 +161,15 @@ pub fn lower_setup(sections: &[Section], join: Joining) -> Result<(Vec<Op>, Made
                 if before.is_none() && !spec.rotary.is_empty() {
                     w.push(Op::Rotary(spec.rotary.clone()));
                 }
-                w.push(Op::SpindleOn {
-                    rpm: spec.rpm,
-                    dir: spec.spin,
-                });
-                if spec.coolant != Coolant::Off {
-                    w.push(Op::CoolantOn(spec.coolant));
+                // A probe is not turned, and nothing is cut to cool.
+                if spec.probe.is_none() {
+                    w.push(Op::SpindleOn {
+                        rpm: spec.rpm,
+                        dir: spec.spin,
+                    });
+                    if spec.coolant != Coolant::Off {
+                        w.push(Op::CoolantOn(spec.coolant));
+                    }
                 }
             }
         }
@@ -242,7 +247,10 @@ impl Stream {
                 rigid_taps(d, s.path, &mut ops, &mut made);
             }
             Some(d) => cycles(d, s.spec.rpm, s.path, &mut ops, &mut made),
-            None => moves(s.path, &mut ops, &mut made),
+            None => match &s.spec.probe {
+                Some(p) => probes(p, s.path, &mut ops, &mut made),
+                None => moves(s.path, &mut ops, &mut made),
+            },
         }
         for (op, n) in ops.into_iter().zip(made) {
             self.count = n;

@@ -80,6 +80,25 @@ pub struct PassesData {
     pub thread_diameter: Opt,
     #[serde(default = "one_mm")]
     pub thread_passes: f64,
+    /// A probe grid's columns and rows: so many where given, else as few as
+    /// keep them no further apart than the spacing.
+    #[serde(default)]
+    pub probe_x_count: Opt,
+    #[serde(default)]
+    pub probe_y_count: Opt,
+    #[serde(default = "ten")]
+    pub probe_x_spacing: f64,
+    #[serde(default = "ten")]
+    pub probe_y_spacing: f64,
+    /// How far in from the edges the outer points are.
+    #[serde(default = "two_mm")]
+    pub probe_inset: f64,
+    /// How fast it goes down to touch, mm/min.
+    #[serde(default = "fifty")]
+    pub probe_feed: f64,
+    /// How far below the top it may go before the controller gives up.
+    #[serde(default = "three")]
+    pub probe_depth: f64,
     /// Adaptive clearing's rest machining: only what the operations before
     /// it left, rest thinner than the adjustment taken as cleared.
     #[serde(default)]
@@ -142,6 +161,13 @@ impl Default for PassesData {
             thread_pitch: one_mm(),
             thread_diameter: Opt::default(),
             thread_passes: 1.0,
+            probe_x_count: Opt::default(),
+            probe_y_count: Opt::default(),
+            probe_x_spacing: ten(),
+            probe_y_spacing: ten(),
+            probe_inset: two_mm(),
+            probe_feed: fifty(),
+            probe_depth: three(),
             rest: false,
             rest_adjustment: 0.0,
             tabs: false,
@@ -169,6 +195,7 @@ impl Default for PassesData {
             "bore",
             "circular",
             "thread",
+            "probe",
         ] {
             out.read_strategy(&named(name));
         }
@@ -199,6 +226,29 @@ fn fifth() -> f64 {
 /// before they had them: camcraft's.
 fn one_mm() -> f64 {
     1.0
+}
+
+/// A probe grid's spacing, inset, feed and depth in a document from before
+/// it had them: camcraft's.
+fn ten() -> f64 {
+    10.0
+}
+
+fn two_mm() -> f64 {
+    2.0
+}
+
+fn fifty() -> f64 {
+    50.0
+}
+
+fn three() -> f64 {
+    3.0
+}
+
+/// A count as camcraft takes it: a whole number, at least one.
+fn count(v: Opt) -> Option<u32> {
+    v.get().map(|n| n.round().clamp(1.0, 1000.0) as u32)
 }
 
 fn named(name: &str) -> StrategySpec {
@@ -328,6 +378,22 @@ impl PassesData {
                 self.thread_diameter = Opt::of(diameter);
                 self.thread_passes = f64::from(radial_passes);
             }
+            StrategySpec::Probe {
+                x_count,
+                y_count,
+                x_spacing,
+                y_spacing,
+                inset,
+                probe_feed,
+                max_depth,
+            } => {
+                self.probe_x_count = Opt::of(x_count.map(f64::from));
+                self.probe_y_count = Opt::of(y_count.map(f64::from));
+                (self.probe_x_spacing, self.probe_y_spacing) = (x_spacing, y_spacing);
+                self.probe_inset = inset;
+                self.probe_feed = probe_feed;
+                self.probe_depth = max_depth;
+            }
             StrategySpec::Adaptive { rest, .. } => {
                 // Off, the adjustment keeps what it was, for when it is on.
                 self.rest = rest.is_some();
@@ -454,6 +520,21 @@ impl PassesData {
                 *diameter = self.thread_diameter.get();
                 *radial_passes = self.thread_passes.round().clamp(1.0, 20.0) as u32;
             }
+            StrategySpec::Probe {
+                x_count,
+                y_count,
+                x_spacing,
+                y_spacing,
+                inset,
+                probe_feed,
+                max_depth,
+            } => {
+                (*x_count, *y_count) = (count(self.probe_x_count), count(self.probe_y_count));
+                (*x_spacing, *y_spacing) = (self.probe_x_spacing, self.probe_y_spacing);
+                *inset = self.probe_inset;
+                *probe_feed = self.probe_feed;
+                *max_depth = self.probe_depth;
+            }
             StrategySpec::Adaptive { rest, .. } => {
                 *rest = self.rest.then_some(Rest {
                     source: RestSource::FromPreviousOperations,
@@ -561,6 +642,14 @@ impl PassesData {
         add(thread, "thread_pitch", "Thread pitch", Dim::Length);
         add(thread, "thread_passes", "Radial passes", Dim::Number);
         add(chamfer, "tip_offset", "Tip offset", Dim::Length);
+        let probe = matches!(s, StrategySpec::Probe { .. });
+        let x_spaced = probe && !self.probe_x_count.given;
+        let y_spaced = probe && !self.probe_y_count.given;
+        add(x_spaced, "probe_x_spacing", "Column spacing", Dim::Length);
+        add(y_spaced, "probe_y_spacing", "Row spacing", Dim::Length);
+        add(probe, "probe_inset", "Inset", Dim::Length);
+        add(probe, "probe_feed", "Probe feed", Dim::Number);
+        add(probe, "probe_depth", "Probe depth", Dim::Length);
         let tabs = uses.tabs && self.tabs;
         add(tabs, "tab_width", "Tab width", Dim::Length);
         add(tabs, "tab_height", "Tab height", Dim::Length);
@@ -610,6 +699,18 @@ impl PassesData {
                 "relief_angle",
                 "Relieve corners sharper than",
                 Dim::Angle,
+            ),
+            (
+                probe && self.probe_x_count.given,
+                "probe_x_count",
+                "Columns",
+                Dim::Number,
+            ),
+            (
+                probe && self.probe_y_count.given,
+                "probe_y_count",
+                "Rows",
+                Dim::Number,
             ),
             (
                 finishing && self.finishing_stepover.given,
@@ -979,6 +1080,11 @@ pub fn strategy_rows(data: &OperationData, tool: Option<&ToolSpec>, feature: &st
             on: p.use_holder,
         });
     }
+    if let StrategySpec::Probe { .. } = s {
+        probe_rows(&mut rows, p, feature);
+        // It touches; nothing steps down.
+        return rows;
+    }
     rows.push(length(
         "passes/max_cut_step",
         "Deepest step",
@@ -1000,6 +1106,94 @@ fn follows_part(s: &StrategySpec) -> bool {
             | StrategySpec::Radial { .. }
             | StrategySpec::MorphedSpiral { .. }
     )
+}
+
+/// A probe operation's rows: its grid, by counts or spacing, its inset, its
+/// feed and how far it may go, and what it writes.
+fn probe_rows(rows: &mut Vec<Widget>, p: &PassesData, feature: &str) {
+    for (field, label, spacing, spacing_label, opt, value) in [
+        (
+            "probe_x_count",
+            "Columns",
+            "probe_x_spacing",
+            "Column spacing, at most",
+            p.probe_x_count,
+            p.probe_x_spacing,
+        ),
+        (
+            "probe_y_count",
+            "Rows",
+            "probe_y_spacing",
+            "Row spacing, at most",
+            p.probe_y_count,
+            p.probe_y_spacing,
+        ),
+    ] {
+        rows.push(Widget::Toggle {
+            id: format!("passes/{field}/given"),
+            label: if opt.given {
+                format!("Set the {}", label.to_lowercase())
+            } else {
+                format!("{label}: as many as the spacing makes")
+            },
+            on: opt.given,
+        });
+        rows.push(if opt.given {
+            number(
+                &format!("passes/{field}/value"),
+                label,
+                opt.value,
+                Dim::Number,
+                0,
+                feature,
+            )
+        } else {
+            number(
+                &format!("passes/{spacing}"),
+                spacing_label,
+                value,
+                Dim::Length,
+                2,
+                feature,
+            )
+        });
+    }
+    rows.push(number(
+        "passes/probe_inset",
+        "Inset from the edges",
+        p.probe_inset,
+        Dim::Length,
+        2,
+        feature,
+    ));
+    rows.push(number(
+        "passes/probe_feed",
+        "Probe feed, mm/min",
+        p.probe_feed,
+        Dim::Number,
+        0,
+        feature,
+    ));
+    rows.push(number(
+        "passes/probe_depth",
+        "Probe depth below the top",
+        p.probe_depth,
+        Dim::Length,
+        2,
+        feature,
+    ));
+    rows.push(Widget::Text {
+        text: "Each point of the grid, over what the boundary keeps it to, is touched \
+               from the retract height: down at the probe feed until the probe touches \
+               (G38.2), no further than the probe depth below the top, and back up. \
+               The spindle never turns. LinuxCNC writes the points to a file named \
+               after the operation ((PROBEOPEN ...)); GRBL reports each over the \
+               serial line, in machine coordinates, for the sender to keep. Other \
+               posts cannot probe. Load the points into the setup to correct its \
+               depths."
+            .into(),
+        mono: false,
+    });
 }
 
 /// Where a chamfer puts `tool`, or why it cannot.
@@ -1328,6 +1522,7 @@ fn start(field: &str, data: &OperationData, tool: Option<&ToolSpec>) -> Option<f
         "max_depth" => 1.0,
         "thread_diameter" => nominal(data.passes.thread_pitch),
         "relief_angle" => obtuse().value,
+        "probe_x_count" | "probe_y_count" => 5.0,
         _ => return None,
     })
 }
@@ -1389,6 +1584,12 @@ fn put_right(p: &mut PassesData) {
     p.thread_passes = p.thread_passes.round().clamp(1.0, 20.0);
     p.tip_offset = p.tip_offset.max(0.0);
     p.boss_width = p.boss_width.max(0.0);
+    for c in [&mut p.probe_x_count, &mut p.probe_y_count] {
+        if c.given {
+            c.value = c.value.round().clamp(1.0, 1000.0);
+        }
+    }
+    p.probe_inset = p.probe_inset.max(0.0);
     p.rest_adjustment = p.rest_adjustment.max(0.0);
     p.relief_angle.value = p.relief_angle.value.clamp(1.0, 180.0);
 }
@@ -1534,6 +1735,39 @@ mod tests {
 
     fn op(strategy: &str) -> OperationData {
         OperationData::new(None, named(strategy))
+    }
+
+    /// A probe's grid, by counts or by spacing, its inset, feed and depth
+    /// reach its operation and come back from it.
+    #[test]
+    fn a_probes_grid_reaches_its_operation() {
+        let mut probe = op("probe");
+        let p = &mut probe.passes;
+        p.probe_x_count = Opt::of(Some(4.0));
+        p.probe_y_spacing = 7.5;
+        (p.probe_inset, p.probe_feed, p.probe_depth) = (1.0, 80.0, 2.5);
+        let cut = probe.operation("");
+        assert_eq!(
+            cut.strategy,
+            StrategySpec::Probe {
+                x_count: Some(4),
+                y_count: None,
+                x_spacing: 10.0,
+                y_spacing: 7.5,
+                inset: 1.0,
+                probe_feed: 80.0,
+                max_depth: 2.5,
+            }
+        );
+        assert_eq!(PassesData::of(&cut), probe.passes);
+        let names: Vec<_> = probe
+            .passes
+            .parameters(&cut)
+            .into_iter()
+            .map(|(_, n, _, _)| n)
+            .collect();
+        assert!(names.contains(&"probe_x_count") && names.contains(&"probe_y_spacing"));
+        assert!(!names.contains(&"probe_x_spacing"));
     }
 
     #[test]

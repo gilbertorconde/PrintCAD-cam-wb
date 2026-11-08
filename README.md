@@ -141,6 +141,42 @@ panels, the drawing and the helper that runs camcraft.
   is alone. Copies apart are worked out at once, on every core. A
   copy that goes further outside the stock than the original is a
   warning, and copies that find nothing to clear are said.
+- **Probing, and depths corrected to it,** for engraving, PCB isolation
+  and V-carving on a board that is not flat, or for setting the work
+  zero. A probe operation touches a grid of points over the stock's top
+  (or over picked faces or a boundary), so many columns and rows or no
+  further apart than asked, an inset in from the edges: at each point a
+  touch probe, a tool kind of its own that the spindle never turns, goes
+  down from the retract height at the probe feed until it touches, no
+  further than the probe depth below the top, and back up. It is written
+  as `G38.2`, which stops the program if the probe never touches. On
+  LinuxCNC the program logs each point to a file named after the
+  operation, `(PROBEOPEN probe-grid.txt)` to `(PROBECLOSE)`; GRBL reports
+  each over the serial line as `[PRB:x,y,z:1]`, in machine coordinates,
+  so keep the sender's probe log and save it in work coordinates (take
+  the work offset off, or use a sender's autolevel export). Masso,
+  Centroid, Mach, Fanuc, Haas and Heidenhain are refused with a failed
+  check: how they record what they probe is not known here. A profile of
+  your own probes with `probe = "g38.2"` or `"g38.2-probeopen"`. A
+  setup's Probed surface group then corrects Z from the results: Load
+  probe results… reads a LinuxCNC log (x y z and the other axes a line)
+  or a CSV of x, y, z, in the post's units and the setup's work
+  coordinates, which must fill a grid, and keeps them in the document.
+  Every move of every operation but a probe's goes up or down by the
+  surface's height there, bilinearly between the points: a cut split no
+  longer than the segment length (1 mm), an arc into straight pieces
+  where the surface is not level under it (one point probed moves
+  everything by it, arcs and all). Past the probed area the surface is
+  taken as at its nearest edge, and the operation says how far it went.
+  The simulation and the checks run on the corrected paths, against a
+  stock and a part whose top follows the surface, the holder's too. A
+  probe takes as long as its moves at the probe feed; the setup sheet
+  lists the probe among the tools, where its points go, and the results
+  the depths follow. A probe in one program with the cuts corrected to
+  probe results is a failed check: that program would cut to what was
+  probed before it, not to what it probes. Post one program per
+  operation, or put the probe in a setup of its own, and load what it
+  probed before posting the cuts.
 - **Rest machining,** as Fusion's, on adaptive clearing: off unless
   ticked; on, it clears only what the operations before it in the setup
   left (from previous operations), say the corners a bigger tool could not
@@ -210,8 +246,9 @@ panels, the drawing and the helper that runs camcraft.
   collet chucks and side-lock holders on BT30, CAT40, BT40 and HSK63A, at
   typical sizes), or its own, a stack of segments each with its diameter at
   its foot and top and its length. A Fusion tool library exported as CSV or
-  JSON imports into it, the JSON bringing each tool's holder. A setup takes a
-  copy of a tool when an operation first cuts with it, so a document never
+  JSON imports into it, the JSON bringing each tool's holder. A touch
+  probe is a kind of its own, its ball's diameter, which only a probe
+  operation takes. A setup takes a copy of a tool when an operation first cuts with it, so a document never
   depends on the machine it is opened on.
 - **Status in the tree.** Each setup and operation shows how its run went:
   running (with how far), done, warnings, failed, or out of date.
@@ -469,6 +506,12 @@ local holes = cam.operation{setup = setup.feature, strategy = "thread", tool = "
                             faces = {{body = "<body id>", at = {10, 10, -3}}},
                             holes = {same_diameter = true, order = "x-then-y"},
                             passes = {thread_pitch = 1.25, thread_passes = 2}}
+local grid = cam.operation{setup = setup.feature, strategy = "probe", tool = "2 mm probe",
+                           passes = {probe_x_count = {value = 5, given = true},
+                                     probe_y_spacing = 15, probe_depth = 2}}
+local board = cam.setup{bodies = {"<body id>"}, post = "linuxcnc",
+                        probe_map = {path = "/home/me/linuxcnc/probe-grid.txt"}}
+                                        -- or text = the file's contents; segment = 0.5
 local clamps = cam.operation{setup = setup.feature, strategy = "custom-gcode",
                              gcode = "M0 (move the clamps for @operation@)\nM7"}
 cam.status{id = setup.feature}          -- queued, running, ready (with its checks), failed
@@ -521,6 +564,10 @@ useful there.
   speed and anything a machine does to speed up or slow down are not in
   it. A setup sheet has no picture of the part, as a package cannot take
   one of the view.
+- Probing writes `G38.2` for LinuxCNC and GRBL only, and nothing reads
+  GRBL's `[PRB:..]` reports, which are in machine coordinates. Results are
+  corrected to as they are, from the work zero: the probe's ball touching
+  a slope off its centre, and its trigger travel, are not allowed for.
 - Travel is checked as a box of the program's moves, in the setup's
   frame: where the rotaries carry the part while they turn, the holder and
   the spindle against the part or the table, and a controller's own

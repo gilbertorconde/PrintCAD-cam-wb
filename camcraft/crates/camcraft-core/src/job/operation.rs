@@ -105,6 +105,18 @@ impl Operation {
     /// than the tool's radius beside; and in 3D, where a round end has to stay
     /// round, no more than its corner radius down.
     pub fn cannot_use(&self, tool: &ToolSpec) -> Option<&'static str> {
+        // A probe touches and cuts nothing; nothing else touches.
+        let probing = matches!(self.strategy, StrategySpec::Probe { .. });
+        if probing != (tool.kind == ToolKind::Probe) {
+            return Some(if probing {
+                "probe with a touch probe"
+            } else {
+                "a touch probe cuts nothing; use a probe operation"
+            });
+        }
+        if probing {
+            return None;
+        }
         let uses = self.strategy.uses();
         let drilling = matches!(self.strategy, StrategySpec::Drill { .. });
         // A thread mill's teeth are the thread's form: it cuts nothing else,

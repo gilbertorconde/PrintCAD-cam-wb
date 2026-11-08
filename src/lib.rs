@@ -1310,6 +1310,15 @@ impl Bench for Cam {
                             false,
                             "what the stock is, for its setup sheet: 6061 aluminium, MDF",
                         ),
+                        param(
+                            "probe_map",
+                            ParamKind::Any,
+                            false,
+                            "{path = a probe result file, read each run, or text = its \
+                             contents; segment = mm, 1}: every cut's depth corrected to the \
+                             probed surface. A LinuxCNC probe log (x y z ...) or a CSV of x, y, \
+                             z, in the post's units and the setup's work coordinates",
+                        ),
                         param("name", ParamKind::String, false, "the setup's name"),
                     ],
                     returns: "{feature}".into(),
@@ -1393,9 +1402,11 @@ impl Bench for Cam {
                              turn; boss_width: circular's, mm; thread_pitch, thread_passes: \
                              a milled thread's; rest: adaptive's rest machining, a boolean, \
                              from the operations before it; rest_adjustment: mm, rest thinner \
-                             than it left; outer_radius, peck, chip_break, dwell, pitch, \
-                             max_depth, finishing_stepover, finishing_feed, thread_diameter: \
-                             {value, given}}",
+                             than it left; probe_x_spacing, probe_y_spacing, probe_inset (mm), \
+                             probe_feed (mm/min), probe_depth (mm below the top): a probe \
+                             grid's; outer_radius, peck, chip_break, dwell, pitch, max_depth, \
+                             finishing_stepover, finishing_feed, thread_diameter, \
+                             probe_x_count, probe_y_count: {value, given}}",
                         ),
                         param(
                             "boundary",
@@ -1536,6 +1547,15 @@ impl Bench for Cam {
                          as @tool@, @rpm@ and @operation@ are the program's. A line that moves \
                          the machine or changes a mode (an axis word, any G code but G4, M6, \
                          M2, M30) is a failed check; a subprogram call a warning."
+                            .into(),
+                        "A probe (strategy probe, a touch probe tool) touches a grid over the \
+                         stock's top, or its boundary, an inset in: probe_x_count/probe_y_count \
+                         columns and rows, or as few as keep them probe_x_spacing/ \
+                         probe_y_spacing apart (10 mm), each down from the retract height at \
+                         probe_feed (50 mm/min) by G38.2, at most probe_depth (3 mm) below the \
+                         top. LinuxCNC logs the points to a file named after the operation \
+                         (PROBEOPEN); GRBL reports them over the serial line; other posts \
+                         cannot probe. A setup's probe_map then corrects every cut to them."
                             .into(),
                         "Drilling: peck backs out between pecks, and with chip_break only that \
                          far (G73); pitch, mm a turn, taps each hole instead (hand = left for a \
@@ -1965,8 +1985,35 @@ impl Bench for Cam {
                         return Err(format!("no programs '{other}': setup or operation"));
                     }
                 };
+                let probe: Option<ProbeMapArgs> = match args.get("probe_map") {
+                    Some(v) => Some(serde_json::from_value(v.clone()).map_err(
+                        |_| "probe_map is {path = a file} or {text = its contents}, with segment",
+                    )?),
+                    None => None,
+                };
+                // Read before the setup is made, so results that are no map
+                // make none.
+                let mut probed = SetupData::new(Vec::new(), "", 0.0);
+                if let Some(ProbeMapArgs {
+                    text: Some(t),
+                    path,
+                    ..
+                }) = &probe
+                {
+                    probed
+                        .load_probe_results(path.as_deref().unwrap_or("the script's"), t)
+                        .map_err(|e| format!("probe_map: {e}"))?;
+                }
                 let id = self.make_setup(bodies, text("name").as_deref())?;
                 if let Some((_, mut data)) = setup_node(&id) {
+                    if let Some(p) = &probe {
+                        data.probe_correct = true;
+                        data.probe_points = probed.probe_points;
+                        data.probe_file = p.path.clone().unwrap_or(probed.probe_file);
+                        if let Some(s) = p.segment {
+                            data.probe_segment = s;
+                        }
+                    }
                     if let Some(z) = up_axis {
                         data.z_axis = z;
                         data.square_axes();
@@ -2312,6 +2359,27 @@ impl Bench for Cam {
                 before,
             } => self.move_operation(feature, target, *before),
             Event::FileOpened { id, files } => {
+                if let Some(setup) = id.strip_prefix(tools::OPEN_PROBE) {
+                    let Some(f) = files.first() else {
+                        return false;
+                    };
+                    let said = match (std::str::from_utf8(&f.contents), setup_node(setup)) {
+                        (Ok(text), Some((_, mut data))) => {
+                            match data.load_probe_results(&f.name, text) {
+                                Ok(said) => {
+                                    self.write_setup(setup, &data);
+                                    said
+                                }
+                                Err(e) => format!("{}: {e}", f.name),
+                            }
+                        }
+                        (Err(_), _) => format!("{} is not text.", f.name),
+                        (_, None) => "The setup is gone.".into(),
+                    };
+                    self.hint = Some(said);
+                    host::redraw();
+                    return true;
+                }
                 let opened = tools::files_opened(
                     id,
                     files,
@@ -2683,6 +2751,19 @@ struct Direction3 {
     y: f64,
     #[serde(default)]
     z: f64,
+}
+
+/// The probe results a script corrects a setup's depths from: a file the
+/// helper reads each run, or its text, and how long a corrected piece is.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProbeMapArgs {
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    segment: Option<f64>,
 }
 
 /// Tilts a script gives, `{x, y}` in degrees.

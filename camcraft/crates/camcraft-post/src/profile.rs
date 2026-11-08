@@ -134,6 +134,30 @@ pub enum TapStyle {
     Cannot,
 }
 
+/// How a probe operation's touches are written, and where the controller
+/// puts the points it finds. Only controllers whose probing move and record
+/// are known have one; the rest refuse a probe operation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+pub enum ProbeStyle {
+    /// `G38.2 Z.. F..`, the straight probe of the G-code standard: down
+    /// until the probe touches, the program stopped with an error if it never
+    /// does. The controller reports each point itself, as GRBL does over the
+    /// serial line (`[PRB:x,y,z:1]`, in machine coordinates), where the
+    /// sender keeps them.
+    #[serde(rename = "g38.2")]
+    G38,
+    /// `G38.2`, each point written by the controller to a file the program
+    /// names, `(PROBEOPEN file)` before the first and `(PROBECLOSE)` after
+    /// the last, as LinuxCNC logs them: a line a point, X Y Z and its other
+    /// axes, in the program's coordinates and units.
+    #[serde(rename = "g38.2-probeopen")]
+    G38Logged,
+    /// No probing move is known: a probe operation is a failed check.
+    #[default]
+    #[serde(rename = "none")]
+    Cannot,
+}
+
 /// How arc centres are written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -390,6 +414,9 @@ pub struct Profile {
     /// Absent, with the other cycles, as `G84` and `G74`; else not at all.
     #[serde(default)]
     pub tap: Option<TapStyle>,
+    /// How it probes ([`ProbeStyle`]); not at all unless it says.
+    #[serde(default)]
+    pub probe: ProbeStyle,
     /// Whether a program of several operations stops between them where the
     /// operator has asked it to (`M1`, optional stop), the spindle and the
     /// coolant stopped and the tool clear first.
@@ -669,6 +696,14 @@ impl Profile {
                     .into(),
             });
         }
+        if self.dialect == Dialect::Heidenhain && self.probe != ProbeStyle::Cannot {
+            return Err(ProfileError::BadValue {
+                field: "probe",
+                reason: "Klartext probes with touch probe cycles, which are not written: \
+                         probe = \"none\""
+                    .into(),
+            });
+        }
         if self.dialect == Dialect::Heidenhain {
             // Every block is numbered, from 0 by ones, the program's first
             // line `BEGIN PGM`: the control reads nothing else.
@@ -745,6 +780,17 @@ impl Profile {
             .iter()
             .filter_map(|(_, text)| Self::from_toml(text).ok())
             .filter(|p| p.units == ProgramUnits::Mm && p.tapping() != TapStyle::Cannot)
+            .map(|p| p.name)
+            .collect()
+    }
+
+    /// The built-in machines that probe, by name, each once whatever its
+    /// units: what to post a probe operation for instead of one that cannot.
+    pub fn builtin_probing() -> Vec<String> {
+        BUILTIN
+            .iter()
+            .filter_map(|(_, text)| Self::from_toml(text).ok())
+            .filter(|p| p.units == ProgramUnits::Mm && p.probe != ProbeStyle::Cannot)
             .map(|p| p.name)
             .collect()
     }

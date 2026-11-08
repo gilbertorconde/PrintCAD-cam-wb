@@ -59,6 +59,14 @@ pub enum SessionError {
         /// Why.
         source: std::io::Error,
     },
+    /// A setup's probe results could not be read from the file it names.
+    #[error("cannot read the probe results {path}: {source}")]
+    ProbeIo {
+        /// Which file.
+        path: String,
+        /// Why.
+        source: std::io::Error,
+    },
     /// The job file was not valid TOML for a job.
     #[error("job {path} is not valid: {source}")]
     JobParse {

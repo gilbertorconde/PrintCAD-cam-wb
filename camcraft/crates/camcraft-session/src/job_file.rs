@@ -16,6 +16,34 @@ pub fn read_job(path: &Path) -> Result<Job, SessionError> {
     parse_job(&text, &name)
 }
 
+/// Read the probe results of each setup that corrects its depths from a
+/// file it names but does not hold
+/// ([`ZCorrection::file`](camcraft_core::job::ZCorrection::file)), the file
+/// relative to `job_dir`: they are read each time the job is, so a board
+/// probed again is corrected to the new results. Whether they make a map is
+/// checked with the setup.
+pub fn read_probe_results(job: &mut Job, job_dir: &Path) -> Result<(), SessionError> {
+    for setup in &mut job.setups {
+        let name = setup.name.clone();
+        let Some(z) = &mut setup.z_correction else {
+            continue;
+        };
+        let Some(file) = z.file.clone().filter(|_| z.points.is_empty()) else {
+            continue;
+        };
+        let path = fs::resolve(job_dir, &file);
+        let text = std::fs::read_to_string(&path).map_err(|source| SessionError::ProbeIo {
+            path: path.display().to_string(),
+            source,
+        })?;
+        z.points = camcraft_core::probe::parse(&text).map_err(|e| JobError::BadProbeMap {
+            setup: name,
+            why: format!("in {file} are not read: {e}"),
+        })?;
+    }
+    Ok(())
+}
+
 /// Read a job from its text; `name` says where it came from, for errors.
 pub fn parse_job(text: &str, name: &str) -> Result<Job, SessionError> {
     // The version first, so a file of another format is named for what it is

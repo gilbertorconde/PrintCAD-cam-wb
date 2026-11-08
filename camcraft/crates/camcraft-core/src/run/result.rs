@@ -66,6 +66,8 @@ pub enum StrategyDetail {
     VCarve(VCarveReport),
     /// Custom G-code: only lines for the program.
     CustomGcode,
+    /// Probing a grid of points.
+    Probe(crate::probe::ProbeReport),
 }
 
 /// How an operation's paths came to be in a run.
@@ -275,6 +277,10 @@ pub struct SetupResult {
     /// starts from, packed (a full sheet's raw heights are hundreds of megabytes,
     /// and machined material packs small) and shared with it rather than copied.
     pub keyframes: Vec<Arc<PackedStock>>,
+    /// The probed surface its cut depths were corrected to, when they were
+    /// ([`crate::job::ZCorrection`]): its paths, its material and its part
+    /// all follow it.
+    pub probe_map: Option<crate::probe::ProbeMap>,
 }
 
 impl SetupResult {

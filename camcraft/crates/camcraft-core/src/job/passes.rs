@@ -267,7 +267,11 @@ impl Operation {
         let corner = match tool.kind {
             ToolKind::Ball => tool.diameter / 2.0,
             ToolKind::Bullnose => tool.corner,
-            ToolKind::Flat | ToolKind::Cone | ToolKind::Drill | ToolKind::ThreadMill => 0.0,
+            ToolKind::Flat
+            | ToolKind::Cone
+            | ToolKind::Drill
+            | ToolKind::ThreadMill
+            | ToolKind::Probe => 0.0,
         };
         StockToLeave {
             radial: -tool.diameter / 2.0,
@@ -301,7 +305,11 @@ impl Operation {
                 let r = match tool.kind {
                     ToolKind::Ball => d / 2.0,
                     ToolKind::Bullnose => tool.corner,
-                    ToolKind::Flat | ToolKind::Cone | ToolKind::Drill | ToolKind::ThreadMill => 0.0,
+                    ToolKind::Flat
+                    | ToolKind::Cone
+                    | ToolKind::Drill
+                    | ToolKind::ThreadMill
+                    | ToolKind::Probe => 0.0,
                 };
                 let over = if r > tolerance && r > 0.0 {
                     2.0 * (r * r - (r - tolerance).powi(2)).sqrt() / 2f64.sqrt()
@@ -321,7 +329,11 @@ impl Operation {
             StrategySpec::Face { .. } => match tool.kind {
                 ToolKind::Flat => Some(0.95 * d),
                 ToolKind::Bullnose => Some(0.95 * (d - 2.0 * tool.corner)),
-                ToolKind::Ball | ToolKind::Cone | ToolKind::Drill | ToolKind::ThreadMill => None,
+                ToolKind::Ball
+                | ToolKind::Cone
+                | ToolKind::Drill
+                | ToolKind::ThreadMill
+                | ToolKind::Probe => None,
             },
             StrategySpec::Profile { .. }
             | StrategySpec::Contour { .. }
@@ -332,7 +344,8 @@ impl Operation {
             | StrategySpec::VCarve { .. }
             | StrategySpec::Slot { .. }
             | StrategySpec::Chamfer { .. }
-            | StrategySpec::CustomGcode {} => None,
+            | StrategySpec::CustomGcode {}
+            | StrategySpec::Probe { .. } => None,
         }
     }
 }
