@@ -7,21 +7,49 @@
 //! follow them within the setup's tolerance. A sketch's open curves close
 //! nothing, so are not in its profile: the package cannot read them.
 
+use std::cell::RefCell;
+
 use camcraft_core::job::{Curve, Segment};
 use printcad_bench_sdk::api::kernel_api::{Profile, ProfilePlane, ProfileSegment};
-use printcad_bench_sdk::host;
+use printcad_bench_sdk::{host, serde_json};
 
 /// The most a piece of a spline is halved to follow it within the tolerance.
 const MOST_HALVINGS: u32 = 12;
 
+thread_local! {
+    /// The sketches last listed, and what the features they were found
+    /// among were: the panel lists them every frame it is drawn.
+    static LISTED: RefCell<(u64, Vec<(String, String)>)> = const { RefCell::new((0, Vec::new())) };
+}
+
 /// The sketches of the document that close something, as the panel lists
-/// them: id and name.
+/// them: id and name. Finding a sketch's loops is the host's work, and a
+/// sketch of text has many, so they are found again only when a feature
+/// other than the package's own changed.
 pub fn sketches() -> Vec<(String, String)> {
-    host::features()
-        .into_iter()
-        .filter(|n| host::profile(&n.id).is_some_and(|p| !p.wires.is_empty()))
-        .map(|n| (n.id, n.name))
-        .collect()
+    let all = crate::features();
+    let others = || {
+        all.iter()
+            .filter(|n| n.kind != crate::SETUP_KIND && n.kind != crate::OPERATION_KIND)
+    };
+    let key = others().fold(0xcbf2_9ce4_8422_2325, |h, n| {
+        let text = serde_json::to_string(&n.data).unwrap_or_default();
+        [n.id.as_str(), n.name.as_str(), text.as_str()]
+            .iter()
+            .flat_map(|t| t.bytes().chain([0]))
+            .fold(h, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3))
+    });
+    LISTED.with(|listed| {
+        let mut listed = listed.borrow_mut();
+        if listed.0 != key {
+            let found = others()
+                .filter(|n| host::profile(&n.id).is_some_and(|p| !p.wires.is_empty()))
+                .map(|n| (n.id.clone(), n.name.clone()))
+                .collect();
+            *listed = (key, found);
+        }
+        listed.1.clone()
+    })
 }
 
 /// Sketch `id`'s curves, splines in lines within `tolerance`; `None` when it

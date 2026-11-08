@@ -1,8 +1,11 @@
 //! What the view draws: each setup's stock and work zero, its operations'
 //! toolpaths, and the material it leaves.
 
+use std::rc::Rc;
+
 use cam_protocol::{Cylinder, HeightPlane, Run};
 use printcad_bench_sdk::api::*;
+use printcad_bench_sdk::host;
 
 use crate::playback::{material_at, tool_at, tool_tip};
 use crate::runs::State;
@@ -23,12 +26,17 @@ const RETRACT: Rgb = [0.3, 0.75, 0.75];
 const TOP: Rgb = [0.31, 0.64, 0.9];
 const BOTTOM: Rgb = [0.75, 0.45, 0.85];
 
-/// The most points drawn of the setups not being edited, together.
-const BACKGROUND_POINTS: usize = 60_000;
+/// The most toolpath points a frame draws, every setup's together. printCAD
+/// takes the frame within a few milliseconds, and asks for it every frame
+/// while a run plays back: writing out a point takes about a tenth of a
+/// microsecond, so a frame of every operation of a few big setups in full,
+/// a hundred thousand points and more, takes most of that time on its own.
+const FRAME_POINTS: usize = 30_000;
 
 pub fn draw(cam: &Cam, frame: &mut Frame) {
     let editing = cam.editing.as_ref();
-    let mut background = 0;
+    // What is drawn, before drawing it, to share the points out.
+    let mut drawn = Vec::new();
     for (node, _) in setups() {
         let Some(computed) = cam.runs.get(&node.id) else {
             continue;
@@ -38,10 +46,49 @@ pub fn draw(cam: &Cam, frame: &mut Frame) {
         let edited_op = editing
             .filter(|e| e.kind == Kind::Operation)
             .and_then(|e| ops.iter().position(|(n, _)| n.id == e.id));
-        let mine = edited_setup || edited_op.is_some();
-        if !node.visible && !mine {
+        if !node.visible && !(edited_setup || edited_op.is_some()) {
             continue;
         }
+        drawn.push((node, ops, computed, edited_setup, edited_op));
+    }
+    // The edited operation first, then the rest of its setup, or the edited
+    // setup, then the others: each in full while it fits, else sharing what
+    // is left.
+    let mut wanted = [Vec::new(), Vec::new(), Vec::new()];
+    for (s, (_, ops, computed, edited_setup, edited_op)) in drawn.iter().enumerate() {
+        let Some(run) = computed.shown() else {
+            continue;
+        };
+        for (i, op) in run.operations.iter().enumerate() {
+            let this = *edited_op == Some(i);
+            if !(ops.get(i).is_none_or(|(n, _)| n.visible) || this) {
+                continue;
+            }
+            let points = op.strokes.iter().map(|k| k.points.len()).sum();
+            let group = if this {
+                0
+            } else if *edited_setup || edited_op.is_some() {
+                1
+            } else {
+                2
+            };
+            wanted[group].push(((s, i), points));
+        }
+    }
+    let share: std::collections::HashMap<(usize, usize), usize> = wanted
+        .iter()
+        .zip(shares(
+            &wanted
+                .iter()
+                .map(|g| g.iter().map(|(_, p)| *p).collect())
+                .collect::<Vec<_>>(),
+            FRAME_POINTS,
+        ))
+        .flat_map(|(g, s)| g.iter().map(|(k, _)| *k).zip(s))
+        .collect();
+    for (s, (node, _, computed, edited_setup, edited_op)) in drawn.iter().enumerate() {
+        let (edited_setup, edited_op) = (*edited_setup, *edited_op);
+        let mine = edited_setup || edited_op.is_some();
         if mine {
             match &computed.state {
                 State::Queued => frame.hud.footer.push("Waiting to run".into()),
@@ -89,32 +136,46 @@ pub fn draw(cam: &Cam, frame: &mut Frame) {
                 ..Default::default()
             });
         } else if let Some((play, m)) = moment {
-            frame.meshes.push(material_at(play, m));
+            let mesh = computed.shown_rc().and_then(|run| {
+                cam.material
+                    .borrow_mut()
+                    .mesh(&run, Some(m), || material_at(play, m))
+            });
+            match mesh {
+                Some(handle) => frame.kept.push(material(handle)),
+                None => frame.meshes.push(material_at(play, m)),
+            }
         } else if edited_setup
             && cam.show_material
             && let Some(m) = &run.material
         {
-            frame.meshes.push(Mesh {
+            let left = || Mesh {
                 positions: m.positions.clone(),
                 indices: m.indices.clone(),
                 color: MATERIAL,
                 opacity: 0.85,
                 ..Default::default()
-            });
+            };
+            let mesh = computed
+                .shown_rc()
+                .and_then(|run| cam.material.borrow_mut().mesh(&run, None, left));
+            match mesh {
+                Some(handle) => frame.kept.push(material(handle)),
+                None => frame.meshes.push(left()),
+            }
         }
         for (i, op) in run.operations.iter().enumerate() {
             let this = edited_op == Some(i);
-            let shown = ops.get(i).is_none_or(|(n, _)| n.visible) || this;
-            if !shown {
+            let Some(&share) = share.get(&(s, i)) else {
+                continue;
+            };
+            let points: usize = op.strokes.iter().map(|s| s.points.len()).sum();
+            // No room left for it, unless it is the one edited.
+            if !this && share < 2 && points > 0 {
                 continue;
             }
-            let points: usize = op.strokes.iter().map(|s| s.points.len()).sum();
-            if !mine {
-                if background + points > BACKGROUND_POINTS {
-                    continue;
-                }
-                background += points;
-            }
+            // Every so many of its points, past what its share allows.
+            let every = points.div_ceil(share.max(1)).max(1);
             if this {
                 for plane in &op.heights {
                     height_plane(frame, plane);
@@ -140,17 +201,18 @@ pub fn draw(cam: &Cam, frame: &mut Frame) {
                     continue;
                 }
                 frame.lines.push(Polyline {
-                    points: points.to_vec(),
+                    points: thinned(points, every),
                     color: if stroke.rapid { RAPID } else { color },
                     width: if this { 1.5 } else { 1.0 },
                     dashed: stroke.rapid,
                     ..Default::default()
                 });
             }
-            if this && op.points > points {
+            if this && op.points > points.min(share) {
                 frame.hud.footer.push(format!(
                     "Toolpath drawn thinned: {} of {} points",
-                    points, op.points
+                    points.min(share),
+                    op.points
                 ));
             }
         }
@@ -160,6 +222,108 @@ pub fn draw(cam: &Cam, frame: &mut Frame) {
             _ => {}
         }
     }
+}
+
+/// The material a run leaves, or leaves at a moment of its playback, kept
+/// by the host: written out with every frame it is a fifth of a megabyte
+/// and more, and a playback asks for a frame every frame.
+#[derive(Default)]
+pub struct KeptMaterial {
+    /// The run it is of, kept so another run is never taken for it.
+    run: Option<Rc<Run>>,
+    /// Which moment of the run's playback, by where it is; `None` for the
+    /// material the run leaves.
+    moment: Option<usize>,
+    mesh: Option<u64>,
+}
+
+impl KeptMaterial {
+    /// The kept mesh of `run`'s material at `moment` (`None` at its end),
+    /// `make` making it when it is not the one kept; `None` when the host
+    /// keeps none.
+    fn mesh(
+        &mut self,
+        run: &Rc<Run>,
+        moment: Option<&cam_protocol::Moment>,
+        make: impl FnOnce() -> Mesh,
+    ) -> Option<u64> {
+        let at = moment.map(|m| std::ptr::from_ref(m) as usize);
+        let same_run = self.run.as_ref().is_some_and(|r| Rc::ptr_eq(r, run));
+        if same_run && self.moment == at && self.mesh.is_some() {
+            return self.mesh;
+        }
+        let mesh = make();
+        // Another moment of the same playback: the same grid, risen.
+        if same_run
+            && at.is_some()
+            && self.moment.is_some()
+            && let Some(handle) = self.mesh
+            && host::mesh_update(handle, 0, &mesh.positions, &[]).is_ok()
+        {
+            self.moment = at;
+            return Some(handle);
+        }
+        self.forget();
+        let handle = host::mesh_create(&mesh.positions, &mesh.indices, &[]).ok()?;
+        *self = Self {
+            run: Some(run.clone()),
+            moment: at,
+            mesh: Some(handle),
+        };
+        Some(handle)
+    }
+
+    fn forget(&mut self) {
+        if let Some(handle) = self.mesh.take() {
+            host::mesh_remove(handle);
+        }
+        self.run = None;
+    }
+}
+
+fn material(handle: u64) -> KeptMesh {
+    KeptMesh {
+        handle,
+        color: MATERIAL,
+        opacity: 0.85,
+        ..Default::default()
+    }
+}
+
+/// How many points each of `groups`' toolpaths (how many points each has)
+/// is drawn with, within `budget`: a group in full while it fits in what
+/// the groups before it left, else its toolpaths sharing that in
+/// proportion to their points.
+fn shares(groups: &[Vec<usize>], budget: usize) -> Vec<Vec<usize>> {
+    let mut left = budget;
+    groups
+        .iter()
+        .map(|group| {
+            let total: usize = group.iter().sum();
+            if total <= left {
+                left -= total;
+                return group.clone();
+            }
+            let out: Vec<usize> = group.iter().map(|p| p * left / total).collect();
+            left -= out.iter().sum::<usize>();
+            out
+        })
+        .collect()
+}
+
+/// Every `every`th of `points`, and the last, so a stroke still ends where
+/// it does.
+fn thinned(points: &[[f32; 3]], every: usize) -> Vec<[f32; 3]> {
+    if every <= 1 {
+        return points.to_vec();
+    }
+    let mut out: Vec<[f32; 3]> = points.iter().step_by(every).copied().collect();
+    if let Some(&last) = points.last()
+        && !(points.len() - 1).is_multiple_of(every)
+    {
+        out.push(last);
+    }
+    out
 }
 
 /// One of the edited operation's heights: a see-through plane across the
@@ -316,4 +480,30 @@ fn cylinder(c: &Cylinder, color: Rgb) -> Vec<Polyline> {
         });
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The edited operation is drawn in full; the rest share what is left
+    /// by their size, and what does not fit is not drawn.
+    #[test]
+    fn a_frame_s_points_go_to_the_edited_operation_first() {
+        let got = shares(&[vec![20_000], vec![4_000, 12_000], vec![50_000]], 30_000);
+        assert_eq!(got, vec![vec![20_000], vec![2_500, 7_500], vec![0]]);
+        let got = shares(&[vec![], vec![1_000, 2_000], vec![5_000, 5_000]], 30_000);
+        assert_eq!(got, vec![vec![], vec![1_000, 2_000], vec![5_000, 5_000]]);
+    }
+
+    /// Thinned, a stroke keeps its ends.
+    #[test]
+    fn a_thinned_stroke_keeps_its_ends() {
+        let p = |i: usize| [i as f32, 0.0, 0.0];
+        let stroke: Vec<[f32; 3]> = (0..10).map(p).collect();
+        assert_eq!(thinned(&stroke, 1), stroke);
+        assert_eq!(thinned(&stroke, 3), vec![p(0), p(3), p(6), p(9)]);
+        assert_eq!(thinned(&stroke, 4), vec![p(0), p(4), p(8), p(9)]);
+        assert_eq!(thinned(&stroke[..1], 4), vec![p(0)]);
+    }
 }

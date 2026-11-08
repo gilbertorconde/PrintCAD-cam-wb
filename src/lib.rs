@@ -36,6 +36,7 @@ mod sketches;
 mod tools;
 
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 use cam_protocol::{HELPER, IDENTITY, Level, Request as HelperRequest, Shape, VERSION};
 use camcraft_core::job::{StrategySpec, ToolSpec};
@@ -169,6 +170,8 @@ struct Cam {
     aim: Option<(usize, usize, f64)>,
     /// Where the listed program's lines start, worked out once for it.
     listing: std::cell::RefCell<listing::Lines>,
+    /// The material drawn, kept by the host.
+    material: std::cell::RefCell<draw::KeptMaterial>,
     /// A slot picking in the view.
     armed: Option<picking::Armed>,
     /// The settings page's chosen preset of the chosen tool, and chosen post.
@@ -178,41 +181,96 @@ struct Cam {
     settings_note: Option<Result<String, String>>,
     /// A word for the task panel about the last thing tried.
     hint: Option<String>,
+    /// Setups to check for changes once the [`LATER`] job under way ends:
+    /// every setup when `None`.
+    later: Option<(u64, Option<Vec<String>>)>,
+}
+
+/// A job that does nothing, so its end comes as an event printCAD gives
+/// a second rather than a frame's 25 ms: checking whether the setups
+/// changed reads every setup's operations, sketches and solids, and the
+/// events that ask for it (the workbench shown, values moved) are timed
+/// as a frame.
+const LATER: &str = "later";
+
+thread_local! {
+    /// The document's features, read once for the call under way while it
+    /// is [`reading`]: `None` outside one, `Some(None)` until first read.
+    static READ: std::cell::RefCell<Option<Option<Rc<Vec<Node>>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f`, a call that does not change the document, reading its features
+/// at most once. Drawing, a menu and working out whether the setups changed
+/// look up each setup and its operations several times; each look has the
+/// host write out every feature and the package read them all back, which on
+/// a big document is most of the call's time.
+fn reading<R>(f: impl FnOnce() -> R) -> R {
+    let outer = READ.with(|r| r.borrow().is_some());
+    if outer {
+        return f();
+    }
+    READ.with(|r| *r.borrow_mut() = Some(None));
+    let out = f();
+    READ.with(|r| *r.borrow_mut() = None);
+    out
+}
+
+/// Every feature of the document, in history order: as read once while
+/// [`reading`], else from the host.
+fn features() -> Rc<Vec<Node>> {
+    READ.with(|r| {
+        let mut r = r.borrow_mut();
+        match &mut *r {
+            Some(Some(all)) => all.clone(),
+            Some(slot) => slot.insert(Rc::new(host::features())).clone(),
+            None => Rc::new(host::features()),
+        }
+    })
+}
+
+/// Feature `id`: from the features read once while [`reading`], else from
+/// the host.
+fn feature(id: &str) -> Option<Node> {
+    if READ.with(|r| r.borrow().is_some()) {
+        return features().iter().find(|n| n.id == id).cloned();
+    }
+    host::feature(id)
 }
 
 /// A feature of the document, if it is a setup.
 fn setup_node(id: &str) -> Option<(Node, SetupData)> {
-    let node = host::feature(id).filter(|n| n.kind == SETUP_KIND)?;
+    let node = feature(id).filter(|n| n.kind == SETUP_KIND)?;
     let data = SetupData::from(&node.data)?;
     Some((node, data))
 }
 
 /// A feature of the document, if it is an operation.
 fn operation_node(id: &str) -> Option<(Node, OperationData)> {
-    let node = host::feature(id).filter(|n| n.kind == OPERATION_KIND)?;
+    let node = feature(id).filter(|n| n.kind == OPERATION_KIND)?;
     let data = OperationData::from(&node.data)?;
     Some((node, data))
 }
 
 fn setups() -> Vec<(Node, SetupData)> {
-    host::features()
-        .into_iter()
+    features()
+        .iter()
         .filter(|n| n.kind == SETUP_KIND)
         .filter_map(|n| {
             let data = SetupData::from(&n.data)?;
-            Some((n, data))
+            Some((n.clone(), data))
         })
         .collect()
 }
 
 /// Every operation of setup `setup`, in the document's order.
 fn operations_of(setup: &str) -> Vec<(Node, OperationData)> {
-    host::features()
-        .into_iter()
+    features()
+        .iter()
         .filter(|n| n.kind == OPERATION_KIND)
         .filter_map(|n| {
             let data = OperationData::from(&n.data)?;
-            (data.setup.as_deref() == Some(setup)).then_some((n, data))
+            (data.setup.as_deref() == Some(setup)).then(|| (n.clone(), data))
         })
         .collect()
 }
@@ -285,14 +343,9 @@ fn source_of(id: &str, setup: &SetupData) -> Option<Result<(Node, SetupData), St
 }
 
 /// The request that runs setup `id`, or why it cannot run.
-fn request_for(node: &Node, setup: &SetupData) -> Result<String, String> {
-    let request = helper_request(node, setup)?;
-    serde_json::to_string(&request).map_err(|e| e.to_string())
-}
-
-/// What [`request_for`] asks, as it is: a setup that carries on from an
-/// earlier one asks with that one's own request beside it.
-fn helper_request(node: &Node, setup: &SetupData) -> Result<HelperRequest, String> {
+/// A setup that carries on from an earlier one asks with that one's own
+/// request beside it.
+fn request_for(node: &Node, setup: &SetupData) -> Result<HelperRequest, String> {
     if let Some(problem) = setup.problem() {
         return Err(problem);
     }
@@ -357,7 +410,7 @@ fn helper_request(node: &Node, setup: &SetupData) -> Result<HelperRequest, Strin
         None => None,
         Some(source) => {
             let (n, s) = source?;
-            let earlier = helper_request(&n, &s)
+            let earlier = request_for(&n, &s)
                 .map_err(|e| format!("The setup it carries on from, {}: {e}", n.name))?;
             Some(Box::new(earlier))
         }
@@ -1009,6 +1062,59 @@ impl Cam {
         self.hint = None;
         self.chosen_body = None;
         self.refresh_for(id, false);
+        if let Some(setup) = self.setup_of(id) {
+            self.find_lines(&setup);
+        }
+    }
+
+    /// Check setups `setups` (every setup when `None`) for changes, and run
+    /// those that changed, once the [`LATER`] job ends; at once if it will
+    /// not start.
+    fn refresh_later(&mut self, setups: Option<Vec<String>>) {
+        if setups.as_ref().is_some_and(Vec::is_empty) {
+            return;
+        }
+        if let Some((_, waiting)) = &mut self.later {
+            match (waiting.as_mut(), setups) {
+                (Some(w), Some(more)) => {
+                    for s in more {
+                        if !w.contains(&s) {
+                            w.push(s);
+                        }
+                    }
+                }
+                (_, None) => *waiting = None,
+                (None, Some(_)) => {}
+            }
+            return;
+        }
+        match host::start_job(LATER, "") {
+            Ok(job) => self.later = Some((job, setups)),
+            Err(_) => reading(|| match setups {
+                None => self.refresh_all(false),
+                Some(setups) => {
+                    for setup in setups {
+                        self.refresh(&setup, false);
+                    }
+                }
+            }),
+        }
+    }
+
+    /// Where the lines of the program `setup`'s panel lists start, found
+    /// now, in an event printCAD gives a second, rather than in the first
+    /// frame that lists it: a setup's program can be megabytes.
+    fn find_lines(&self, setup: &str) {
+        if self.played_setup().as_deref() != Some(setup) {
+            return;
+        }
+        let (Some(run), Some((op, _))) = (
+            self.runs.get(setup).and_then(|c| c.shown()),
+            self.under_way(setup),
+        ) else {
+            return;
+        };
+        self.listing.borrow_mut().find(run, op);
     }
 
     fn write_setup(&mut self, id: &str, data: &SetupData) {
@@ -1431,7 +1537,8 @@ impl Bench for Cam {
                             ParamKind::List,
                             false,
                             "a list of sketch ids: their closed loops, text among them, are \
-                             what it follows or cuts within (a 2D cut's outline then)",
+                             what it follows or cuts within (a 2D cut's outline then, and a \
+                             3D cut's boundary unless one is given)",
                         ),
                         param(
                             "faces",
@@ -2134,13 +2241,7 @@ impl Bench for Cam {
                     if let Some(bad) = ids.iter().find(|s| host::profile(s).is_none()) {
                         return Err(format!("sketches: '{bad}' is no sketch that closes a loop"));
                     }
-                    data.sketches = ids;
-                    // A 2D cut given sketches cuts what they enclose, as
-                    // ticking them in its panel with the picks as its
-                    // outline does.
-                    if data.strategy().uses().outline && !data.sketches.is_empty() {
-                        data.operation.outline = camcraft_core::job::Outline::Selection;
-                    }
+                    data.take_sketches(ids);
                 }
                 // `boundary = "selection"`, or `{kind = "selection", containment =
                 // "inside", margin = 1}`.
@@ -2344,13 +2445,12 @@ impl Bench for Cam {
                 true
             }
             Event::Activated => {
-                self.refresh_all(false);
+                self.refresh_later(None);
                 true
             }
             Event::ValuesMoved { features } => {
-                for id in features {
-                    self.refresh_for(id, false);
-                }
+                let moved = reading(|| features.iter().filter_map(|f| self.setup_of(f)).collect());
+                self.refresh_later(Some(moved));
                 true
             }
             Event::FeatureMoved {
@@ -2394,9 +2494,24 @@ impl Bench for Cam {
                 host::redraw();
                 true
             }
+            Event::JobFinished { job, .. }
+                if self.later.as_ref().is_some_and(|(j, _)| j == job) =>
+            {
+                let setups = self.later.take().and_then(|(_, s)| s);
+                reading(|| match setups {
+                    None => self.refresh_all(false),
+                    Some(setups) => {
+                        for setup in setups {
+                            self.refresh(&setup, false);
+                        }
+                    }
+                });
+                true
+            }
             Event::JobFinished { job, result } => {
                 host::redraw();
                 if let Some(setup) = self.runs.finished(*job, result) {
+                    self.find_lines(&setup);
                     match self.runs.get(&setup).map(|c| &c.state) {
                         Some(State::Failed(e)) => host::warn(&format!("Setup not run: {e}")),
                         Some(State::Ready(run)) if !run.passed => {
@@ -2415,7 +2530,7 @@ impl Bench for Cam {
                 if let Some(command) = playback::key_command(key, self.shift, self.big_step())
                     && let Some(setup) = self.played_setup() =>
             {
-                let Some(run) = self.runs.get(&setup).and_then(|c| c.shown()).cloned() else {
+                let Some(run) = self.runs.get(&setup).and_then(|c| c.shown_rc()) else {
                     return false;
                 };
                 if run.playback.is_none() {
@@ -2441,89 +2556,7 @@ impl Bench for Cam {
     }
 
     fn frame(&mut self, pointer: &Pointer) -> Frame {
-        self.pointer = pointer.clone();
-        if let Some(e) = &self.editing
-            && host::feature(&e.id).is_none()
-        {
-            self.editing = None;
-        }
-        // Playback is the open setup's, or the open operation's setup's.
-        let open = self.played_setup();
-        if self.playing.as_ref().map(|p| &p.setup) != open.as_ref() {
-            self.playing = None;
-        }
-        let run = open
-            .as_ref()
-            .and_then(|s| self.runs.get(s))
-            .and_then(|c| c.shown())
-            .filter(|r| r.playback.is_some())
-            .cloned();
-        if let (Some(p), Some(run)) = (&mut self.playing, &run) {
-            p.tick(run, &self.transport);
-        }
-        self.keep_session(open.as_deref());
-        self.take_aim(open.as_deref());
-        // A slot is armed only while its feature is open.
-        if self
-            .armed
-            .as_ref()
-            .is_some_and(|a| self.editing.as_ref().is_none_or(|e| e.id != a.feature))
-        {
-            self.armed = None;
-        }
-        let mut frame = Frame::default();
-        draw::draw(self, &mut frame);
-        if let Some(armed) = &self.armed {
-            picking::draw(&mut frame, armed, [0.31, 0.64, 0.9]);
-        }
-        if let Some(run) = &run {
-            let exact = self
-                .session
-                .as_ref()
-                .and_then(|s| s.at.as_ref())
-                .map(|a| (a.op, a.moves, a.of));
-            frame.transport =
-                playback::transport_widgets(run, self.playing.as_ref(), &self.transport, exact);
-            // Playing, or waiting on the session's answer to a seek.
-            let waiting = self
-                .session
-                .as_ref()
-                .is_some_and(|s| s.failed.is_none() && self.playing.is_some());
-            frame.animating = self.playing.as_ref().is_some_and(|p| p.running.is_some()) || waiting;
-        }
-        let Some(editing) = self.editing.clone() else {
-            return frame;
-        };
-        let Some(node) = host::feature(&editing.id) else {
-            return frame;
-        };
-        let (title, icon, prompt) = match editing.kind {
-            Kind::Setup => (
-                "Setup",
-                "setup",
-                "Pick the bodies, then set the stock and the work zero",
-            ),
-            Kind::Operation => ("Operation", "operation", "Set the strategy and the tool"),
-        };
-        frame.hud.tool = Some(ToolHint {
-            icon: icon.into(),
-            name: node.name.clone(),
-            prompt: prompt.into(),
-            keys: vec![("Esc".into(), "cancel".into())],
-            ..Default::default()
-        });
-        frame.editing = Some(editing.id.clone());
-        frame.task = Some(Task {
-            title: title.into(),
-            icon: icon.into(),
-            confirmable: true,
-            ..Default::default()
-        });
-        frame.panel = match editing.kind {
-            Kind::Setup => panel::setup_panel(self, &node),
-            Kind::Operation => panel::operation_panel(self, &node),
-        };
-        frame
+        reading(|| self.draw_frame(pointer))
     }
 
     fn panel_event(&mut self, slot: PanelSlot, event: PanelEvent) {
@@ -2533,7 +2566,7 @@ impl Bench for Cam {
         }
         if slot == PanelSlot::Transport {
             if let Some(setup) = self.played_setup()
-                && let Some(run) = self.runs.get(&setup).and_then(|c| c.shown()).cloned()
+                && let Some(run) = self.runs.get(&setup).and_then(|c| c.shown_rc())
             {
                 let steps = self.steps(&setup, &run);
                 playback::transport_event(
@@ -2622,7 +2655,7 @@ impl Bench for Cam {
                 ..item(TURN_OFF, "Turn off", &format!("{icon}-off"))
             },
         };
-        match scope {
+        reading(|| match scope {
             MenuScope::TreeFeature(f) if setup_node(f).is_some() => vec![
                 item(EDIT, "Edit setup", "setup"),
                 item(ADD_OPERATION, "Add operation", "operation"),
@@ -2635,7 +2668,7 @@ impl Bench for Cam {
                 toggle(f, "operation", "operation"),
             ],
             _ => Vec::new(),
-        }
+        })
     }
 
     fn menu_command(&mut self, command: &str, scope: &MenuScope) -> bool {
@@ -2687,6 +2720,9 @@ impl Bench for Cam {
     }
 
     fn job(entry: &str, input: &str) -> Result<String, String> {
+        if entry == LATER {
+            return Ok(String::new());
+        }
         if entry != JOB {
             return Err(format!("no job `{entry}`"));
         }
@@ -2696,6 +2732,92 @@ impl Bench for Cam {
 }
 
 impl Cam {
+    /// The frame ([`Bench::frame`]), the document read once for it.
+    fn draw_frame(&mut self, pointer: &Pointer) -> Frame {
+        self.pointer = pointer.clone();
+        if let Some(e) = &self.editing
+            && feature(&e.id).is_none()
+        {
+            self.editing = None;
+        }
+        // Playback is the open setup's, or the open operation's setup's.
+        let open = self.played_setup();
+        if self.playing.as_ref().map(|p| &p.setup) != open.as_ref() {
+            self.playing = None;
+        }
+        let run = open
+            .as_ref()
+            .and_then(|s| self.runs.get(s))
+            .and_then(|c| c.shown_rc())
+            .filter(|r| r.playback.is_some());
+        if let (Some(p), Some(run)) = (&mut self.playing, &run) {
+            p.tick(run, &self.transport);
+        }
+        self.keep_session(open.as_deref());
+        self.take_aim(open.as_deref());
+        // A slot is armed only while its feature is open.
+        if self
+            .armed
+            .as_ref()
+            .is_some_and(|a| self.editing.as_ref().is_none_or(|e| e.id != a.feature))
+        {
+            self.armed = None;
+        }
+        let mut frame = Frame::default();
+        draw::draw(self, &mut frame);
+        if let Some(armed) = &self.armed {
+            picking::draw(&mut frame, armed, [0.31, 0.64, 0.9]);
+        }
+        if let Some(run) = &run {
+            let exact = self
+                .session
+                .as_ref()
+                .and_then(|s| s.at.as_ref())
+                .map(|a| (a.op, a.moves, a.of));
+            frame.transport =
+                playback::transport_widgets(run, self.playing.as_ref(), &self.transport, exact);
+            // Playing, or waiting on the session's answer to a seek.
+            let waiting = self
+                .session
+                .as_ref()
+                .is_some_and(|s| s.failed.is_none() && self.playing.is_some());
+            frame.animating = self.playing.as_ref().is_some_and(|p| p.running.is_some()) || waiting;
+        }
+        let Some(editing) = self.editing.clone() else {
+            return frame;
+        };
+        let Some(node) = feature(&editing.id) else {
+            return frame;
+        };
+        let (title, icon, prompt) = match editing.kind {
+            Kind::Setup => (
+                "Setup",
+                "setup",
+                "Pick the bodies, then set the stock and the work zero",
+            ),
+            Kind::Operation => ("Operation", "operation", "Set the strategy and the tool"),
+        };
+        frame.hud.tool = Some(ToolHint {
+            icon: icon.into(),
+            name: node.name.clone(),
+            prompt: prompt.into(),
+            keys: vec![("Esc".into(), "cancel".into())],
+            ..Default::default()
+        });
+        frame.editing = Some(editing.id.clone());
+        frame.task = Some(Task {
+            title: title.into(),
+            icon: icon.into(),
+            confirmable: true,
+            ..Default::default()
+        });
+        frame.panel = match editing.kind {
+            Kind::Setup => panel::setup_panel(self, &node),
+            Kind::Operation => panel::operation_panel(self, &node),
+        };
+        frame
+    }
+
     /// The setup `id` is, or belongs to.
     fn setup_of(&self, id: &str) -> Option<String> {
         if setup_node(id).is_some() {

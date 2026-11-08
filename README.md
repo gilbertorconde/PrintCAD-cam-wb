@@ -210,7 +210,9 @@ panels, the drawing and the helper that runs camcraft.
   wide; and its holes are cut nearest first, by X then Y back and forth,
   or as picked. It can take
   the document's sketches too, ticked in its panel: what their closed loops
-  enclose, or the loops themselves for an engraving. A sketch's text is its
+  enclose, or the loops themselves for an engraving. Given in a script,
+  they are a 2D cut's outline and a 3D cut's boundary, so an adaptive
+  clearing given one pocket's sketch clears that pocket alone. A sketch's text is its
   letters' outlines. Its open curves close nothing, and a package cannot
   read them, so only picked edges give an engraving an open curve. A setup's
   work zero can be a corner or a round edge's centre picked on the part,
@@ -343,7 +345,10 @@ panels, the drawing and the helper that runs camcraft.
   which says so first, at the top. The setup's panel lists its tools with
   what each does too.
 - **Drawn over the model.** The stock's box or cylinder, the work zero, each operation's
-  toolpath (rapids dashed while it is edited), and the material left.
+  toolpath (rapids dashed while it is edited), and the material left. The
+  view draws 30,000 of the toolpaths' points at most, so a frame stays
+  quick on a big document: the edited operation's first, then the rest of
+  its setup, then the other setups, each thinned to its share.
 - **G-code through the save dialog,** one program for the whole setup, as
   Fusion posts one, or one program per operation (every one of a setup into
   a folder at once), as the setup's Programs says, for GRBL,

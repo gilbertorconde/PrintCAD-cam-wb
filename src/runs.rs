@@ -8,8 +8,9 @@
 //! what that one left for it rather than run it twice.
 
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
-use cam_protocol::{Response, Run};
+use cam_protocol::{Request, Response, Run};
 use printcad_bench_sdk::{host, serde_json};
 
 /// The job entry that runs a setup.
@@ -20,7 +21,9 @@ pub enum State {
     /// Waiting for the setup before it to finish.
     Queued,
     Running(u64),
-    Ready(Box<Run>),
+    /// Shared, so a call that needs the run beside `&mut` access to the
+    /// package takes it without copying its toolpaths and programs.
+    Ready(Rc<Run>),
     Stopped,
     Failed(String),
 }
@@ -38,7 +41,7 @@ pub struct Computed {
     ran: Option<String>,
     pub state: State,
     /// What it had last time it ran, shown while it runs again.
-    pub last: Option<Box<Run>>,
+    pub last: Option<Rc<Run>>,
     /// Its operations' feature ids, in the order it runs them: which of the
     /// run's operations each is. Kept here because a feature's badge is
     /// asked for without the document, where they could be looked up.
@@ -53,6 +56,14 @@ impl Computed {
         match &self.state {
             State::Ready(run) => Some(run),
             _ => self.last.as_deref(),
+        }
+    }
+
+    /// [`Self::shown`], shared.
+    pub fn shown_rc(&self) -> Option<Rc<Run>> {
+        match &self.state {
+            State::Ready(run) => Some(run.clone()),
+            _ => self.last.clone(),
         }
     }
 
@@ -76,7 +87,7 @@ impl Computed {
             key: 0,
             request: None,
             ran: None,
-            state: State::Ready(Box::new(run)),
+            state: State::Ready(Rc::new(run)),
             last: None,
             operations,
             after: None,
@@ -97,16 +108,18 @@ impl Runs {
     /// Run `setup` from `request`, which runs `operations` (their feature
     /// ids, in order), unless it has a run, or one coming, from the same
     /// request; `again` runs a stopped or failed one again too. `after` is
-    /// the setup it carries on from, which it waits for.
+    /// the setup it carries on from, which it waits for. The request is
+    /// written out only to run it: a body's solid can be megabytes, and
+    /// whether the setups changed is asked on every edit.
     pub fn want(
         &mut self,
         setup: &str,
-        request: String,
+        request: Request,
         operations: Vec<String>,
         again: bool,
         after: Option<String>,
     ) {
-        let key = digest(&request);
+        let key = key_of(&request);
         if let Some(known) = self.setups.get_mut(setup)
             && known.key == key
             && (!again || !matches!(known.state, State::Stopped | State::Failed(_)))
@@ -115,6 +128,9 @@ impl Runs {
             known.after = after;
             return;
         }
+        let Ok(request) = serde_json::to_string(&request) else {
+            return self.refuse(setup, "the setup's request does not write".into());
+        };
         self.stop(setup);
         let last = self.setups.get(setup).and_then(|c| match &c.state {
             State::Ready(run) => Some(run.clone()),
@@ -226,7 +242,7 @@ impl Runs {
             .find(|(_, c)| matches!(c.state, State::Running(j) if j == job))?;
         c.state = match result {
             Ok(json) => match serde_json::from_str::<Response>(json) {
-                Ok(Response::Ran(run)) => State::Ready(run),
+                Ok(Response::Ran(run)) => State::Ready(Rc::from(run)),
                 Ok(Response::Refused { why }) => State::Failed(why),
                 Ok(Response::Read { .. }) => State::Failed("the helper read a file instead".into()),
                 Err(e) => State::Failed(format!("the helper's answer does not read: {e}")),
@@ -240,11 +256,42 @@ impl Runs {
     }
 }
 
-/// FNV-1a, to tell one request from another without keeping it.
-fn digest(text: &str) -> u64 {
-    text.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
-        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
-    })
+/// What tells `request` from another without keeping it: its job, each
+/// solid and where it sits, its post, and the earlier setup's request it
+/// carries on from.
+fn key_of(request: &Request) -> u64 {
+    let mut h = digest(0xcbf2_9ce4_8422_2325, request.job.as_bytes());
+    if let Some(from) = &request.from {
+        h = digest(h, &key_of(from).to_le_bytes());
+    }
+    for (name, shape) in &request.shapes {
+        h = digest(h, name.as_bytes());
+        h = digest(h, shape.text.as_bytes());
+        for v in shape.placement {
+            h = digest(h, &v.to_le_bytes());
+        }
+    }
+    h = digest(h, request.post.as_deref().unwrap_or_default().as_bytes());
+    digest(
+        h,
+        &[
+            u64::from(request.version).to_le_bytes(),
+            (request.max_points as u64).to_le_bytes(),
+        ]
+        .concat(),
+    )
+}
+
+/// `h` on with `bytes`, eight at a time (FNV-1a over words, then the
+/// length): a solid of megabytes is read through quickly.
+fn digest(h: u64, bytes: &[u8]) -> u64 {
+    let (words, rest) = bytes.as_chunks::<8>();
+    let step = |h: u64, w: u64| (h ^ w).wrapping_mul(0x0100_0000_01b3).rotate_left(29);
+    let mut h = words.iter().fold(h, |h, w| step(h, u64::from_le_bytes(*w)));
+    let mut tail = [0; 8];
+    tail[..rest.len()].copy_from_slice(rest);
+    h = step(h, u64::from_le_bytes(tail));
+    step(h, bytes.len() as u64)
 }
 
 #[cfg(test)]
@@ -252,6 +299,42 @@ mod tests {
     use cam_protocol::Response;
 
     use super::*;
+
+    /// A setup's request is told from another by what it runs: its job,
+    /// each solid and where it sits, its post; the same request is the same.
+    #[test]
+    fn a_request_is_known_by_what_it_runs() {
+        let request = Request {
+            version: cam_protocol::VERSION,
+            job: "[[setup]]\nname = \"top\"\n".into(),
+            shapes: BTreeMap::from([(
+                "part".to_string(),
+                cam_protocol::Shape {
+                    text: "a solid, longer than a word or two".into(),
+                    placement: cam_protocol::IDENTITY,
+                },
+            )]),
+            max_points: 100,
+            post: None,
+            read: None,
+            from: None,
+        };
+        let key = key_of(&request);
+        assert_eq!(key_of(&request.clone()), key);
+        let mut moved = request.clone();
+        moved.shapes.get_mut("part").unwrap().placement[3] = 10.0;
+        let mut edited = request.clone();
+        edited.shapes.get_mut("part").unwrap().text.push('!');
+        let mut posted = request.clone();
+        posted.post = Some("name = \"mine\"".into());
+        let mut rejobbed = request.clone();
+        rejobbed.job.push(' ');
+        let mut carried = request.clone();
+        carried.from = Some(Box::new(request.clone()));
+        for other in [moved, edited, posted, rejobbed, carried] {
+            assert_ne!(key_of(&other), key, "{other:?}");
+        }
+    }
 
     /// A run that comes back keeps the request it was started from, for a
     /// playback session to run again as it was.
@@ -261,7 +344,7 @@ mod tests {
         runs.setups.insert(
             "s".into(),
             Computed {
-                key: digest("asked"),
+                key: 1,
                 request: None,
                 ran: Some("asked".into()),
                 state: State::Running(7),
@@ -275,7 +358,7 @@ mod tests {
         assert_eq!(runs.finished(7, &Ok(answer)).as_deref(), Some("s"));
         let c = runs.get("s").unwrap();
         assert_eq!(c.ran_from(), Some("asked"));
-        assert_eq!(digest(c.ran_from().unwrap()), c.key);
+        assert_eq!(c.key, 1);
     }
 
     /// A setup that carries on from another waits for it, whichever comes

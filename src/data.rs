@@ -1038,6 +1038,33 @@ impl OperationData {
         op
     }
 
+    /// Take sketches `ids`, as a script gives them: what their loops enclose
+    /// is what it cuts. A 2D cut's outline is then its picks, as ticking
+    /// them in its panel with the picks as its outline does; a 3D cut's
+    /// boundary is, else it would go on clearing round the whole part and
+    /// the sketches would change nothing. A boundary that had room for the
+    /// tool round the part loses it: the sketches are the boundary now,
+    /// and room round them would cut outside what they enclose.
+    pub fn take_sketches(&mut self, ids: Vec<String>) {
+        self.sketches = ids;
+        if self.sketches.is_empty() {
+            return;
+        }
+        let uses = self.strategy().uses();
+        if uses.outline {
+            self.operation.outline = Outline::Selection;
+        }
+        let b = &mut self.operation.boundary;
+        if uses.boundary && b.kind != Boundary::Selection {
+            if matches!(b.kind, Boundary::BoundingBox | Boundary::Silhouette)
+                && b.containment == Containment::Outside
+            {
+                self.margin = 0.0;
+            }
+            b.kind = Boundary::Selection;
+        }
+    }
+
     /// Whether its top or bottom may be measured from its picks: it has some,
     /// and is not a drill, whose holes each go to their own.
     pub fn can_measure_from_picks(&self) -> bool {
@@ -1546,6 +1573,62 @@ mod tests {
         assert_eq!(setup.problem(), None);
         setup.diameter = 0.0;
         assert!(setup.problem().unwrap().contains("diameter"));
+    }
+
+    /// A sketch given to an adaptive clearing is its boundary, without the
+    /// room round the part its tool gave it, so it clears what the sketch
+    /// encloses and not the whole part: a plate's other pocket is left. A
+    /// 2D pocket's outline is the sketch; an engraving follows it, as before.
+    #[test]
+    fn a_sketch_given_to_a_3d_cut_is_its_boundary() {
+        let mut setup = SetupData::new(vec!["b1".into()], "grbl", 0.05);
+        let flat = ToolSpec {
+            diameter: 6.0,
+            ..ToolSpec::default()
+        };
+        let name = setup.adopt("flat 6", &flat);
+        let mut adaptive =
+            OperationData::new(Some("s1".into()), StrategySpec::named("adaptive").unwrap());
+        adaptive.use_tool(&name, &flat, None, 0.05);
+        assert_eq!(adaptive.operation.boundary.kind, Boundary::Silhouette);
+        assert_eq!(adaptive.margin, 6.0, "room round the part");
+        adaptive.take_sketches(vec!["first".into()]);
+        let square = Curve {
+            start: [8.0, 12.0, 10.0],
+            segments: [[24.0, 12.0], [24.0, 28.0], [8.0, 28.0], [8.0, 12.0]]
+                .iter()
+                .map(|p| camcraft_core::job::Segment::Line {
+                    to: [p[0], p[1], 10.0],
+                })
+                .collect(),
+        };
+        adaptive.curves = vec![square.clone()];
+        let op = adaptive.picked("Rough", |b| Some(b.to_string()));
+        assert_eq!(op.boundary.kind, Boundary::Selection);
+        assert_eq!(op.boundary.margin, 0.0);
+        assert_eq!(op.selection.curves, vec![square]);
+        assert!(
+            adaptive.problem(&setup.tools).is_none(),
+            "{:?}",
+            adaptive.problem(&setup.tools)
+        );
+
+        let mut pocket =
+            OperationData::new(Some("s1".into()), StrategySpec::named("pocket").unwrap());
+        pocket.take_sketches(vec!["first".into()]);
+        assert_eq!(pocket.operation.outline, Outline::Selection);
+        let mut engrave =
+            OperationData::new(Some("s1".into()), StrategySpec::named("engrave").unwrap());
+        let before = engrave.operation.clone();
+        engrave.take_sketches(vec!["first".into()]);
+        assert_eq!(engrave.operation, before);
+        assert_eq!(engrave.sketches, vec!["first".to_string()]);
+
+        // None given leaves the boundary as it was.
+        let mut other =
+            OperationData::new(Some("s1".into()), StrategySpec::named("adaptive").unwrap());
+        other.take_sketches(Vec::new());
+        assert_eq!(other.operation.boundary.kind, Boundary::Silhouette);
     }
 
     /// An engraving of a sketch, and a V-carving: their numbers and choices
