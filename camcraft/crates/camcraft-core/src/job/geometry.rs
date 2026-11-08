@@ -60,13 +60,18 @@ pub enum Containment {
 /// How a hole operation (drilling, boring, circular milling, threading)
 /// finds its holes beyond those picked, and the order it takes them in:
 /// Fusion's Select Same Diameter and its ordering.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HolePicking {
     /// Every hole of the setup's models as wide as one picked, its axis
     /// along the tool's, taken as well; a boss's, every boss as wide.
     #[serde(default, skip_serializing_if = "is_default")]
     pub same_diameter: bool,
+    /// Every hole of the setup's models this wide, in millimetres, its axis
+    /// along the tool's, whether or not one is picked: a rule that needs no
+    /// pick, so it holds for whatever part the operation is put on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diameter: Option<f64>,
     /// The order they are cut in.
     #[serde(default, skip_serializing_if = "is_default")]
     pub order: HoleOrder,

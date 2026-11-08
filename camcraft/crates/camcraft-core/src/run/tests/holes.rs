@@ -231,3 +231,36 @@ fn the_same_diameter_finds_every_hole_as_wide() {
     job.setups[0].operations[0].holes.order = HoleOrder::XThenY;
     assert_eq!(found(&job), [0.0, 30.0]);
 }
+
+/// Holes found by a diameter given, with nothing picked: both 8 mm holes,
+/// not the 6 mm one; a diameter no hole has is said.
+#[test]
+fn a_diameter_given_finds_its_holes_with_no_pick() {
+    let plate = |r: f64, at: DVec3| {
+        synthetic::plate_with_hole(10.0, 5.0, r, 64)
+            .mapped(|p| p + at)
+            .unwrap()
+    };
+    let (a, b, c) = (
+        plate(4.0, dvec3(30.0, 0.0, 0.0)),
+        plate(4.0, dvec3(0.0, 0.0, 0.0)),
+        plate(3.0, dvec3(0.0, 30.0, 0.0)),
+    );
+    let body = Body::derived(TriMesh::merged(&[&a, &b, &c]).unwrap());
+    let drill = "kind = \"drill\"\ndiameter = 8.0\nnumber = 3\n";
+    let mut job = job_on(&body, "strategy = \"drill\"", drill, [34.0, 0.0, 2.5]);
+    let op = &mut job.setups[0].operations[0];
+    op.selection.faces.clear();
+    op.holes.diameter = Some(8.0);
+    op.holes.order = HoleOrder::XThenY;
+    let result = run_on(&job, &body).unwrap();
+    assert!(result.is_clean(), "{:?}", result.warnings());
+    let StrategyDetail::Drill(r) = &result.operations[0].detail else {
+        panic!("reported {:?}", result.operations[0].detail);
+    };
+    let xs: Vec<f64> = r.holes.iter().map(|h| h.at.x.round()).collect();
+    assert_eq!(xs, [0.0, 30.0]);
+    job.setups[0].operations[0].holes.diameter = Some(5.0);
+    let err = run_on(&job, &body).unwrap_err();
+    assert!(err.to_string().contains("5.000 mm across"), "{err}");
+}

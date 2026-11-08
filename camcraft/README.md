@@ -553,6 +553,13 @@ profile that cannot (`LowerError::CannotProbe`, naming those that can,
 `grbl-probe.nc` and `linuxcnc-setup-probe.nc`, the probe before an
 engraving in one program.
 
+And holes found by a diameter with nothing picked, so a template's
+drilling holds on another part. In `camcraft-core`, `HolePicking` has
+`diameter`: every hole of the setup's models that wide along the tool is
+taken, picked or not (`hole_targets`), and none that wide is
+`HoleError::NoneAsWide`. `HolePicking` is no longer `Eq`, as it holds a
+number.
+
 And one test: ogeom is 0.11.1 here, which printCAD's shapes need, and it
 meshes `round_edge_loose_fit.step`'s seam that 0.11.0 drew off the torus, so
 `a_loose_fit_is_refused_for_ogeoms_seam` became

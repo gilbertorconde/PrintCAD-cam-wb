@@ -5,7 +5,8 @@
 //! a round face standing along the tool, whose rims are its top and its
 //! bottom. With the same diameter asked, every such wall of the setup's
 //! models as wide as one picked, a hole's or a boss's as it was, is taken
-//! too: Fusion's Select Same Diameter.
+//! too: Fusion's Select Same Diameter. With a diameter asked, every hole
+//! that wide is, picked or not.
 
 use camcraft_geom::topology::{Body, EdgeKind, FaceKind};
 
@@ -141,9 +142,19 @@ pub(in crate::run) fn hole_targets(
         })
     };
     let (_, bottom) = op.levels_3d(ctx);
-    let mut found = rounds(&chains, rim, bottom, tol).map_err(in_op(op))?;
-    if op.holes.same_diameter {
-        let wanted: Vec<(f64, bool)> = found.iter().map(|r| (r.hole.radius, r.boss)).collect();
+    // Holes of a diameter asked for need no pick.
+    let mut found = if chains.is_empty() && op.holes.diameter.is_some() {
+        Vec::new()
+    } else {
+        rounds(&chains, rim, bottom, tol).map_err(in_op(op))?
+    };
+    if op.holes.same_diameter || op.holes.diameter.is_some() {
+        let mut wanted: Vec<(f64, bool)> = if op.holes.same_diameter {
+            found.iter().map(|r| (r.hole.radius, r.boss)).collect()
+        } else {
+            Vec::new()
+        };
+        wanted.extend(op.holes.diameter.map(|d| (d / 2.0, false)));
         let mut more = Vec::new();
         for piece in &prepared.pieces {
             let Some(&body) = bodies.get(piece.model.as_str()) else {
@@ -179,6 +190,9 @@ pub(in crate::run) fn hole_targets(
                 }
             }
         }
+    }
+    if let (true, Some(diameter)) = (found.is_empty(), op.holes.diameter) {
+        return Err(in_op(op)(HoleError::NoneAsWide { diameter }));
     }
     // Drilled and bored from inside: a boss has none.
     if matches!(
