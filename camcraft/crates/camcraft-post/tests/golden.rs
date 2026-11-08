@@ -208,6 +208,48 @@ fn heidenhain_inch_output_is_stable() {
     check("heidenhain-inch");
 }
 
+#[test]
+fn sinumerik_output_is_stable() {
+    check("sinumerik");
+}
+
+#[test]
+fn sinumerik_inch_output_is_stable() {
+    check("sinumerik-inch");
+}
+
+/// A Sinumerik's cycles, each kind of hole called at each by `MCALL`, in
+/// millimetres and inches: drilling with a pause, pecking out of the hole
+/// and breaking the chip, tapping rigidly either hand, and with a floating
+/// holder.
+#[test]
+fn sinumerik_drilling_cycles_are_stable() {
+    use camcraft_post::profile::TapStyle;
+    for name in ["sinumerik", "sinumerik-inch"] {
+        let mut p = Profile::builtin(name).unwrap().unwrap();
+        p.drill_cycles = true;
+        let units = p.units;
+        let with = |s: ProgramSpec| ProgramSpec { units, ..s };
+        for (spec, what) in [
+            (drilling(None, None), "drill"),
+            (drilling(None, Some(0.5)), "dwell"),
+            (drilling(Some(2.0), None), "peck"),
+            (chip_breaking(), "chip-break"),
+            (tapping(ThreadHand::Right), "tap"),
+            (tapping(ThreadHand::Left), "tap-left"),
+        ] {
+            check_against(&p, &Toolpath::new(), &with(spec), &format!("{name}-{what}"));
+        }
+        p.tap = Some(TapStyle::Floating);
+        check_against(
+            &p,
+            &Toolpath::new(),
+            &with(tapping(ThreadHand::Right)),
+            &format!("{name}-tap-floating"),
+        );
+    }
+}
+
 /// Fanuc's canned cycles, as the G-code profiles' are, but a pause in
 /// milliseconds.
 #[test]
@@ -393,8 +435,10 @@ fn milled_holes_write_their_helixes_as_arcs() {
         assert!(helixes > 10, "{post}: {helixes} helixes\n{text}");
         assert!(arcs.iter().any(|l| l.contains("G2")) && arcs.iter().any(|l| l.contains("G3")));
     }
-    let p = Profile::builtin("fanuc").unwrap().unwrap();
-    check_against(&p, &milled_holes(), &spec, "fanuc-holes");
+    for (post, file) in [("fanuc", "fanuc-holes"), ("sinumerik", "sinumerik-holes")] {
+        let p = Profile::builtin(post).unwrap().unwrap();
+        check_against(&p, &milled_holes(), &spec, file);
+    }
     // Klartext: each helix `CP` round its centre by an angle and down or up
     // by `IZ`, its way `DR+` or `DR-`, and a level circle `C` about a `CC`.
     let p = Profile::builtin("heidenhain").unwrap().unwrap();
@@ -701,7 +745,7 @@ fn a_setup_is_one_program_on_industrial_controls() {
         .iter()
         .map(|(path, spec)| Section { path, spec })
         .collect();
-    for name in ["fanuc", "heidenhain", "haas"] {
+    for name in ["fanuc", "heidenhain", "haas", "sinumerik"] {
         let p = Profile::builtin(name).unwrap().unwrap();
         check_setup_against(&p, &sections, &format!("{name}-setup"));
     }

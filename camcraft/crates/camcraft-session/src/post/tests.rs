@@ -284,7 +284,8 @@ fn a_tap_is_posted_only_as_the_machine_taps() {
     assert!(said.starts_with("Masso cannot tap"), "{said}");
     assert!(
         said.contains(
-            "(Centroid CNC12 (Avid CNC), LinuxCNC, Fanuc, Haas (NGC), Heidenhain TNC (Klartext))"
+            "(Centroid CNC12 (Avid CNC), LinuxCNC, Fanuc, Haas (NGC), Heidenhain TNC (Klartext), \
+             Siemens Sinumerik 840D sl / 828D)"
         ),
         "{said}"
     );
@@ -364,6 +365,15 @@ fn a_tilted_setup_is_posted_with_its_rotary() {
     profile.rotary = Some(toml::from_str("axes = [\"A\"]\n[A]\nlimits = [-20, 20]\n").unwrap());
     let e = program(op, 54, &frame, &profile, "01-tilted").unwrap_err();
     assert!(e.to_string().contains("past the machine's limits"), "{e}");
+
+    // A Sinumerik tilts with CYCLE800, which is not written: refused with
+    // rotaries, fixtured by hand without.
+    let mut sinumerik = load_profile("sinumerik", None).unwrap();
+    let (by_hand, _) = program(op, 54, &frame, &sinumerik, "01-tilted").unwrap();
+    assert!(by_hand.contains("fixture the part tilted"), "{by_hand}");
+    sinumerik.rotary = Some(toml::from_str("axes = [\"A\"]\n[A]\nsign = -1\n").unwrap());
+    let e = program(op, 54, &frame, &sinumerik, "01-tilted").unwrap_err();
+    assert!(e.to_string().contains("CYCLE800"), "{e}");
 }
 
 /// A setup on a rotary is posted round the A that turns its bar, and read
@@ -409,14 +419,18 @@ fn a_setup_on_a_rotary_is_posted_round_its_a() {
         "{e}"
     );
 
+    for post in ["sinumerik", "linuxcnc"] {
+        let mut profile = load_profile(post, None).unwrap();
+        profile.rotary = Some(toml::from_str("axes = [\"A\"]\n").unwrap());
+        let (text, _) = program(&op, 54, &frame, &profile, "01-wrapped").unwrap();
+        assert!(text.contains("G93") && text.contains("A540"), "{text}");
+        let spec = program_spec(&op, 54, &frame, &profile).unwrap();
+        if let Err(p) = camcraft_post::readback::check(&text, &op.path, &spec, &profile) {
+            panic!("{post} does not read back: {p}\n{text}");
+        }
+    }
     let mut profile = load_profile("linuxcnc", None).unwrap();
     profile.rotary = Some(toml::from_str("axes = [\"A\"]\n").unwrap());
-    let (text, _) = program(&op, 54, &frame, &profile, "01-wrapped").unwrap();
-    assert!(text.contains("G93") && text.contains("A540"), "{text}");
-    let spec = program_spec(&op, 54, &frame, &profile).unwrap();
-    if let Err(p) = camcraft_post::readback::check(&text, &op.path, &spec, &profile) {
-        panic!("does not read back: {p}\n{text}");
-    }
     let setup = camcraft_core::job::Setup::new("rotary");
     let past = travel_check(&op, &setup, &frame, &profile).past;
     assert!(

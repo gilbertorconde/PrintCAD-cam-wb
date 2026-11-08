@@ -769,6 +769,31 @@ at each, `travel_check` checks each placement where its offset is, saying
 which, and a run warns of placements whose stocks overlap. A golden program
 of two vises by tool (`linuxcnc-setup-vises.nc`).
 
+And a post for Siemens Sinumerik controls. In `camcraft-post`, profiles
+for the 840D sl and 828D (`sinumerik.toml`, `sinumerik-inch.toml`), with
+golden programs, and a third `Dialect`, `sinumerik`: the G-code renderer
+writes it, with the new `sinumerik` module's words (`render::sinumerik`):
+`%_N_<name>_MPF` and `;$PATH=/_N_MPF_DIR` first (`sinumerik::program_name`),
+`G710` and `G700` for units, `D1` after each tool change and again before a
+move in the work after a profile's line lets the offsets go with `D0`
+(`G0 SUPA Z0 D0`), arcs by their centre whatever `arc_style`, and holes as
+`MCALL CYCLE81`, `82`, `83`, `84` or `840` called by a position block at
+each hole and ended by `MCALL`. `readback::read_sinumerik` reads it with the
+G-code reader (`readback::sinumerik`, with `sinumerik::line` splitting a
+line into its words), the cycles into the moves their manual gives them, a
+move in the work without `D1` refused, and its custom lines checked by
+`sinumerik::concern`. `Profile::tool_management` writes a tool as `T="3"`;
+`TapStyle::Floating` (`tap = "cycle840"`) taps with a floating holder; both
+only for a Sinumerik, which `validate` keeps to `;` comments, centre arcs,
+no `length_offset`, no `M29` or `G33.1` and no probing. On a Sinumerik
+`wcs_word` skips `G58` and `G59`, programmable offsets there, so its
+extended offsets (`G505` on) follow `G57`; `Profile::offsets_past_g59`
+says how many a setup may take past 59, which `program_spec` now uses for
+every profile. A profile's `SUPA` and `G153` lines are kept inside a
+machine travel as `G53`'s are. In `camcraft-session`, `program_spec` refuses
+a tilted setup for a Sinumerik with rotaries (`LowerError::TiltNotWritten`):
+`CYCLE800` is not written.
+
 And one test: ogeom is 0.11.1 here, which printCAD's shapes need, and it
 meshes `round_edge_loose_fit.step`'s seam that 0.11.0 drew off the torus, so
 `a_loose_fit_is_refused_for_ogeoms_seam` became

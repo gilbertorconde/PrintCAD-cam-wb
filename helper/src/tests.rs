@@ -739,7 +739,8 @@ fn a_tap_posts_only_where_the_post_has_the_cycle() {
 
 /// The tap on each built-in post: one whose controller taps writes a
 /// program and passes, LinuxCNC tapping with G33.1, CNC12 and Haas with
-/// their cycle, Fanuc with it after M29, Heidenhain with cycle 207; the
+/// their cycle, Fanuc with it after M29, Heidenhain with cycle 207, a
+/// Sinumerik with CYCLE84; the
 /// others fail, saying so.
 #[test]
 fn a_tap_on_a_builtin_post_writes_a_program_where_it_can() {
@@ -751,6 +752,7 @@ fn a_tap_on_a_builtin_post_writes_a_program_where_it_can() {
         ("fanuc", Some("G74 X")),
         ("haas-inch", Some("G74 X")),
         ("heidenhain", Some("CYCL DEF 207")),
+        ("sinumerik", Some("MCALL CYCLE84(")),
         ("mach", None),
         ("masso", None),
         ("masso-inch", None),

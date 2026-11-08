@@ -294,21 +294,63 @@ pub fn read_wrapped(
     dwell: f64,
     wrap: Option<Wrapping>,
 ) -> Result<Vec<Step>, Problem> {
-    let mut r = Reader {
-        dwell,
-        wrap,
-        ..Reader::default()
-    };
+    read_lines(
+        text,
+        blocks,
+        Reader {
+            dwell,
+            wrap,
+            ..Reader::default()
+        },
+    )
+}
+
+/// What a Sinumerik program does, step by step, as [`read_wrapped`] says
+/// of G-code, its own words read as a Sinumerik reads them
+/// ([`crate::sinumerik`]): `offsets` are the work offsets its profile has,
+/// by number and word, past `G57` its own.
+pub fn read_sinumerik(
+    text: &str,
+    blocks: &[(usize, usize)],
+    wrap: Option<Wrapping>,
+    offsets: &[(u8, String)],
+) -> Result<Vec<Step>, Problem> {
+    read_lines(
+        text,
+        blocks,
+        Reader {
+            wrap,
+            siemens: Some(Siemens {
+                offsets: offsets.to_vec(),
+                ..Siemens::default()
+            }),
+            ..Reader::default()
+        },
+    )
+}
+
+fn read_lines(text: &str, blocks: &[(usize, usize)], mut r: Reader) -> Result<Vec<Step>, Problem> {
     for (i, line) in text.lines().enumerate() {
         r.line = i + 1;
         if blocks.iter().any(|(b, e)| r.line > *b && r.line < *e) {
-            if let Some(Concern::Refused(why)) = concern(line) {
+            let refused = if r.siemens.is_some() {
+                crate::sinumerik::concern(line)
+            } else {
+                concern(line)
+            };
+            if let Some(Concern::Refused(why)) = refused {
                 return Err(Problem::at(r.line, format!("custom G-code: {why}")));
             }
             continue;
         }
-        let words = words(line).map_err(|what| Problem::at(r.line, what))?;
-        r.block(&words).map_err(|what| Problem::at(r.line, what))?;
+        if r.siemens.is_some() {
+            let l = crate::sinumerik::line(line).map_err(|what| Problem::at(r.line, what))?;
+            r.siemens_block(&l)
+                .map_err(|what| Problem::at(r.line, what))?;
+        } else {
+            let words = words(line).map_err(|what| Problem::at(r.line, what))?;
+            r.block(&words).map_err(|what| Problem::at(r.line, what))?;
+        }
         if blocks.iter().any(|(_, e)| r.line == *e) {
             r.push(Action::Custom);
             // Whatever it set, the program must set again.
@@ -317,7 +359,17 @@ pub fn read_wrapped(
             r.motion = None;
             r.spin = None;
             r.angle = None;
+            if let Some(s) = &mut r.siemens {
+                s.edge = None;
+                s.tool = None;
+                s.changes = false;
+            }
         }
+    }
+    if r.siemens.as_ref().is_some_and(|s| s.mcall.is_some()) {
+        return Err(Problem::whole(
+            "the program ends with a cycle still called (MCALL)",
+        ));
     }
     Ok(r.steps)
 }
@@ -558,6 +610,26 @@ struct Reader {
     /// The last `F` as written, on a setup wrapped round a rotary, and the
     /// block it was in.
     f_word: Option<(f64, usize)>,
+    /// What a Sinumerik keeps besides, where the program is one's.
+    siemens: Option<Siemens>,
+}
+
+/// What a Sinumerik keeps that ISO G-code has not.
+#[derive(Default)]
+struct Siemens {
+    /// The work offsets the profile has, by number and word.
+    offsets: Vec<(u8, String)>,
+    /// Whether the tool's offsets are taken up (`D1`), or let go (`D0`);
+    /// `None` after a change, until it says.
+    edge: Option<bool>,
+    /// The cycle called after each move (`MCALL`).
+    mcall: Option<crate::sinumerik::Call>,
+    /// The tool in, whose offsets `D1` takes up: the one changed to (`M6`),
+    /// or with no changer, the one called before a stop.
+    tool: Option<u32>,
+    /// Whether a tool has been changed to by `M6`, so a stop after a tool
+    /// called up for the next change does not put that one in.
+    changes: bool,
 }
 
 impl Default for Reader {
@@ -585,6 +657,7 @@ impl Default for Reader {
             angle: None,
             inverse: false,
             f_word: None,
+            siemens: None,
         }
     }
 }
@@ -743,12 +816,13 @@ impl Reader {
                 g => g,
             };
             let n = u8::try_from(g).map_err(|_| "a work offset out of range")?;
-            if self.wcs != Some(n) {
-                self.at = [None; 3];
-                self.angle = None;
+            if self.siemens.is_some() && n > 57 {
+                return Err(format!(
+                    "G{n} is a programmable offset on a Sinumerik, not a work offset: \
+                     not understood"
+                ));
             }
-            self.wcs = Some(n);
-            self.push(Action::WorkOffset(n));
+            self.select_offset(n);
         }
 
         let has_axes = b.axes.iter().any(Option::is_some);
@@ -855,6 +929,17 @@ impl Reader {
             }
         }
         Ok(())
+    }
+
+    /// Work offset `n` selected: where the tool is in it is not known, if it
+    /// is another.
+    fn select_offset(&mut self, n: u8) {
+        if self.wcs != Some(n) {
+            self.at = [None; 3];
+            self.angle = None;
+        }
+        self.wcs = Some(n);
+        self.push(Action::WorkOffset(n));
     }
 
     /// Where a block's axis words send the tool, in work coordinates.
@@ -1337,7 +1422,7 @@ fn steps_of(
     wrap: Option<Wrapping>,
 ) -> Result<Vec<Step>, Problem> {
     let blocks = match profile.dialect {
-        Dialect::Iso => custom_blocks(text, profile),
+        Dialect::Iso | Dialect::Sinumerik => custom_blocks(text, profile),
         Dialect::Heidenhain => crate::heidenhain::custom_blocks(text, profile),
     };
     if blocks.len() != wanted {
@@ -1358,6 +1443,7 @@ fn steps_of(
             wrap,
         ),
         Dialect::Heidenhain => crate::heidenhain::read_around(text, &blocks),
+        Dialect::Sinumerik => read_sinumerik(text, &blocks, wrap, &profile.work_offsets()),
     }
 }
 
@@ -2249,6 +2335,8 @@ impl<'a> Checker<'a> {
         Ok(())
     }
 }
+
+mod sinumerik;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]

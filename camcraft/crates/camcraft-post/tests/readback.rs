@@ -331,9 +331,10 @@ fn drilling_cycles_read_back_to_their_holes() {
                 ("tapped after M29 left-hand", m29(tapping(ThreadHand::Left))),
             ];
             for (what, spec) in specs {
-                // Klartext taps only with cycle 207.
+                // Klartext taps only with cycle 207, a Sinumerik with its
+                // cycles.
                 let style = spec.drill.as_ref().map(|d| d.tap_style);
-                if profile.dialect == Dialect::Heidenhain && style != Some(TapStyle::Cycle) {
+                if profile.dialect != Dialect::Iso && style != Some(TapStyle::Cycle) {
                     continue;
                 }
                 let spec = ProgramSpec { units, ..spec };
@@ -383,6 +384,7 @@ fn every_builtin_that_taps_reads_back_its_taps() {
             };
             let word = match (style, profile.dialect) {
                 (_, Dialect::Heidenhain) => "CYCL DEF 207",
+                (_, Dialect::Sinumerik) => "MCALL CYCLE84(",
                 (TapStyle::G331, _) => "G33.1 Z",
                 (TapStyle::M29, _) => "M29 S500",
                 _ => cycle,
@@ -411,7 +413,9 @@ fn every_builtin_that_taps_reads_back_its_taps() {
             "haas",
             "haas-inch",
             "heidenhain",
-            "heidenhain-inch"
+            "heidenhain-inch",
+            "sinumerik",
+            "sinumerik-inch"
         ]
     );
 }
@@ -748,6 +752,80 @@ fn faults_are_caught() {
             "29 END PGM readback MM\n",
             "",
             "no END PGM",
+        ),
+        // A Sinumerik: an arc the wrong way round, the tool's offsets never
+        // taken up, or let go before it cuts, the wrong tool and offset,
+        // inches read as millimetres, G71's lengths without its feeds.
+        (
+            "sinumerik",
+            Mm,
+            "G17 G2 X12 Y11.5",
+            "G17 G3 X12 Y11.5",
+            "strays",
+        ),
+        (
+            "sinumerik",
+            Mm,
+            "D1\n",
+            "",
+            "before the tool's offsets are taken up (D1)",
+        ),
+        (
+            "sinumerik",
+            Mm,
+            "\nG54\n",
+            "\nG54\nD0\n",
+            "offsets let go (D0)",
+        ),
+        (
+            "sinumerik",
+            Mm,
+            "T3 M6",
+            "T4 M6",
+            "takes up tool 4's length",
+        ),
+        ("sinumerik", Mm, "\nG54\n", "\nG55\n", "G54 is selected"),
+        (
+            "sinumerik",
+            Mm,
+            "\nG54\n",
+            "\nG58\n",
+            "not one of this machine's work offsets",
+        ),
+        (
+            "sinumerik-inch",
+            Inch,
+            "G700",
+            "G710",
+            "on its way to the path's start",
+        ),
+        (
+            "sinumerik",
+            Mm,
+            "G710",
+            "G71",
+            "converts lengths but not feeds",
+        ),
+        (
+            "sinumerik",
+            Mm,
+            "X10 F1200",
+            "X10 CR=5 F1200",
+            "CR=5 is not understood",
+        ),
+        (
+            "sinumerik",
+            Mm,
+            "G0 SUPA Z0 D0\n;6mm",
+            ";6mm",
+            "goes across at a height not known",
+        ),
+        (
+            "sinumerik",
+            Mm,
+            "S18000 M3\n",
+            "",
+            "before the spindle turns",
         ),
     ];
     for &(profile, units, from, to, said) in faults {
@@ -1235,6 +1313,176 @@ fn heidenhain_cycle_faults_are_caught() {
     }
 }
 
+/// Faults in a Sinumerik's cycles: back only to the gap above the hole
+/// between holes (RTP), pecks too deep, a hole drilled past its bottom or
+/// not to it, no pause at the bottom, a hole somewhere else, a tap with its
+/// hand against the spindle's, at another speed or pitch, the spindle left
+/// otherwise after it, the cycle never ended (MCALL), and a position given
+/// before its offsets are taken up.
+#[test]
+fn sinumerik_cycle_faults_are_caught() {
+    use camcraft_post::profile::TapStyle;
+    let mut profile = Profile::builtin("sinumerik").unwrap().unwrap();
+    profile.drill_cycles = true;
+    let mut floating = profile.clone();
+    floating.tap = Some(TapStyle::Floating);
+    let faults: &[(&Profile, ProgramSpec, &str, &str, &str)] = &[
+        (
+            &profile,
+            drilling(Some(2.0), None),
+            "CYCLE83(20,",
+            "CYCLE83(7,",
+            "below the clearance height",
+        ),
+        (
+            &profile,
+            drilling(Some(2.0), None),
+            ",,3,,",
+            ",,0,,",
+            "pecks deeper",
+        ),
+        (&profile, chip_breaking(), ",,3,,", ",,1,,", "pecks deeper"),
+        (
+            &profile,
+            drilling(Some(2.0), None),
+            ",0,0,0,1,1)",
+            ",0.5,0,0,1,1)",
+            "with a degression (DAM) 0.5 is not understood",
+        ),
+        (
+            &profile,
+            drilling(None, None),
+            "2,-1.5)",
+            "2,-2)",
+            "past its bottom",
+        ),
+        (
+            &profile,
+            drilling(None, None),
+            "2,-1.5)",
+            "2,-1)",
+            "before hole 1 is drilled to its bottom",
+        ),
+        (
+            &profile,
+            drilling(None, Some(0.5)),
+            ",,0.5)",
+            ",,0)",
+            "no pause of 0.5 s",
+        ),
+        (
+            &profile,
+            drilling(None, None),
+            "G0 X30 Y10",
+            "G0 X31 Y10",
+            "where hole 2 is",
+        ),
+        (
+            &profile,
+            drilling(None, None),
+            "\nMCALL\n",
+            "\n",
+            "while CYCLE81 is called",
+        ),
+        (
+            &profile,
+            drilling(None, None),
+            "D1\n",
+            "",
+            "before the tool's offsets are taken up",
+        ),
+        (
+            &profile,
+            tapping(ThreadHand::Right),
+            ",1.25,0,500,",
+            ",-1.25,0,500,",
+            "without the spindle turning M4",
+        ),
+        (
+            &profile,
+            tapping(ThreadHand::Right),
+            ",1.25,0,500,",
+            ",1.25,0,600,",
+            "taps at 600 rev/min",
+        ),
+        (
+            &profile,
+            tapping(ThreadHand::Right),
+            ",1.25,0,500,",
+            ",1.4,0,500,",
+            "drills at 700.000",
+        ),
+        (
+            &profile,
+            tapping(ThreadHand::Right),
+            ",0,3,,1.25",
+            ",0,5,,1.25",
+            "SDAC",
+        ),
+        (
+            &profile,
+            tapping(ThreadHand::Right),
+            ",0,,1)",
+            ",0,,2)",
+            "_PITA",
+        ),
+        (
+            &floating,
+            tapping(ThreadHand::Left),
+            ",0,0,4,11,",
+            ",0,0,4,0,",
+            "ENC 11",
+        ),
+        (
+            &floating,
+            tapping(ThreadHand::Left),
+            ",0,0,4,11,",
+            ",0,4,4,11,",
+            "SDR",
+        ),
+    ];
+    for (profile, spec, from, to, said) in faults {
+        let text = post(&Toolpath::new(), spec, profile);
+        assert_eq!(text.matches(from).count(), 1, "{from:?}:\n{text}");
+        check(&text, &Toolpath::new(), spec, profile).unwrap();
+        let text = text.replace(from, to);
+        match check(&text, &Toolpath::new(), spec, profile) {
+            Ok(()) => panic!("{from:?} made {to:?} was not caught:\n{text}"),
+            Err(p) => assert!(p.to_string().contains(said), "{p}\n{text}"),
+        }
+    }
+}
+
+/// A Sinumerik's custom lines may not move the machine in its own words
+/// either: a frame, a cycle, an axis given by `=`, a jump; on their line.
+#[test]
+fn sinumerik_custom_code_cannot_hide_a_move() {
+    use camcraft_post::op::CustomGcode;
+    let path = fixture();
+    let profile = Profile::builtin("sinumerik").unwrap().unwrap();
+    let custom = |text: &str| ProgramSpec {
+        before: vec![CustomGcode::new("Probe", text)],
+        ..spec()
+    };
+    let fine = custom("MSG(\"check the clamps\")\nM0\nL100\nMSG()");
+    reads_back(&path, &fine, &profile, "a Sinumerik's own custom lines");
+    for bad in [
+        "TRANS Z5",
+        "MCALL CYCLE81(10,0,2,-5)",
+        "Z=5",
+        "GOTOF ENDE",
+        "G0 SUPA Z0",
+        "M6",
+    ] {
+        let spec = custom(bad);
+        let text = post(&path, &spec, &profile);
+        let p = check(&text, &path, &spec, &profile).unwrap_err();
+        assert!(p.what.starts_with("custom G-code: "), "{bad}: {p}");
+        let line = text.lines().nth(p.line.unwrap() - 1).unwrap();
+        assert_eq!(line, bad);
+    }
+}
+
 /// Fanuc's and Haas's work offsets past G59, `G54.1 P..` and `G154 P..`,
 /// are selected and read back as the setup's; another P is caught.
 #[test]
@@ -1244,11 +1492,16 @@ fn extended_work_offsets_read_back() {
         ("fanuc-inch", 107, "G54.1 P48", "G54.1 P47"),
         ("haas", 60, "G154 P1", "G154 P2"),
         ("haas-inch", 158, "G154 P99", "G154 P98"),
+        // A Sinumerik's G58 and G59 add to the offset selected: its fifth
+        // is G505, its last G599.
+        ("sinumerik", 58, "G505", "G506"),
+        ("sinumerik", 57, "G57", "G56"),
+        ("sinumerik-inch", 152, "G599", "G598"),
     ] {
         let profile = Profile::builtin(name).unwrap().unwrap();
         let spec = ProgramSpec {
             wcs,
-            extended_offsets: u8::try_from(profile.extended_offsets.len()).unwrap(),
+            extended_offsets: profile.offsets_past_g59(),
             units: profile.units,
             ..spec()
         };
