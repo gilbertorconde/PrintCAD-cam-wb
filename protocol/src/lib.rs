@@ -105,6 +105,10 @@ pub struct Run {
     /// [`Run::stock`]'s, for drawing.
     #[serde(default)]
     pub fixtures: Vec<FixtureBox>,
+    /// Each part the setup cuts, at its work offset, when it cuts several:
+    /// the run shown is the first's, each other cut as it is.
+    #[serde(default)]
+    pub placements: Vec<PlacedPart>,
     /// The work zero.
     pub origin: [f64; 3],
     /// Each operation, in the setup's order.
@@ -134,6 +138,18 @@ pub struct Run {
     /// Where the part and its stock are, for the setup sheet.
     #[serde(default)]
     pub layout: Option<Layout>,
+}
+
+/// One part of a setup that cuts several.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PlacedPart {
+    /// Its work offset, as the post writes it: `G55`.
+    pub wcs: String,
+    /// How far it is from the first, in the document's coordinates.
+    pub offset: [f64; 3],
+    /// Where its work zero is on the machine, along the setup's axes, when
+    /// known.
+    pub work_offset: Option<[f64; 3]>,
 }
 
 /// A fixture, for drawing.

@@ -13,8 +13,8 @@ use std::collections::BTreeMap;
 use camcraft_core::job::{
     Along, BarAxis, Boundary, BoxOf, Containment, Curve, Depths, FeatureRef, FixedBox,
     FixedCylinder, Height, HeightRef, Heights, Job, Leave, MachiningBoundary, ModelDef, Operation,
-    Origin, Outline, Place, PointRef, Preset, Programs, Selection, Setup, Snap, StockDef,
-    StockSpec, StockToLeave, StrategySpec, ToolSpec, ZCorrection,
+    Origin, Outline, Place, Placement, PlacementOrder, PointRef, Preset, Programs, Selection,
+    Setup, Snap, StockDef, StockSpec, StockToLeave, StrategySpec, ToolSpec, ZCorrection,
 };
 use camcraft_core::setup::frame::{Axis, Direction, Orientation};
 use printcad_bench_sdk::serde_json;
@@ -328,6 +328,13 @@ pub struct SetupData {
     /// Whether it is posted as one program, or one an operation.
     #[serde(default)]
     pub programs: Programs,
+    /// More parts, each at a work offset of its own, cut as the first is,
+    /// the one at `wcs`: a second vise, a fixture plate's next station.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<PartData>,
+    /// Which comes first with several parts.
+    #[serde(default)]
+    pub part_order: PlacementOrder,
     /// Its program's number, for a control that files programs by number;
     /// each program of a setup posted one an operation takes the next.
     #[serde(default = "program_number")]
@@ -412,6 +419,8 @@ impl SetupData {
             wcs_y: 0.0,
             wcs_z: 0.0,
             programs: Programs::Setup,
+            parts: Vec::new(),
+            part_order: PlacementOrder::ByTool,
             program_number: program_number(),
             tolerance,
             tools: BTreeMap::new(),
@@ -787,6 +796,25 @@ impl SetupData {
         {
             return Some("Where the work offset is on the machine must be numbers.".into());
         }
+        let mut taken = vec![self.wcs];
+        for p in &self.parts {
+            if !offsets.iter().any(|(n, _)| f64::from(*n) == p.wcs) {
+                return Some(format!(
+                    "A part's work offset, G{}, is not one {} has.",
+                    p.wcs, self.post
+                ));
+            }
+            if taken.contains(&p.wcs) {
+                return Some(format!(
+                    "Two parts are at work offset G{}: give each its own.",
+                    p.wcs
+                ));
+            }
+            taken.push(p.wcs);
+            if ![p.x, p.y, p.z].iter().all(|v| v.is_finite()) {
+                return Some("Where each part is must be numbers.".into());
+            }
+        }
         if !(1.0..=99_999.0).contains(&self.program_number) {
             return Some("The program number must be 1 to 99999.".into());
         }
@@ -806,6 +834,86 @@ impl SetupData {
             return Some(e.to_string());
         }
         None
+    }
+}
+
+/// Another part of a setup: its work offset and how far it is from the
+/// first, along the setup's axes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PartData {
+    /// Its work offset, as [`SetupData::wcs`].
+    pub wcs: f64,
+    #[serde(default)]
+    pub x: f64,
+    #[serde(default)]
+    pub y: f64,
+    #[serde(default)]
+    pub z: f64,
+}
+
+impl SetupData {
+    /// Its parts as camcraft has them: none for the one, else the first
+    /// at its own offset and each other where it is.
+    fn placements(&self) -> Vec<Placement> {
+        if self.parts.is_empty() {
+            return Vec::new();
+        }
+        let wcs = |w: f64| {
+            w.round()
+                .clamp(54.0, f64::from(camcraft_core::job::LAST_WCS)) as u8
+        };
+        let first = Placement {
+            wcs: wcs(self.wcs),
+            at: [0.0; 3],
+            work_offset: self
+                .wcs_known
+                .then_some([self.wcs_x, self.wcs_y, self.wcs_z]),
+        };
+        std::iter::once(first)
+            .chain(self.parts.iter().map(|p| Placement {
+                wcs: wcs(p.wcs),
+                at: [p.x, p.y, p.z],
+                work_offset: None,
+            }))
+            .collect()
+    }
+
+    /// The next part: the next work offset the post has that none is at,
+    /// as far on from the last as the last is from the one before it, or
+    /// `step` along X after the first. `None` when the offsets run out.
+    pub fn next_part(&self, step: f64) -> Option<PartData> {
+        let taken: Vec<f64> = std::iter::once(self.wcs)
+            .chain(self.parts.iter().map(|p| p.wcs))
+            .collect();
+        let last = taken.last().copied().unwrap_or(self.wcs);
+        let offsets = self.work_offsets();
+        let free = |n: &&(u8, String)| !taken.contains(&f64::from(n.0));
+        let wcs = offsets
+            .iter()
+            .filter(free)
+            .find(|(n, _)| f64::from(*n) > last)
+            .or_else(|| offsets.iter().find(free))?
+            .0;
+        let at = |k: usize| {
+            k.checked_sub(1)
+                .and_then(|k| self.parts.get(k))
+                .map_or([0.0; 3], |p| [p.x, p.y, p.z])
+        };
+        let n = self.parts.len();
+        let (a, b) = (at(n), at(n.saturating_sub(1)));
+        let d = if n == 0 {
+            [step, 0.0, 0.0]
+        } else if n == 1 {
+            a
+        } else {
+            [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+        };
+        Some(PartData {
+            wcs: f64::from(wcs),
+            x: a[0] + d[0],
+            y: a[1] + d[1],
+            z: a[2] + d[2],
+        })
     }
 }
 
@@ -1494,6 +1602,8 @@ pub fn job(
         .wcs_known
         .then_some([setup.wcs_x, setup.wcs_y, setup.wcs_z]);
     camcraft.programs = setup.programs;
+    camcraft.placements = setup.placements();
+    camcraft.placement_order = setup.part_order;
     camcraft.number = setup.program_number.round().clamp(1.0, 99_999.0) as u32;
     camcraft.post = setup.post.clone();
     camcraft.z_correction = setup.z_correction();
@@ -1632,6 +1742,67 @@ mod tests {
         assert_eq!(job.models.len(), 3);
         let text = camcraft_session::job_text(&job).unwrap();
         assert_eq!(camcraft_session::parse_job(&text, "test").unwrap(), job);
+    }
+
+    /// More parts: each the next work offset, as far on as the last went;
+    /// the job places the first at the setup's own offset and the rest from
+    /// it; two on one offset, or one the post has not got, are refused.
+    #[test]
+    fn more_parts_are_placements_from_the_first() {
+        let mut setup = SetupData::new(vec!["b1".into()], "linuxcnc", 0.05);
+        setup.wcs_known = true;
+        (setup.wcs_x, setup.wcs_y, setup.wcs_z) = (10.0, -20.0, -30.0);
+        let second = setup.next_part(80.0).unwrap();
+        assert_eq!((second.wcs, second.x, second.y), (55.0, 80.0, 0.0));
+        setup.parts.push(second);
+        let third = setup.next_part(80.0).unwrap();
+        assert_eq!((third.wcs, third.x), (56.0, 160.0));
+        setup.parts.push(third);
+        assert_eq!(setup.problem(), None);
+        assert_eq!(SetupData::from(&setup.to_value()).unwrap(), setup);
+        setup.part_order = PlacementOrder::ByPart;
+        let models = models_of(&setup, |_| Some("Part".into()));
+        let job = job("Setup 1", &setup, &models, &[]);
+        let s = &job.setups[0];
+        assert_eq!(s.placement_order, PlacementOrder::ByPart);
+        let placed = s.placed();
+        assert_eq!(placed.len(), 3);
+        assert_eq!(placed[0].wcs, 54);
+        assert_eq!(placed[2].work_offset, Some([170.0, -20.0, -30.0]));
+        let text = camcraft_session::job_text(&job).unwrap();
+        assert_eq!(camcraft_session::parse_job(&text, "test").unwrap(), job);
+        setup.parts[1].wcs = 54.0;
+        assert!(setup.problem().unwrap().contains("Two parts"));
+        setup.parts[1].wcs = 200.0;
+        assert!(setup.problem().unwrap().contains("not one"));
+    }
+
+    /// More parts each take the next work offset the post has, as far on
+    /// as the last two are apart, and are camcraft's placements after the
+    /// setup's own; two on one offset are refused.
+    #[test]
+    fn more_parts_are_placements_after_the_first() {
+        let mut setup = SetupData::new(vec!["b1".into()], "linuxcnc", 0.05);
+        let second = setup.next_part(80.0).unwrap();
+        assert_eq!((second.wcs, second.x, second.y), (55.0, 80.0, 0.0));
+        setup.parts.push(second);
+        let third = setup.next_part(80.0).unwrap();
+        assert_eq!((third.wcs, third.x), (56.0, 160.0));
+        setup.parts.push(third);
+        assert_eq!(setup.problem(), None);
+        assert_eq!(SetupData::from(&setup.to_value()).unwrap(), setup);
+        let models = models_of(&setup, |_| Some("Part".into()));
+        let job = job("Setup 1", &setup, &models, &[]);
+        let placed: Vec<(u8, f64)> = job.setups[0]
+            .placements
+            .iter()
+            .map(|p| (p.wcs, p.at[0]))
+            .collect();
+        assert_eq!(placed, [(54, 0.0), (55, 80.0), (56, 160.0)]);
+        let text = camcraft_session::job_text(&job).unwrap();
+        assert_eq!(camcraft_session::parse_job(&text, "test").unwrap(), job);
+        setup.parts[1].wcs = 55.0;
+        assert!(setup.problem().unwrap().contains("Two parts"));
     }
 
     #[test]

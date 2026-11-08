@@ -436,6 +436,14 @@ pub enum LowerError {
     /// one turning as it cuts.
     #[error("{0} programs are not written turning a rotary as they cut")]
     WrapNotWritten(String),
+    /// Two operations of one program on different work offsets, for a
+    /// machine whose profile has no way to send the tool clear between them:
+    /// in the next offset's coordinates the tool is somewhere not known.
+    #[error(
+        "the program changes work offset between operations, and its profile has no \
+         safe_retract to send the tool clear first: give it one (G53 G0 Z0 or the like)"
+    )]
+    OffsetsWithoutRetract,
     /// The machine's rotaries cannot stand the setup's tool axis up the
     /// spindle.
     #[error(transparent)]

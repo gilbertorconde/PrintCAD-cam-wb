@@ -46,6 +46,16 @@ pub struct Setup {
     /// Whether it is posted as one program, or one an operation.
     #[serde(default, skip_serializing_if = "is_default")]
     pub programs: Programs,
+    /// Several parts, each at a work offset of its own, as on a fixture
+    /// plate or in two vises: the same operations cut at each. Empty for the
+    /// one part at `wcs`. When given they are every placement, `wcs` and
+    /// `work_offset` unread.
+    #[serde(default, rename = "placement", skip_serializing_if = "Vec::is_empty")]
+    pub placements: Vec<Placement>,
+    /// Which comes first with several placements: every part with one tool
+    /// before the next tool, or every operation on one part before the next.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub placement_order: PlacementOrder,
     /// Its program's number, for a control that files programs by number
     /// (`O1001`): each program of a setup posted one an operation takes the
     /// next.
@@ -163,6 +173,37 @@ pub enum Programs {
     Operation,
 }
 
+/// One part of a setup holding several, at its own work offset.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Placement {
+    /// Its work offset, as [`Setup::wcs`].
+    pub wcs: u8,
+    /// Where its part is from the part as the job has it, millimetres along
+    /// the setup's axes: its work zero is the setup's moved as far, so its
+    /// program is the same in its own coordinates.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub at: [f64; 3],
+    /// Where its work zero is in machine coordinates, as
+    /// [`Setup::work_offset`]; when not given, the first placement's moved
+    /// by `at`, if that one's is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_offset: Option<[f64; 3]>,
+}
+
+/// Which a setup of several placements cuts first.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PlacementOrder {
+    /// Each run of operations with one tool at every placement before the
+    /// next tool, as Fusion's "WCS order by tool": the fewest tool changes.
+    #[default]
+    ByTool,
+    /// Every operation at one placement before the next, as Fusion's "by
+    /// part".
+    ByPart,
+}
+
 /// The number a setup's program takes unless it is given one.
 pub const DEFAULT_NUMBER: u32 = 1001;
 
@@ -180,6 +221,8 @@ impl Setup {
             orientation: Orientation::default(),
             origin: Origin::default(),
             programs: Programs::default(),
+            placements: Vec::new(),
+            placement_order: PlacementOrder::default(),
             number: DEFAULT_NUMBER,
             z_correction: None,
             wrap: None,
@@ -193,13 +236,43 @@ impl Setup {
     /// document has it, along the setup's axes: the part alone, until a setup
     /// has several work offsets.
     pub fn placement_offsets(&self) -> Vec<glam::DVec3> {
-        vec![glam::DVec3::ZERO]
+        self.placed()
+            .iter()
+            .map(|p| glam::DVec3::from_array(p.at))
+            .collect()
+    }
+
+    /// Every part it cuts, each at its work offset: its placements, or the
+    /// one part at its own. Each knows where its work zero is on the machine
+    /// when it is given, or when the first's is: then that moved by how far
+    /// it is from the first.
+    pub fn placed(&self) -> Vec<Placement> {
+        let Some(first) = self.placements.first() else {
+            return vec![Placement {
+                wcs: self.wcs,
+                at: [0.0; 3],
+                work_offset: self.work_offset,
+            }];
+        };
+        self.placements
+            .iter()
+            .map(|p| Placement {
+                work_offset: p.work_offset.or_else(|| {
+                    first.work_offset.map(|w| {
+                        let [a, b, c] = w;
+                        let ([x, y, z], [u, v, t]) = (p.at, first.at);
+                        [a + x - u, b + y - v, c + z - t]
+                    })
+                }),
+                ..*p
+            })
+            .collect()
     }
 
     /// The work offset placement `k` is cut at, as a word: `G54`, or `G60`
     /// for an extended one, which only a post writes as its own.
-    pub fn placement_word(&self, _k: usize) -> String {
-        format!("G{}", self.wcs)
+    pub fn placement_word(&self, k: usize) -> String {
+        format!("G{}", self.placed().get(k).map_or(self.wcs, |p| p.wcs))
     }
 }
 

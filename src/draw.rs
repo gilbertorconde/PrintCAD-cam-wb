@@ -103,6 +103,21 @@ pub fn draw(cam: &Cam, frame: &mut Frame) {
             continue;
         };
         stock_box(frame, run, mine);
+        // Each other part: its stock and its work zero, where it is.
+        for p in run.placements.iter().skip(1) {
+            let moved = |c: [f64; 3]| std::array::from_fn(|i| c[i] + p.offset[i]);
+            box_lines(
+                frame,
+                &run.stock.map(moved),
+                if mine { STOCK } else { MUTED },
+                true,
+            );
+            frame.marks.push(Mark {
+                at: moved(run.origin).map(|v| v as f32),
+                color: ZERO,
+                kind: MarkKind::Cross { size: 8.0 },
+            });
+        }
         for f in &run.fixtures {
             let color = if f.met { FIXTURE_MET } else { FIXTURE };
             box_lines(frame, &f.corners, if mine { color } else { MUTED }, false);

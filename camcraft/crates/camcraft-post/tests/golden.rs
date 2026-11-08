@@ -654,6 +654,39 @@ fn a_setup_is_one_program() {
     }
 }
 
+/// The setup with two parts, one in each of two vises, G54 and G55, by
+/// tool: the roughing at both, then the finish and the engraving at each,
+/// the tool kept turning from one part to the next, sent clear and the
+/// offset changed between.
+#[test]
+fn a_setup_of_two_vises_posts_each_tool_at_both() {
+    let ops = setup();
+    let at = |k: usize, wcs: u8| {
+        let (path, spec) = &ops[k];
+        (
+            path,
+            ProgramSpec {
+                wcs,
+                ..spec.clone()
+            },
+        )
+    };
+    let placed = [
+        at(0, 54),
+        at(0, 55),
+        at(1, 54),
+        at(2, 54),
+        at(1, 55),
+        at(2, 55),
+    ];
+    let sections: Vec<Section> = placed
+        .iter()
+        .map(|(path, spec)| Section { path, spec })
+        .collect();
+    let p = Profile::builtin("linuxcnc").unwrap().unwrap();
+    check_setup_against(&p, &sections, "linuxcnc-setup-vises");
+}
+
 /// The setup as one program for a Fanuc, numbered as the setup is, the
 /// second tool called up after the first change, and for a Heidenhain in
 /// Klartext: one BEGIN and END PGM, the stock once, a TOOL CALL a change

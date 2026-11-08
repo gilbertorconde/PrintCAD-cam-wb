@@ -66,6 +66,27 @@ panels, the drawing and the helper that runs camcraft.
   stock's, which a work zero on the stock is placed on. The checks, the
   simulation, playback and the times start from it, and the setup sheet
   names the body.
+- **Several parts, each at its own work offset,** as on two vises or a
+  fixture plate's stations: a setup's Parts lists more, each at a work
+  offset of its own (`G55`, `G56`…) and as far from the first, the part as
+  the document has it at the setup's own offset, along the setup's axes;
+  Add a part takes the next offset the post has, as far on as the last two
+  are apart. The same operations are cut at each, and posted at each:
+  in one program by tool, each run of operations with one tool at every
+  part before the next tool, as Fusion's "WCS order by tool", or by part,
+  every operation at one part before the next; one program an operation
+  cuts it at each in turn. Between two parts the tool, still turning, is
+  sent clear as the profile's `safe_retract` takes it, the next offset is
+  selected, and it starts again from there; a profile with no
+  `safe_retract` cannot change offsets in one program. The program reads
+  back section by section, each on its offset. Each part is simulated as
+  the first, since each is cut the same in its own coordinates; what
+  differs is checked at each: the fixtures, against the toolpath where
+  that part is, and the travel, where its work offset is on the machine
+  (each known one's own, else the first's moved as far). Stocks so close
+  they overlap are a warning. The view draws each part's stock and work
+  zero; playback is the first part's; the machining time is every part's;
+  the setup sheet lists each part's offset.
 - **Tilted setups (3+2).** A setup's tool axis can be any direction: out of
   a flat face picked on the part, along a straight edge picked on it (either
   way), the document's Z tilted by angles about its X and then its Y, or a
@@ -636,6 +657,9 @@ local placed = cam.setup{bodies = {"<body id>"}, post = "linuxcnc", wcs = "G59.1
                         work_offset = {x = 250, y = -180, z = -95}}  -- in machine coordinates
 local cast = cam.setup{bodies = {"<body id>"}, stock = {solid = "<casting's body id>"}}
 local held = cam.setup{bodies = {"<body id>"}, fixtures = {"<jaw id>", "<clamp id>"}}
+local vises = cam.setup{bodies = {"<body id>"}, post = "linuxcnc",
+                        parts = {{wcs = "G55", x = 150}}, order = "tool"}
+                                        -- or parts = {count = 4, x = 120}: G54 to G57
 local tilted = cam.setup{bodies = {"<body id>"}, tilt = {x = 30, y = 0}}
 local rotary = cam.setup{bodies = {"<body id>"}, stock = "cylinder", axis = "x",
                          post = "my-4-axis", wrap = {diameter = 40}}  -- or wrap = true

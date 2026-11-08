@@ -111,6 +111,20 @@ pub fn run_setup_from(
         result.probe_map.as_ref(),
     );
     let mut warnings = result.warnings();
+    // Parts placed so close their stocks overlap cut each other's.
+    let placed = setup.placed();
+    let (lo, hi) = (result.stock_min, result.stock_max);
+    for (i, a) in placed.iter().enumerate() {
+        for b in placed.iter().skip(i + 1) {
+            let d = glam::DVec2::new(b.at[0] - a.at[0], b.at[1] - a.at[1]).abs();
+            if d.x < hi.x - lo.x && d.y < hi.y - lo.y {
+                warnings.push(format!(
+                    "the stocks at G{} and G{} overlap: each part's cuts would reach the other's",
+                    a.wcs, b.wcs
+                ));
+            }
+        }
+    }
     warnings.extend(model_warnings);
     Ok(Ran {
         result,

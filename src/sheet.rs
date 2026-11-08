@@ -239,6 +239,18 @@ impl Sheet<'_> {
             wcs.push_str(": set it where the work zero is");
         }
         rows.push(("Work offset", wcs));
+        // The run's parts past the first are the setup's, in order.
+        for (p, q) in self.run.placements.iter().skip(1).zip(&s.parts) {
+            let mut at = format!(
+                "{}: another part, its work zero {} from the first's along the setup's axes",
+                p.wcs,
+                xyz([q.x, q.y, q.z])
+            );
+            if let Some(w) = p.work_offset {
+                let _ = write!(at, ", at {} in machine coordinates", xyz(w));
+            }
+            rows.push(("Work offset", at));
+        }
         let layout = self.run.layout.as_ref();
         let tilt = layout.map(|l| l.tilt.as_slice()).unwrap_or_default();
         let axis = layout.map_or_else(|| s.up(), |l| l.tool_axis);

@@ -2241,3 +2241,57 @@ fn a_fixture_in_the_path_is_a_failed_check() {
     );
     assert!(!clear.fixtures[0].met);
 }
+
+/// Two vises, G54 and G55, 100 mm apart: the setup's program cuts the
+/// roughing at G54 and then at G55, the offset changed between, it
+/// machines twice as long, and the parts come back to be drawn, the second
+/// moved 100 mm along X.
+#[test]
+fn two_vises_are_posted_and_timed_as_two_parts() {
+    let request = |placements: &str| Request {
+        version: VERSION,
+        job: JOB
+            .replace("programs = \"operation\"", "post = \"linuxcnc\"")
+            .replace("post = \"grbl\"\n", "")
+            .replace(
+                "[[setup.operation]]",
+                &format!("{placements}[[setup.operation]]"),
+            ),
+        shapes: BTreeMap::from([(
+            "part".to_string(),
+            Shape {
+                text: native("hinge_jig.step"),
+                placement: IDENTITY,
+            },
+        )]),
+        max_points: 0,
+        ..Request::default()
+    };
+    let one = answer(&request("")).unwrap();
+    let two = answer(&request(
+        "[[setup.placement]]\nwcs = 54\n\n[[setup.placement]]\nwcs = 55\nat = [100.0, 0.0, 0.0]\n\n",
+    ))
+    .unwrap();
+    let text = &two.program.as_ref().expect("the setup's program").text;
+    let g54 = text.find("\nG54\n").expect(text);
+    let g55 = text.find("\nG55\n").expect(text);
+    assert!(g54 < g55);
+    assert_eq!(text.matches(" M6").count(), 1, "one tool, changed once");
+    assert!(
+        (two.machining.moves - 2.0 * one.machining.moves).abs() < 1e-6 * one.machining.moves,
+        "{} {}",
+        two.machining.moves,
+        one.machining.moves
+    );
+    assert_eq!(two.placements.len(), 2);
+    assert_eq!(two.placements[1].wcs, "G55");
+    assert!((two.placements[1].offset[0] - 100.0).abs() < 1e-9);
+    assert!(
+        two.passed,
+        "{:?}",
+        two.findings
+            .iter()
+            .filter(|f| f.level == Level::Fail)
+            .collect::<Vec<_>>()
+    );
+}

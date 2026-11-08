@@ -725,6 +725,26 @@ tool would meet a fixture, as `use_holder` does the part (`leave_out`, which
 both now share). In `camcraft-session`, the checks add `CC113` (a fixture
 met: fails) and `CC219` (cuts left out to avoid one).
 
+And several parts in one setup, each at its own work offset. In
+`camcraft-core`, a `Setup` has `placements` (`Placement`: a `wcs`, `at`,
+how far its part is from the job's along the setup's axes, and its
+`work_offset` in machine coordinates, else the first's moved by `at`;
+`Setup::placed` gives them, or the one part at `wcs`; two on one offset are
+`JobError::SameWorkOffset`) and `placement_order` (`PlacementOrder`:
+`by-tool` or `by-part`). Each part is cut the same in its own coordinates,
+so the run is the first's; the fixtures are checked at each placement's
+`at`. In `camcraft-post`, `lower_setup` writes the work offset again where
+two sections' differ, the tool kept turning: sent clear by the profile's
+`safe_retract` (`Op::SafeRetract`) first, the next section starting from a
+place not known; a profile without one is refused
+(`LowerError::OffsetsWithoutRetract`). `readback::check_setup` reads it as
+it is. In `camcraft-session`, `setup_specs` gives each operation at every
+placement in the order asked (by tool, each run of operations with one tool
+at every placement), `placed_specs` and `placed_program` post one operation
+at each, `travel_check` checks each placement where its offset is, saying
+which, and a run warns of placements whose stocks overlap. A golden program
+of two vises by tool (`linuxcnc-setup-vises.nc`).
+
 And one test: ogeom is 0.11.1 here, which printCAD's shapes need, and it
 meshes `round_edge_loose_fit.step`'s seam that 0.11.0 drew off the torus, so
 `a_loose_fit_is_refused_for_ogeoms_seam` became

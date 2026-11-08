@@ -2749,8 +2749,19 @@ fn a_solid_stock_is_alone_and_not_the_part() {
 /// The plate with a hole faced, held by a clamp: a block standing on the
 /// sheet at `at`, 10 mm square and 4 mm tall, under the clearance height, its foot on the sheet's top.
 fn clamped(strategy: StrategySpec, at: DVec2, avoid: bool) -> SetupResult {
+    clamped_with(strategy, at, avoid, Vec::new())
+}
+
+/// [`clamped`], the part at each of `placements`.
+fn clamped_with(
+    strategy: StrategySpec,
+    at: DVec2,
+    avoid: bool,
+    placements: Vec<crate::job::Placement>,
+) -> SetupResult {
     use crate::job::ModelDef;
     let mut job = sheet_job(strategy);
+    job.setups[0].placements = placements;
     job.models.push(ModelDef {
         name: "clamp".into(),
         path: "clamp.stl".into(),
@@ -2820,4 +2831,31 @@ fn a_finish_avoids_the_fixtures_when_asked() {
     let op = &kept_off.operations[0];
     assert!(op.fixture_trimmed > 0);
     assert!(op.fixtures.is_empty(), "{:?}", op.fixtures);
+}
+
+/// Two parts 60 mm apart along X, G54 and G55, and a clamp beside the first
+/// where the second part is: the tool meets it at G55 alone.
+#[test]
+fn a_fixture_is_checked_at_each_placement() {
+    use crate::job::Placement;
+    let place = |wcs, x| Placement {
+        wcs,
+        at: [x, 0.0, 0.0],
+        work_offset: None,
+    };
+    let finish = || StrategySpec::named("parallel").unwrap();
+    let alone = clamped(finish(), dvec2(60.0, 0.0), false);
+    assert!(alone.operations[0].fixtures.is_empty());
+    let both = clamped_with(
+        finish(),
+        dvec2(60.0, 0.0),
+        false,
+        vec![place(54, 0.0), place(55, 60.0)],
+    );
+    let hits = &both.operations[0].fixtures;
+    assert!(
+        !hits.is_empty() && hits.iter().all(|h| h.placement == 1),
+        "{hits:?}"
+    );
+    assert!(!both.operations[0].is_clean());
 }

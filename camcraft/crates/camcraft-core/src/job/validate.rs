@@ -186,6 +186,26 @@ impl Job {
         {
             return Err(JobError::BadWorkOffsetPosition(name.clone()));
         }
+        let mut offsets = BTreeSet::new();
+        for p in &setup.placements {
+            if !(54..=LAST_WCS).contains(&p.wcs) {
+                return Err(JobError::BadWorkOffset {
+                    setup: name.clone(),
+                    wcs: p.wcs,
+                });
+            }
+            let finite = |v: &[f64; 3]| v.iter().all(|c| c.is_finite());
+            if !finite(&p.at) || p.work_offset.is_some_and(|w| !finite(&w)) {
+                return Err(JobError::BadWorkOffsetPosition(name.clone()));
+            }
+            // Two parts on one offset would be cut in the same place.
+            if !offsets.insert(p.wcs) {
+                return Err(JobError::SameWorkOffset {
+                    setup: name.clone(),
+                    wcs: p.wcs,
+                });
+            }
+        }
         if let Some(z) = &setup.z_correction {
             let bad_map = |why: String| JobError::BadProbeMap {
                 setup: name.clone(),

@@ -703,3 +703,100 @@ fn custom_gcode_is_posted_beside_its_neighbours_and_travel_is_kept() {
     );
     let _ = std::fs::remove_dir_all(&out);
 }
+
+/// Two vises, G54 and G55, 100 mm apart along X: by tool the roughing is
+/// posted at both, then the finish at both, with the offset changed
+/// between; by part, every operation at G54 and then at G55. Each reads
+/// back to its paths, section by section, and one program an operation
+/// cuts its operation at both. The travel is checked at each, G55's work
+/// zero the first's moved 100 mm.
+#[test]
+fn a_setup_of_two_vises_posts_each_part_in_its_offset() {
+    use camcraft_core::job::{Placement, PlacementOrder};
+    let (mut job, _, ran) = example();
+    let setup = &mut job.setups[0];
+    setup.placements = vec![
+        Placement {
+            wcs: 54,
+            at: [0.0; 3],
+            work_offset: Some([10.0, -300.0, -100.0]),
+        },
+        Placement {
+            wcs: 55,
+            at: [100.0, 0.0, 0.0],
+            work_offset: None,
+        },
+    ];
+    let profile = load_profile("linuxcnc", None).unwrap();
+    let title = Title {
+        name: "top",
+        number: 1,
+        date: None,
+    };
+    let order = |setup: &Setup, changes: usize| {
+        let p = setup_program(setup, &ran.result, &profile, &title).unwrap();
+        let specs = setup_specs(setup, &ran.result, &profile).unwrap();
+        let sections: Vec<Section> = specs
+            .iter()
+            .map(|(k, spec)| Section {
+                path: &ran.result.operations[*k].path,
+                spec,
+            })
+            .collect();
+        camcraft_post::readback::check_setup(&p.text, &sections, &profile)
+            .unwrap_or_else(|e| panic!("{e:?}\n{}", p.text));
+        assert_eq!(p.tool_changes, changes, "{}", p.text);
+        let heads: Vec<String> = p
+            .text
+            .lines()
+            .filter(|l| l.starts_with("(rough - ") || l.starts_with("(finish - "))
+            .map(|l| {
+                let name = l.trim_start_matches('(').split(' ').next().unwrap();
+                format!(
+                    "{name} {}",
+                    l.trim_end_matches(')').rsplit(' ').next().unwrap()
+                )
+            })
+            .collect();
+        heads
+    };
+    assert_eq!(
+        order(setup, 2),
+        ["rough G54", "rough G55", "finish G54", "finish G55"]
+    );
+    setup.placement_order = PlacementOrder::ByPart;
+    assert_eq!(
+        order(setup, 4),
+        ["rough G54", "finish G54", "rough G55", "finish G55"]
+    );
+    // One program an operation: each at both.
+    let spec = program_spec(&ran.result.operations[0], 54, &ran.result.frame, &profile).unwrap();
+    let (ops, made) = placed_program(
+        &ran.result.operations[0].path,
+        &placed_specs(&spec, setup),
+        &profile,
+    )
+    .unwrap();
+    assert_eq!(ops.len(), made.len());
+    let (text, _) = render_program(&ops, &profile, &title);
+    assert!(
+        text.contains("\nG54\n") && text.contains("\nG55\n"),
+        "{text}"
+    );
+    // G55 is placed 100 mm along X from G54 on the machine, and checked
+    // there: past LinuxCNC's travel on X at G55 alone.
+    let placed = setup.placed();
+    assert_eq!(placed[1].work_offset, Some([110.0, -300.0, -100.0]));
+    let mut short = profile.clone();
+    short.travel = Some(camcraft_post::profile::Travel {
+        coordinates: camcraft_post::profile::Coordinates::Machine,
+        x: Some([-50.0, 120.0]),
+        y: None,
+        z: None,
+    });
+    let past = travel_check(&ran.result.operations[0], setup, &ran.result.frame, &short).past;
+    assert!(
+        past.len() == 1 && past[0].starts_with("at G55: X goes"),
+        "{past:?}"
+    );
+}
