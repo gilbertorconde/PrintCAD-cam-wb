@@ -436,6 +436,15 @@ pub enum LowerError {
     /// one turning as it cuts.
     #[error("{0} programs are not written turning a rotary as they cut")]
     WrapNotWritten(String),
+    /// A setup tilted for 3+2, for a Sinumerik with rotaries: its swivel
+    /// cycle is not written.
+    #[error(
+        "{0} does not stand a tilted setup up with its rotaries here: CYCLE800, which \
+         swivels the plane on a Sinumerik, is not written, as which way it leaves the \
+         plane's X and Y is not confirmed. Fixture the part tilted by hand (a profile \
+         without [rotary]), or post the setup for another machine"
+    )]
+    TiltNotWritten(String),
     /// Two operations of one program on different work offsets, for a
     /// machine whose profile has no way to send the tool clear between them:
     /// in the next offset's coordinates the tool is somewhere not known.

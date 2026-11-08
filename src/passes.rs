@@ -1416,7 +1416,8 @@ fn drill_rows(
             text: format!(
                 "Fed in at the pitch a turn, {feed}, and back out with the spindle \
                  reversed. Only a machine that taps can write it: LinuxCNC, Fanuc, \
-                 Haas, Centroid CNC12 and Heidenhain do; Masso, GRBL and Mach cannot."
+                 Haas, Centroid CNC12, Heidenhain and Sinumerik do; Masso, GRBL and Mach \
+                 cannot."
             ),
             mono: false,
         });

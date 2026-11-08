@@ -105,6 +105,10 @@ pub enum Dialect {
     /// Heidenhain's conversational Klartext (`.h`): `L X+10 R0 F500`, arcs
     /// by `CC` and `C`, drilling by `CYCL DEF` ([`crate::heidenhain`]).
     Heidenhain,
+    /// Siemens Sinumerik's G-code (840D sl, 828D): ISO's moves and arcs,
+    /// `;` comments, `D1` for the tool's offsets, `G54` to `G57` then
+    /// `G505` on, and drilling by `MCALL CYCLE81(..)` ([`crate::sinumerik`]).
+    Sinumerik,
 }
 
 /// How a tap is written: what the controller taps with, if anything. A tap
@@ -129,6 +133,13 @@ pub enum TapStyle {
     /// time, the tool put over it at its R plane first.
     #[serde(rename = "g33.1")]
     G331,
+    /// Tapping with a compensating (floating) holder, as Sinumerik's
+    /// `CYCLE840` taps without the spindle under position control: down at
+    /// the pitch times the spindle's speed, the spindle reversed at the
+    /// bottom, and back up the same way; a run of cycles as `"cycle"` is.
+    /// Only in the Sinumerik dialect.
+    #[serde(rename = "cycle840")]
+    Floating,
     /// The controller cannot tap: a tapping operation is a failed check.
     #[serde(rename = "none")]
     Cannot,
@@ -406,6 +417,12 @@ pub struct Profile {
     /// nothing is written.
     #[serde(default)]
     pub preselect_tool: bool,
+    /// Whether a tool is called by its name, `T="3"`, as a Sinumerik with
+    /// tool management calls one, rather than by its number, `T3`: each tool
+    /// is named in the control's tool list by its number in the document.
+    /// Only in the Sinumerik dialect.
+    #[serde(default)]
+    pub tool_management: bool,
     /// Whether a pause's `P` word is in milliseconds, a whole number, as
     /// Fanuc reads it in `G4` and `G82`; otherwise in seconds.
     #[serde(default)]
@@ -525,6 +542,11 @@ const BUILTIN: &[(&str, &str)] = &[
     (
         "heidenhain-inch",
         include_str!("../profiles/heidenhain-inch.toml"),
+    ),
+    ("sinumerik", include_str!("../profiles/sinumerik.toml")),
+    (
+        "sinumerik-inch",
+        include_str!("../profiles/sinumerik-inch.toml"),
     ),
 ];
 
@@ -725,6 +747,22 @@ impl Profile {
                 });
             }
         }
+        if self.dialect == Dialect::Sinumerik {
+            self.validate_sinumerik()?;
+        } else {
+            if self.tool_management {
+                return Err(ProfileError::BadValue {
+                    field: "tool_management",
+                    reason: "only a Sinumerik calls its tools by name: leave it out".into(),
+                });
+            }
+            if self.tap == Some(TapStyle::Floating) {
+                return Err(ProfileError::BadValue {
+                    field: "tap",
+                    reason: "cycle840 is Sinumerik's tapping cycle: tap = \"g84\" here".into(),
+                });
+            }
+        }
         for (field, lines) in self.blocks() {
             for (i, line) in lines.iter().enumerate() {
                 if let Some(why) = placeholder::problem(line) {
@@ -755,6 +793,64 @@ impl Profile {
             ("end_home", &self.end_home),
             ("footer", &self.footer),
         ]
+    }
+
+    /// What a Sinumerik profile must be for its programs to be read as a
+    /// Sinumerik reads them, and checked.
+    fn validate_sinumerik(&self) -> Result<(), ProfileError> {
+        let bad = |field: &'static str, reason: &str| {
+            Err(ProfileError::BadValue {
+                field,
+                reason: reason.into(),
+            })
+        };
+        if self.comment != (";".to_string(), String::new()) {
+            return bad(
+                "comment",
+                "a Sinumerik comment runs from \";\" to the line's end: comment = [\";\", \"\"]",
+            );
+        }
+        if self.arc_style != ArcStyle::Ij {
+            return bad(
+                "arc_style",
+                "a Sinumerik's radius word is CR=, not R (an R is a parameter): \
+                 arcs by their centre, arc_style = \"ij\"",
+            );
+        }
+        if self.length_offset {
+            return bad(
+                "length_offset",
+                "a Sinumerik takes up the tool's length with D1, written after each \
+                 change, not G43 H: length_offset = false",
+            );
+        }
+        if matches!(self.tapping(), TapStyle::M29 | TapStyle::G331) {
+            return bad(
+                "tap",
+                "a Sinumerik taps with its cycles, CYCLE84 rigidly or CYCLE840 with a \
+                 floating holder: tap = \"cycle\", \"cycle840\" or \"none\"",
+            );
+        }
+        if self.probe != ProbeStyle::Cannot {
+            return bad(
+                "probe",
+                "a Sinumerik probes with its measuring cycles (CYCLE978, CYCLE977), which \
+                 store what they find in the tool and work offset tables, not as points \
+                 the program logs: probe = \"none\"",
+            );
+        }
+        if self.extended_offsets.iter().any(|w| {
+            let w = w.trim().to_ascii_uppercase();
+            let n: u32 = w.get(1..).and_then(|n| n.parse().ok()).unwrap_or(0);
+            !(w == "G58" || w == "G59" || (505..=599).contains(&n))
+        }) {
+            return bad(
+                "extended_offsets",
+                "a Sinumerik's work offsets after G57 are G505 to G599 (G58 and G59 on an \
+                 828D that has them as settable offsets)",
+            );
+        }
+        Ok(())
     }
 
     /// How this machine taps: as its `tap` says, else with the other cycles
@@ -805,14 +901,18 @@ impl Profile {
         for (field, lines) in self.blocks() {
             for (i, line) in lines.iter().enumerate() {
                 let words = crate::custom::words(line);
-                // G53, or in Klartext M91: a move in machine coordinates.
+                // G53, or in Klartext M91, or a Sinumerik's SUPA or G153: a
+                // move in machine coordinates.
                 let (letter, code) = match self.dialect {
-                    Dialect::Iso => ('G', 53.0),
+                    Dialect::Iso | Dialect::Sinumerik => ('G', 53.0),
                     Dialect::Heidenhain => ('M', 91.0),
                 };
-                let g53 = words
-                    .iter()
-                    .any(|(c, v, _)| *c == letter && *v == Some(code));
+                let g53 = words.iter().any(|(c, v, _)| {
+                    *c == letter
+                        && (*v == Some(code)
+                            || self.dialect == Dialect::Sinumerik && *v == Some(153.0))
+                }) || self.dialect == Dialect::Sinumerik
+                    && crate::sinumerik::names(line).iter().any(|n| n == "SUPA");
                 if !g53 {
                     continue;
                 }
@@ -835,14 +935,29 @@ impl Profile {
 
     /// The word that selects work offset `wcs` (54 for `G54`), if this
     /// machine has it: `G54` to `G59`, then its `extended_offsets`.
+    ///
+    /// On a Sinumerik `G58` and `G59` are programmable offsets, which add to
+    /// the one selected, so its offsets after `G57` are its extended ones:
+    /// 58 is the first of those, `G505`.
     pub fn wcs_word(&self, wcs: u8) -> Option<String> {
-        match wcs {
-            54..=59 => Some(format!("G{wcs}")),
-            _ => self
-                .extended_offsets
-                .get(usize::from(wcs.checked_sub(60)?))
-                .cloned(),
+        let last = if self.dialect == Dialect::Sinumerik {
+            57
+        } else {
+            59
+        };
+        if (54..=last).contains(&wcs) {
+            return Some(format!("G{wcs}"));
         }
+        self.extended_offsets
+            .get(usize::from(wcs.checked_sub(last + 1)?))
+            .cloned()
+    }
+
+    /// How many work offsets past `G59` a program may select, by number: a
+    /// [`crate::op::ProgramSpec`]'s `extended_offsets`.
+    pub fn offsets_past_g59(&self) -> u8 {
+        let count = self.work_offsets().len().saturating_sub(6);
+        u8::try_from(count).unwrap_or(u8::MAX)
     }
 
     /// Every work offset this machine has, by its number and its word.
@@ -1148,6 +1263,7 @@ mod tests {
             ("haas", "Haas (NGC, inch)", 2),
             ("mach", "Mach3 / Mach4 (inch)", 1),
             ("heidenhain", "Heidenhain TNC (Klartext, inch)", 1),
+            ("sinumerik", "Siemens Sinumerik 840D sl / 828D (inch)", 1),
         ] {
             let p = Profile::builtin(mm).unwrap().unwrap();
             let inch = Profile::builtin(&format!("{mm}-inch")).unwrap().unwrap();
@@ -1188,6 +1304,98 @@ mod tests {
         }
     }
 
+    /// A Sinumerik profile comments with `;`, writes arcs by their centre,
+    /// takes up the tool's length with `D1` rather than `G43`, taps with
+    /// its cycles and does not probe; and only a Sinumerik calls tools by
+    /// name or taps with `CYCLE840`.
+    #[test]
+    fn a_sinumerik_profile_is_kept_to_what_a_sinumerik_reads() {
+        let text = include_str!("../profiles/sinumerik.toml");
+        assert!(Profile::from_toml(text).is_ok());
+        for (from, to, field) in [
+            (
+                "comment   = [\";\", \"\"]",
+                "comment   = [\"(\", \")\"]",
+                "comment",
+            ),
+            (
+                "arc_style      = \"ij\"",
+                "arc_style      = \"r\"",
+                "arc_style",
+            ),
+            (
+                "preselect_tool = true",
+                "length_offset = true",
+                "length_offset",
+            ),
+            ("tap = \"cycle\"", "tap = \"m29\"", "tap"),
+            ("tap = \"cycle\"", "tap = \"g33.1\"", "tap"),
+            ("tap = \"cycle\"", "probe = \"g38.2\"", "probe"),
+            ("\"G505\", ", "\"G59.1\", ", "extended_offsets"),
+        ] {
+            assert!(text.contains(from), "{from}");
+            let e = Profile::from_toml(&text.replace(from, to)).unwrap_err();
+            assert!(
+                matches!(e, ProfileError::BadValue { field: f, .. } if f == field),
+                "{to}: {e}"
+            );
+        }
+        for ok in [
+            "tap = \"cycle840\"",
+            "tool_management = true\ntap = \"none\"",
+        ] {
+            let p = Profile::from_toml(&text.replace("tap = \"cycle\"", ok)).unwrap();
+            assert!(
+                p.tool_management || p.tapping() == TapStyle::Floating,
+                "{ok}"
+            );
+        }
+        let fanuc = include_str!("../profiles/fanuc.toml");
+        for bad in [
+            "tool_management = true\ntap = \"m29\"",
+            "tap = \"cycle840\"",
+        ] {
+            let e = Profile::from_toml(&fanuc.replace("tap = \"m29\"", bad)).unwrap_err();
+            assert!(matches!(e, ProfileError::BadValue { .. }), "{bad}: {e}");
+        }
+    }
+
+    /// A Sinumerik's work offsets are G54 to G57, then its extended ones:
+    /// G58 and G59 are programmable offsets, so 58 is G505; on an 828D
+    /// whose G58 and G59 are settable, they are its extended ones.
+    #[test]
+    fn a_sinumeriks_offsets_skip_its_programmable_ones() {
+        let p = Profile::builtin("sinumerik").unwrap().unwrap();
+        let offsets = p.work_offsets();
+        assert_eq!(offsets.len(), 4 + 95);
+        assert_eq!(p.wcs_word(57).as_deref(), Some("G57"));
+        assert_eq!(p.wcs_word(58).as_deref(), Some("G505"));
+        assert_eq!(p.wcs_word(152).as_deref(), Some("G599"));
+        assert_eq!(p.wcs_word(153), None);
+        assert_eq!(p.offsets_past_g59(), 93);
+        let text = include_str!("../profiles/sinumerik.toml");
+        let start = text.find("\nextended_offsets = [").unwrap() + 1;
+        let end = start + text[start..].find(']').unwrap() + 1;
+        let mut t = text.to_string();
+        t.replace_range(start..end, "extended_offsets = [\"G58\", \"G59\"]");
+        let p = Profile::from_toml(&t).unwrap();
+        assert_eq!(
+            p.work_offsets().last(),
+            Some(&(59, "G59".to_string())),
+            "{:?}",
+            p.work_offsets()
+        );
+        // A SUPA move is a move in machine coordinates, kept in the travel.
+        let travel = "\n[travel]\ncoordinates = \"machine\"\nz = [-300, 0]\n";
+        assert!(Profile::from_toml(&format!("{text}{travel}")).is_ok());
+        let high = text.replace("G0 SUPA Z0 D0", "G0 SUPA Z50 D0");
+        let e = Profile::from_toml(&format!("{high}{travel}")).unwrap_err();
+        assert!(
+            e.to_string().contains("outside the machine's travel"),
+            "{e}"
+        );
+    }
+
     /// In Klartext a move in machine coordinates is `M91`'s: one of the
     /// profile's own outside a machine travel makes it invalid, as G53's does.
     #[test]
@@ -1225,6 +1433,8 @@ mod tests {
             ("heidenhain-inch", TapStyle::Cycle),
             ("mach", TapStyle::Cannot),
             ("mach-inch", TapStyle::Cannot),
+            ("sinumerik", TapStyle::Cycle),
+            ("sinumerik-inch", TapStyle::Cycle),
         ] {
             let p = Profile::builtin(name).unwrap().unwrap();
             assert_eq!(p.tapping(), want, "{name}");
@@ -1236,7 +1446,8 @@ mod tests {
                 "LinuxCNC",
                 "Fanuc",
                 "Haas (NGC)",
-                "Heidenhain TNC (Klartext)"
+                "Heidenhain TNC (Klartext)",
+                "Siemens Sinumerik 840D sl / 828D"
             ]
         );
         // Klartext has no G33.1 nor M29.

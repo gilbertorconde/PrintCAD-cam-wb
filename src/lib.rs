@@ -1435,7 +1435,8 @@ impl Bench for Cam {
                             false,
                             "grbl, masso, masso-inch, centroid-avid, centroid-avid-inch, \
                              linuxcnc, linuxcnc-inch, fanuc, fanuc-inch, haas, haas-inch, \
-                             mach, mach-inch, heidenhain or heidenhain-inch",
+                             mach, mach-inch, heidenhain, heidenhain-inch, sinumerik or \
+                             sinumerik-inch",
                         ),
                         param(
                             "wcs",
@@ -1742,9 +1743,9 @@ impl Bench for Cam {
                          and hand (hand = left for a \
                          left-hand thread), fed at the pitch times the spindle's speed: posted \
                          only for a machine that taps: LinuxCNC (G33.1), Fanuc (M29, G84, G74), \
-                         Haas and Centroid CNC12 (G84, G74), Heidenhain (cycle 207), or a post \
-                         of your own with tap = \"g84\", \"m29\" or \"g33.1\"; on Masso, GRBL \
-                         and Mach it is a failed check."
+                         Haas and Centroid CNC12 (G84, G74), Heidenhain (cycle 207), Sinumerik \
+                         (CYCLE84), or a post of your own with tap = \"g84\", \"m29\" or \
+                         \"g33.1\"; on Masso, GRBL and Mach it is a failed check."
                             .into(),
                         "Holes (drill, bore, circular, thread) are picked by a rim (edges) or a \
                          wall (faces); holes.same_diameter takes every hole of the setup's \

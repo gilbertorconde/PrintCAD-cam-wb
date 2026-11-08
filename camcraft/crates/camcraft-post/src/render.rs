@@ -87,6 +87,9 @@ pub fn render_program(ops: &[Op], profile: &Profile, title: &Title) -> (String, 
         w.values = v.clone();
     }
     let p = w.p;
+    if w.siemens {
+        w.program_header(title.name);
+    }
     for line in &p.header {
         w.filled(line);
     }
@@ -199,6 +202,15 @@ struct Writer<'a> {
     angle: Option<String>,
     // Whether feeds are in inverse time (`G93`).
     inverse: bool,
+    // Whether it writes a Sinumerik's G-code ([`crate::sinumerik`]).
+    siemens: bool,
+    // On a Sinumerik, whether the tool's offsets are taken up (`D1`).
+    edge: bool,
+    // On a Sinumerik, the cycle called after each move (`MCALL`), as
+    // written.
+    mcall: Option<String>,
+    // The height a run of holes starts from and returns to between them.
+    clearance: Option<f64>,
 }
 
 impl<'a> Writer<'a> {
@@ -218,6 +230,10 @@ impl<'a> Writer<'a> {
             values: Values::default(),
             angle: None,
             inverse: false,
+            siemens: p.dialect == Dialect::Sinumerik,
+            edge: false,
+            mcall: None,
+            clearance: None,
         }
     }
 
@@ -267,6 +283,9 @@ impl<'a> Writer<'a> {
         if !lines.is_empty() {
             self.lost();
         }
+        if self.siemens && lets_offsets_go(lines) {
+            self.edge = false;
+        }
     }
 
     fn raw(&mut self, text: &str) {
@@ -301,9 +320,12 @@ impl<'a> Writer<'a> {
             }
             Op::SectionEnd => {}
             Op::Units(u) => {
-                self.raw(match u {
-                    ProgramUnits::Mm => "G21",
-                    ProgramUnits::Inch => "G20",
+                // A Sinumerik's G710 and G700 set the feeds' units too.
+                self.raw(match (u, self.siemens) {
+                    (ProgramUnits::Mm, false) => "G21",
+                    (ProgramUnits::Inch, false) => "G20",
+                    (ProgramUnits::Mm, true) => "G710",
+                    (ProgramUnits::Inch, true) => "G700",
                 });
                 self.inches = *u == ProgramUnits::Inch;
                 // Changing units invalidates every remembered coordinate.
@@ -320,8 +342,10 @@ impl<'a> Writer<'a> {
             // G-code has no word for the stock.
             Op::Stock { .. } => {}
             Op::PreSelect(tool) => {
-                if self.p.preselect_tool {
-                    let s = format!("T{tool}");
+                // A Sinumerik with no changer puts a tool in by its T alone.
+                let puts_in = self.siemens && self.p.tool_change == ToolChangeStyle::Pause;
+                if self.p.preselect_tool && !puts_in {
+                    let s = self.tool_word(*tool);
                     self.raw(&s);
                 }
             }
@@ -340,7 +364,7 @@ impl<'a> Writer<'a> {
                 self.lost();
             }
             Op::ToolChange { tool, comment } => {
-                if self.p.length_offset {
+                if self.p.length_offset && !self.siemens {
                     self.offset = Some(*tool);
                 }
                 self.tool_change(*tool, comment);
@@ -392,7 +416,20 @@ impl<'a> Writer<'a> {
                 feed,
             } => {
                 self.level_plane();
-                self.cycle(*kind, *at, *depth, *retract, *peck, *dwell, *feed);
+                if self.siemens {
+                    let hole = sinumerik::Hole {
+                        kind: *kind,
+                        at: *at,
+                        depth: *depth,
+                        retract: *retract,
+                        peck: *peck,
+                        dwell: *dwell,
+                        feed: *feed,
+                    };
+                    self.siemens_cycle(&hole);
+                } else {
+                    self.cycle(*kind, *at, *depth, *retract, *peck, *dwell, *feed);
+                }
             }
             Op::RigidTap { depth, pitch } => {
                 self.level_plane();
@@ -413,12 +450,17 @@ impl<'a> Writer<'a> {
                 let s = format!("M29 S{rpm}");
                 self.raw(&s);
             }
+            Op::CycleStart if self.siemens => {
+                // Each cycle returns to where the run starts, its RTP.
+                self.clearance = self.at.map(|a| a.z);
+            }
             Op::CycleStart => {
                 self.raw("G98");
                 // The cycles move the machine: nothing is suppressed against
                 // where it was.
                 self.lost();
             }
+            Op::CycleEnd if self.siemens => self.siemens_cycle_end(),
             Op::CycleEnd => self.raw("G80"),
             Op::Probe { to, feed } => {
                 let f = self.p.feed_in(*feed, self.inches);
@@ -481,6 +523,16 @@ impl<'a> Writer<'a> {
     /// Change to `tool`, by changer or by hand, as the profile says: its own
     /// lines, where it gives them, or its style's.
     fn tool_change(&mut self, tool: u32, comment: &str) {
+        self.change_tool(tool, comment);
+        // A Sinumerik takes up the new tool's length and radius from its
+        // first edge, where it does not by itself.
+        if self.siemens {
+            self.raw("D1");
+            self.edge = true;
+        }
+    }
+
+    fn change_tool(&mut self, tool: u32, comment: &str) {
         if !self.p.tool_change_lines.is_empty() {
             let p = self.p;
             for line in &p.tool_change_lines {
@@ -495,7 +547,7 @@ impl<'a> Writer<'a> {
                 if !comment.is_empty() {
                     self.comment(comment);
                 }
-                let s = format!("T{tool} M6");
+                let s = format!("{} M6", self.tool_word(tool));
                 self.raw(&s);
                 // A changer moves the machine; the tool is where the change
                 // left it. Raised by a safe retract, it is still raised.
@@ -508,7 +560,7 @@ impl<'a> Writer<'a> {
                     format!("fit tool {tool}: {comment}")
                 };
                 self.comment(&msg);
-                let s = format!("T{tool}");
+                let s = self.tool_word(tool);
                 self.raw(&s);
                 self.raw("M0");
                 // The operator may have jogged anywhere, down included.
@@ -524,6 +576,7 @@ impl<'a> Writer<'a> {
     /// it can be, and otherwise down (or up) to its height first, which is
     /// clear of everything since it is the height the path crosses at.
     fn motion_block(&mut self, g: &'static str, to: DVec3, feed: Option<String>) {
+        self.offsets();
         if g == "G0" && self.at.is_none() {
             let (x, y, z) = (
                 self.p.length(to.x, self.inches),
@@ -633,6 +686,7 @@ impl<'a> Writer<'a> {
     /// raised, else down (or up) first. In inverse time every feed move
     /// says its `F`.
     fn turn_block(&mut self, g: &'static str, to: DVec3, angle: &RotaryAt, feed: Option<f64>) {
+        self.offsets();
         let (x, y, z) = (
             self.p.length(to.x, self.inches),
             self.p.length(to.y, self.inches),
@@ -747,7 +801,7 @@ impl<'a> Writer<'a> {
             self.motion_block("G1", to, Some(f));
             return;
         };
-        let most = match self.p.arc_style {
+        let most = match self.arc_style() {
             ArcStyle::Ij => PI,
             ArcStyle::R => FRAC_PI_2,
         };
@@ -780,6 +834,7 @@ impl<'a> Writer<'a> {
 
     /// One block of an arc no more than a half turn long.
     fn arc_block(&mut self, from: DVec3, to: DVec3, arc: &Arc, feed: f64) {
+        self.offsets();
         // Which plane, its two axes, the axis along its normal, and whether the
         // arc turns counter-clockwise seen from that axis's positive end.
         let a = arc.axis;
@@ -823,7 +878,7 @@ impl<'a> Writer<'a> {
         if self.p.length(to[i], self.inches) != self.p.length(from[i], self.inches) {
             let _ = write!(block, " {axis}{}", self.p.length(to[i], self.inches));
         }
-        match self.p.arc_style {
+        match self.arc_style() {
             ArcStyle::Ij => {
                 for (_, word, i) in axes {
                     let _ = write!(
@@ -899,6 +954,17 @@ impl<'a> Writer<'a> {
         self.lost();
     }
 }
+
+/// Whether `lines` let the tool's offsets go, a Sinumerik's `D0`.
+fn lets_offsets_go(lines: &[String]) -> bool {
+    lines.iter().any(|l| {
+        crate::custom::words(l)
+            .iter()
+            .any(|(c, v, _)| *c == 'D' && *v == Some(0.0))
+    })
+}
+
+mod sinumerik;
 
 #[cfg(test)]
 #[allow(

@@ -157,13 +157,16 @@ pub fn program_spec(
     .into_iter()
     .filter(|at| wrap.is_none_or(|w| w.axis != at.axis))
     .collect();
+    if profile.dialect == Dialect::Sinumerik && z != glam::DVec3::Z && !rotary.is_empty() {
+        return Err(LowerError::TiltNotWritten(profile.name.clone()));
+    }
     Ok(ProgramSpec {
         op_name: op.name.clone(),
         strategy: op.strategy.to_string(),
         tool: op.tool_number,
         tool_comment: op.tool_comment.clone(),
         wcs,
-        extended_offsets: u8::try_from(profile.extended_offsets.len()).unwrap_or(u8::MAX),
+        extended_offsets: profile.offsets_past_g59(),
         rpm: op.rpm,
         spin: op.spindle,
         // Nothing is cut to cool where it probes.

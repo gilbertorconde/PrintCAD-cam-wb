@@ -240,8 +240,10 @@ panels, the drawing and the helper that runs camcraft.
   each over the serial line as `[PRB:x,y,z:1]`, in machine coordinates,
   so keep the sender's probe log and save it in work coordinates (take
   the work offset off, or use a sender's autolevel export). Masso,
-  Centroid, Mach, Fanuc, Haas and Heidenhain are refused with a failed
-  check: how they record what they probe is not known here. A profile of
+  Centroid, Mach, Fanuc, Haas, Heidenhain and Sinumerik are refused with a
+  failed check: how they record what they probe is not known here (a
+  Sinumerik's measuring cycles, CYCLE978 and CYCLE977, keep what they find
+  in its tool and work offset tables, not as points). A profile of
   your own probes with `probe = "g38.2"` or `"g38.2-probeopen"`. A
   setup's Probed surface group then corrects Z from the results: Load
   probe results… reads a LinuxCNC log (x y z and the other axes a line)
@@ -519,7 +521,8 @@ panels, the drawing and the helper that runs camcraft.
   Fusion posts one, or one program per operation (every one of a setup into
   a folder at once), as the setup's Programs says, for GRBL,
   Masso, Centroid CNC12 (Avid), LinuxCNC, Fanuc (0i, 31i), Haas (NGC) or
-  Mach3 and Mach4, or in Klartext for a Heidenhain TNC, each in millimetres
+  Mach3 and Mach4, Siemens Sinumerik (840D sl, 828D), or in Klartext for a
+  Heidenhain TNC, each in millimetres
   or inches, or through a
   machine profile of your own in camcraft's TOML, which a setup carries a
   copy of. A setup's program has one header and one footer, and each
@@ -551,7 +554,24 @@ panels, the drawing and the helper that runs camcraft.
   IPA+360 IZ-1`), the work offset as a preset row (`CYCL DEF 247`, G54 its
   first), feeds in tenths of an inch a minute in inches, and holes as
   `CYCL DEF 200`, `203` and `207` called at each by `M99`. It is read back,
-  as every program is, and the same checks run on it. A profile can give the spindle's range (`spindle = [6000, 24000]`),
+  as every program is, and the same checks run on it. A Sinumerik program
+  (`.mpf`, `dialect = "sinumerik"`) begins `%_N_<NAME>_MPF` and
+  `;$PATH=/_N_MPF_DIR`, comments with `;`, sets its units with `G710` or
+  `G700` (lengths and feeds both), changes a tool with `T3 M6` (`T="3"`
+  with `tool_management = true`, each tool named in the control by its
+  number) and takes up its offsets with `D1`; it goes up with `G0 SUPA Z0
+  D0`, `D1` again before it moves in the work. Its work offsets are `G54`
+  to `G57`, then `G505` to `G599` (`G58` and `G59` are programmable offsets
+  on an 840D sl; an 828D that has them as settable ones lists them as its
+  `extended_offsets`). Arcs are `G2` and `G3` with `I`, `J`, `K` from the
+  arc's start, a helix as one with its end along the plane's normal. Holes
+  are `MCALL CYCLE81(..)` (`CYCLE82` with a pause, `CYCLE83` pecking or
+  breaking the chip, `CYCLE84` tapping rigidly, `CYCLE840` with a floating
+  holder, `tap = "cycle840"`), called by a position block at each hole and
+  ended by `MCALL`. A setup wrapped round a rotary turns it with `A` words
+  in inverse time (`G93`); a setup tilted for 3+2 is a failed check on a
+  Sinumerik with rotaries, as `CYCLE800` is not written, and is fixtured by
+  hand on one without. It too is read back. A profile can give the spindle's range (`spindle = [6000, 24000]`),
   and an operation whose tool turns outside it is warned about. It can give
   its travel, in the program's units, in the machine's own coordinates:
 
@@ -588,7 +608,8 @@ panels, the drawing and the helper that runs camcraft.
   A setup picks its work offset from those its post has: `G54` to `G59`,
   and any past them the profile lists (`extended_offsets = ["G59.1",
   "G59.2", "G59.3"]` on LinuxCNC, Fanuc's `G54.1 P1` to `P48`, Haas's
-  `G154 P1` to `P99`), which its programs select. The lines a profile gives, `header`, `footer`,
+  `G154 P1` to `P99`, a Sinumerik's `G505` to `G599` after its `G57`),
+  which its programs select. The lines a profile gives, `header`, `footer`,
   `safe_retract`, `end_home` and its own tool change, `tool_change_lines`
   (written in place of `T.. M6` or the pause, and naming `@tool@`), take
   placeholders: `@name@` (the program), `@number@` (its number),
@@ -616,7 +637,8 @@ panels, the drawing and the helper that runs camcraft.
   reversing itself: `G33.1 Z.. K` with the pitch) or `"none"`. LinuxCNC taps
   with G33.1, which needs a spindle encoder; Fanuc in rigid mode after
   `M29`; Haas with G84 and G74, which it taps rigidly by itself; Heidenhain
-  with cycle 207; CNC12 with G84 and G74, which needs its rigid tapping (an
+  with cycle 207; a Sinumerik with CYCLE84 (`"cycle"`), or CYCLE840 with a
+  floating holder (`"cycle840"`); CNC12 with G84 and G74, which needs its rigid tapping (an
   encoder and the Pro licence on an Acorn) or a floating tap holder. Masso,
   GRBL and Mach cannot (Mach4's G84 is for a floating holder, not kept to
   the spindle): a tapping operation posted for them is a failed check that
@@ -745,8 +767,18 @@ useful there.
   tests; none has been run on its machine yet. Klartext's arcs out of the
   XY plane turn as G-code's `G18` and `G19` do, a helix about X or Y is
   written as straight moves, and cycle 203 backs off 0.25 mm to break the
-  chip, whatever the operation asks: `G73` says no distance either. There
-  is no Siemens Sinumerik post yet.
+  chip, whatever the operation asks: `G73` says no distance either.
+- The Sinumerik post is written from Siemens' programming manuals
+  (Fundamentals and Job Planning for the 840D sl and 828D, 03/2013, and the
+  cycles manual of 11/2006) and Fusion's Siemens post, and read back in the
+  tests; it has not run on a machine. Not confirmed there: whether a cycle
+  called by `MCALL` runs after a block that moves no distance (each hole's
+  block, the first's too, is written whole, as Fusion's post writes it);
+  whether a tool's length is still taken up under `SUPA`, which is why the
+  profile lets it go with `D0` there; the parameters past the 03/2013
+  manual's that newer software adds; and which way `CYCLE800` leaves the
+  plane's X and Y, so it is not written. `CYCLE83` backs off 0.25 mm to
+  break the chip, as cycle 203 does.
 - Machining time is the toolpath's: the moves a setup's program adds
   between two operations, a drill's dwell, the spindle getting up to
   speed and anything a machine does to speed up or slow down are not in

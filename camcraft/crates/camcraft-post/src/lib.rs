@@ -16,7 +16,9 @@
 //!
 //! Most profiles write G-code; one whose `dialect` is `heidenhain` writes
 //! Heidenhain's Klartext instead ([`heidenhain`]), and is read back into the
-//! same steps, so the same checks run on it.
+//! same steps, so the same checks run on it. One whose `dialect` is
+//! `sinumerik` writes Siemens' G-code, with its own words for tools, work
+//! offsets and cycles ([`sinumerik`]), and is read back with them.
 
 pub mod custom;
 pub mod heidenhain;
@@ -27,4 +29,5 @@ pub mod readback;
 pub mod render;
 pub mod rotary;
 pub mod setup;
+pub mod sinumerik;
 pub mod wrap;
