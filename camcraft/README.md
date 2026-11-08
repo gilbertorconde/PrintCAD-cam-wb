@@ -666,6 +666,10 @@ thread's minor diameter, `5/8 H` a side, up its chamfer; a spot drill
 and a countersink cones at 90° unless given), `check` asks for what
 each needs, and `flat_diameter`, `cutting_diameter`, `head_height`,
 `point_angle`, `spot_depth` and `shape_words` say what their names do.
+Facing runs its passes off the stock only as far as the real tool's edge
+reaches as deep as a level cuts (`LevelsAsked::deepest`, the radius there),
+not by its widest: a face mill's at its face and its lead up that depth, a
+flat end mill's its radius as before.
 `above_flutes` checks an undercutting head's neck from the head up, and
 a tapered mill's body as wide as its flank's top. `Operation::cannot_use`
 (its kinds now in `cannot_use_kind` and `cannot_drill`) takes a face

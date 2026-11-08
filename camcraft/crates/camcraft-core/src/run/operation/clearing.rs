@@ -311,7 +311,8 @@ pub(super) fn planar_paths(
 /// The stock's top faced: its footprint and the stock offset, from the top down
 /// to the bottom, the model's top unless another is asked for, raised by the
 /// stock to leave down; the passes at `angle`, cut the way `direction` says, and
-/// run on `pass_extension` past the stock.
+/// run on `pass_extension` past where the tool's edge, as deep as a level cuts,
+/// is clear of the stock.
 pub(super) fn face_paths(
     work: &Work<'_>,
     (angle, direction): (f64, FaceDirection),
@@ -322,17 +323,27 @@ pub(super) fn face_paths(
     let (lo, hi) = work.bounds;
     let grow = DVec2::splat(stock_offset);
     let (top, bottom) = op.levels_3d(work.heights);
+    let levels = LevelsAsked {
+        top,
+        bottom: bottom + op.stock_to_leave().axial,
+        stepdown: op.stepdown(),
+    };
+    // Past the stock, the tool need only be clear of it as deep as a level
+    // cuts, the first from the stock's top: a face mill is widest high up its
+    // inserts, above the material, and passes run past by that would run on a
+    // long way for nothing.
+    let base = work.tool.base();
+    let radius = match levels.deepest(work.heights.stock_top) {
+        Some(depth) if base.is_monotonic() => base.radius_at(depth),
+        _ => base.max_radius(),
+    };
     let params = FaceParams {
         area: (lo - grow, hi + grow),
         angle: angle.to_radians(),
         stepover: op.passes.stepover,
         extension: pass_extension,
-        radius: work.tool.cutter_radius(),
-        levels: LevelsAsked {
-            top,
-            bottom: bottom + op.stock_to_leave().axial,
-            stepdown: op.stepdown(),
-        },
+        radius,
+        levels,
         direction,
         clockwise: work.clockwise(),
         feed: op.passes.feed,

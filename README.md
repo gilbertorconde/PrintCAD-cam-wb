@@ -349,8 +349,11 @@ panels, the drawing and the helper that runs camcraft.
     radially;
   - a **face mill**: its diameter at the face, its inserts' corner, and its
     lead angle from the axis (0 square, 45 a 45° mill) up its cutting
-    height. It faces and finishes flats, 95% of its flat a pass, and goes
-    off the stock by its widest;
+    height. It faces and finishes flats, 95% of its flat a pass. Facing
+    runs each pass off the stock only as far as clears its edge as deep as
+    a level cuts (its face and its lead up that depth, not its widest,
+    high up its inserts), then the pass extension, as a flat end mill runs
+    off by its radius;
   - a **lollipop** and a **slot (key) cutter**: a head, a ball or a disc its
     cutting height thick, on a neck narrower than it. They undercut, in a
     2D profile or a slot at one height (multiple depths off, the bottom
