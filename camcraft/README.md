@@ -708,6 +708,23 @@ that stands above it rather than its blocks, so it does not clear a cast
 pocket, or what the side before cut, again. In `camcraft-session`, the
 run's notes name the solid.
 
+And fixtures, which are never cut. In `camcraft-core`, a `Setup` has
+`fixtures`, models of the job that are neither its parts nor its stock
+(`JobError::BadFixture`), laid out in its frame (`Prepared::fixtures`).
+`run::fixtures` lays each one's top on a grid once, grown a cell, no finer
+than 0.2 mm (`Fixture::of`), and checks every move of every operation with
+paths, after any probe correction, against each, at each placement of the
+part (`Setup::placement_offsets`), with the tool whole (`whole_tool`: the
+cutter as cylinders up its tip, then what stands above its flutes) through
+`camcraft_sim::stock::Reach`, as the holder is checked against the
+material. What meets one is an `OperationResult::fixtures` entry
+(`FixtureHit`: the fixture, the placement, what of the tool, the first
+move, how many, how deep, whether at rapid), which fails `is_clean`.
+`Passes::avoid_fixtures` makes a 3D finish leave out the cuts where the
+tool would meet a fixture, as `use_holder` does the part (`leave_out`, which
+both now share). In `camcraft-session`, the checks add `CC113` (a fixture
+met: fails) and `CC219` (cuts left out to avoid one).
+
 And one test: ogeom is 0.11.1 here, which printCAD's shapes need, and it
 meshes `round_edge_loose_fit.step`'s seam that 0.11.0 drew off the torus, so
 `a_loose_fit_is_refused_for_ogeoms_seam` became

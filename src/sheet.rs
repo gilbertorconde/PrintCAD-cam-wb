@@ -24,6 +24,8 @@ pub struct Sheet<'a> {
     pub carried_from: Option<String>,
     /// The body its stock is, by name, when it is one.
     pub stock_body: Option<String>,
+    /// What holds the part, by name.
+    pub fixtures: Vec<String>,
 }
 
 /// The sheet's look: plain, small and black on white, so it prints as it
@@ -158,6 +160,9 @@ impl Sheet<'_> {
             rows.push(("Stock from the work zero", extents(l.stock)));
         } else {
             rows.push(("Stock", self.stock_kind()));
+        }
+        if !self.fixtures.is_empty() {
+            rows.push(("Fixtures", self.fixtures.join(", ")));
         }
         section("Part and stock", &list(&rows))
     }
@@ -830,6 +835,7 @@ mod tests {
             run: &run,
             carried_from: None,
             stock_body: None,
+            fixtures: Vec::new(),
         }
         .html()
     }
@@ -857,6 +863,7 @@ mod tests {
             run: &run,
             carried_from: None,
             stock_body: None,
+            fixtures: Vec::new(),
         }
         .html();
         assert!(
@@ -939,6 +946,7 @@ mod tests {
             run: &run,
             carried_from: None,
             stock_body: None,
+            fixtures: Vec::new(),
         }
         .html();
         assert!(html.contains("2 check(s) failed"), "{html}");
@@ -987,6 +995,7 @@ mod tests {
             run: &run,
             carried_from: Some("Top".into()),
             stock_body: None,
+            fixtures: Vec::new(),
         }
         .html();
         assert!(
@@ -1001,8 +1010,10 @@ mod tests {
             run: &run,
             carried_from: None,
             stock_body: Some("Casting".into()),
+            fixtures: vec!["Vise jaw".into()],
         }
         .html();
         assert!(html.contains("the body Casting, as it is"), "{html}");
+        assert!(html.contains("Vise jaw"), "{html}");
     }
 }

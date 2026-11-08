@@ -143,11 +143,14 @@ pub fn fill_of(data: &OperationData, hole: Option<f64>) -> Fill {
 
 /// `setup` without what belongs to its part: its bodies, what was picked
 /// on them, its probe results, the setup it carries on from (by id, in its
-/// document) and its tools, which the template keeps beside it.
+/// document), the bodies its stock and its fixtures are, and its tools,
+/// which the template keeps beside it.
 fn rules_of(setup: &SetupData) -> SetupData {
     let mut rules = setup.clone();
     rules.bodies.clear();
     rules.stock_from = None;
+    rules.stock_body = None;
+    rules.fixtures.clear();
     rules.axis_pick = None;
     rules.x_pick = None;
     rules.zero_point = None;

@@ -123,6 +123,8 @@ pub struct Prepared {
     /// The solid it starts from, in its frame, when its stock is one
     /// ([`StockSpec::Solid`]) and it does not carry on from an earlier setup.
     pub solid: Option<Arc<TriMesh>>,
+    /// What holds the part, each fixture by its model's name, in its frame.
+    pub fixtures: Vec<(String, Arc<TriMesh>)>,
     /// The part's shadow, once cast ([`Prepared::shadow`]).
     shadow: OnceLock<Shadow>,
 }
@@ -504,6 +506,19 @@ pub fn prepare_from(
         }
         _ => None,
     };
+    let fixtures = setup
+        .fixtures
+        .iter()
+        .map(|name| {
+            let body = bodies
+                .get(name.as_str())
+                .ok_or_else(|| PrepareError::NotLoaded(name.clone()))?;
+            Ok((
+                name.clone(),
+                Arc::new(body.mesh().mapped(|p| frame.to_setup(p))?),
+            ))
+        })
+        .collect::<Result<Vec<_>, PrepareError>>()?;
     let model_bounds = part
         .bounds()
         .ok_or_else(|| PrepareError::EmptyModel(setup.name.clone()))?;
@@ -521,6 +536,7 @@ pub fn prepare_from(
             (Arc::clone(&c.stock), carry)
         }),
         solid,
+        fixtures,
         shadow: OnceLock::new(),
     })
 }

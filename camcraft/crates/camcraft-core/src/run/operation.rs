@@ -74,6 +74,7 @@ use finishing::{
     scallop_paths, spiral_paths,
 };
 pub(super) use holder::cut_kept;
+pub(super) use holder::leave_out;
 use holder::{Watching, clash_warning, trim, trims};
 pub(super) use holes::hole_targets;
 use holes::milled_paths;
@@ -105,6 +106,8 @@ pub(super) struct Work<'a> {
     /// The part's top, on the simulator's grid: what the tool above its
     /// flutes is kept off and checked against.
     pub(super) part: &'a PartSurface,
+    /// What holds the part, on the same grid.
+    pub(super) fixtures: &'a [super::Fixture],
 }
 
 impl Work<'_> {
@@ -391,6 +394,22 @@ pub(super) fn run_operation(
     } else {
         raw
     };
+    // And one asked to keep off the fixtures, the tool whole.
+    let mut fixture_trimmed = 0;
+    let raw = if op.passes.avoid_fixtures && trims(op) && !work.fixtures.is_empty() {
+        let (kept, dropped) =
+            super::fixtures::trim(&raw, work.spec, work.fixtures, work.job.tolerance)
+                .map_err(|e| in_op(op)(StrategyError::from(e)))?;
+        if dropped > 0 {
+            warnings.push(format!(
+                "{dropped} cutting move(s) left out where the tool would meet a fixture"
+            ));
+        }
+        fixture_trimmed = dropped;
+        kept
+    } else {
+        raw
+    };
 
     // A rotary cannot cut an arc unrolled round it as one: it is cut as the
     // straight moves the program writes.
@@ -526,6 +545,7 @@ pub(super) fn run_operation(
         path,
         sim,
         clashes,
+        fixture_trimmed,
         passes,
         travel_saved: order.saved(),
         reliefs,
@@ -703,6 +723,8 @@ pub(super) fn not_made(op: &Operation, spec: Option<&ToolSpec>, made: Made) -> O
         coolant: spec.map(|t| t.coolant).unwrap_or_default(),
         sim: SimReport::default(),
         clashes: Clashes::default(),
+        fixtures: Vec::new(),
+        fixture_trimmed: 0,
         passes: 0,
         travel_saved: 0.0,
         reliefs: Vec::new(),

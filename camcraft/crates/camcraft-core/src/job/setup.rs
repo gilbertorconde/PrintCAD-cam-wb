@@ -18,6 +18,11 @@ pub struct Setup {
     /// The job's stocks this setup starts from, by name.
     #[serde(default)]
     pub stocks: Vec<String>,
+    /// The job's models that hold the part, by name: vise jaws, clamps, a
+    /// sacrificial board. They are never cut: any move of the tool into one
+    /// is a failed check.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fixtures: Vec<String>,
     /// Work offset, 54 for `G54` to 59 for `G59`; from 60, the post's
     /// extended ones in its order (60 is LinuxCNC's `G59.1`).
     #[serde(default = "default_wcs")]
@@ -168,6 +173,7 @@ impl Setup {
             name: name.into(),
             models: Vec::new(),
             stocks: Vec::new(),
+            fixtures: Vec::new(),
             wcs: default_wcs(),
             work_offset: None,
             post: default_post(),
@@ -179,6 +185,21 @@ impl Setup {
             wrap: None,
             operations: Vec::new(),
         }
+    }
+}
+
+impl Setup {
+    /// Where each copy of the part it machines is, from the part where the
+    /// document has it, along the setup's axes: the part alone, until a setup
+    /// has several work offsets.
+    pub fn placement_offsets(&self) -> Vec<glam::DVec3> {
+        vec![glam::DVec3::ZERO]
+    }
+
+    /// The work offset placement `k` is cut at, as a word: `G54`, or `G60`
+    /// for an extended one, which only a post writes as its own.
+    pub fn placement_word(&self, _k: usize) -> String {
+        format!("G{}", self.wcs)
     }
 }
 

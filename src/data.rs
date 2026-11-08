@@ -229,6 +229,10 @@ pub struct SetupData {
     /// one of the bodies it machines.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stock_body: Option<String>,
+    /// What holds the part, by body id: vise jaws, clamps, a board. Never
+    /// cut, and any move of the tool into one is a failed check.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fixtures: Vec<String>,
     /// Extra material each side in X and Y, round the bodies.
     pub margin_side: f64,
     /// Extra material on top of the bodies.
@@ -370,6 +374,7 @@ impl SetupData {
             stock: StockKind::Around,
             stock_from: None,
             stock_body: None,
+            fixtures: Vec::new(),
             margin_side: 2.0,
             margin_top: 2.0,
             margin_below: 0.0,
@@ -741,6 +746,16 @@ impl SetupData {
                 }
                 Some(_) => {}
             }
+        }
+        if self.fixtures.iter().any(|f| {
+            self.bodies.contains(f)
+                || (self.stock == StockKind::Solid && self.stock_body.as_ref() == Some(f))
+        }) {
+            return Some(
+                "A fixture is one of the bodies the setup machines, or its stock: take it out \
+                 of one or the other."
+                    .into(),
+            );
         }
         if self.stock == StockKind::Fixed
             && ![self.size_x, self.size_y, self.size_z]
@@ -1400,6 +1415,8 @@ pub enum Role {
     Part,
     /// The stock it starts from.
     Stock,
+    /// A fixture that holds the part.
+    Fixture,
 }
 
 /// A body of the document as one of a job's models.
@@ -1414,7 +1431,8 @@ pub struct BodyModel {
 }
 
 /// The models a setup's bodies make: each body once, named after it, the names
-/// made unique; its parts first, then the body its stock is.
+/// made unique; its parts first, then the body its stock is, then its
+/// fixtures.
 pub fn models_of(setup: &SetupData, name_of: impl Fn(&str) -> Option<String>) -> Vec<BodyModel> {
     let mut out: Vec<BodyModel> = Vec::new();
     let stock = setup
@@ -1422,7 +1440,13 @@ pub fn models_of(setup: &SetupData, name_of: impl Fn(&str) -> Option<String>) ->
         .iter()
         .filter(|_| setup.stock == StockKind::Solid)
         .map(|b| (b, Role::Stock));
-    let bodies = setup.bodies.iter().map(|b| (b, Role::Part)).chain(stock);
+    let fixtures = setup.fixtures.iter().map(|b| (b, Role::Fixture));
+    let bodies = setup
+        .bodies
+        .iter()
+        .map(|b| (b, Role::Part))
+        .chain(stock)
+        .chain(fixtures);
     for (body, role) in bodies {
         if out.iter().any(|m| &m.body == body) {
             continue;
@@ -1460,6 +1484,7 @@ pub fn job(
     let mut camcraft = Setup::new(name);
     let named = |role: Role| models.iter().filter(move |m| m.role == role);
     camcraft.models = named(Role::Part).map(|m| m.name.clone()).collect();
+    camcraft.fixtures = named(Role::Fixture).map(|m| m.name.clone()).collect();
     camcraft.stocks = vec!["stock".into()];
     camcraft.wcs = setup
         .wcs
@@ -1586,6 +1611,25 @@ mod tests {
                 model: "Casting".into()
             }
         );
+        let text = camcraft_session::job_text(&job).unwrap();
+        assert_eq!(camcraft_session::parse_job(&text, "test").unwrap(), job);
+    }
+
+    /// Fixtures are models of the job, named as the setup's fixtures, and
+    /// not among the models it machines; one that is a part is refused.
+    #[test]
+    fn fixtures_are_models_the_setup_does_not_machine() {
+        let mut setup = SetupData::new(vec!["b1".into()], "grbl", 0.05);
+        setup.fixtures = vec!["b1".into()];
+        assert!(setup.problem().unwrap().contains("fixture"));
+        setup.fixtures = vec!["jaw".into(), "clamp".into()];
+        assert_eq!(setup.problem(), None);
+        assert_eq!(SetupData::from(&setup.to_value()).unwrap(), setup);
+        let models = models_of(&setup, |b| Some(b.to_uppercase()));
+        let job = job("Setup 1", &setup, &models, &[]);
+        assert_eq!(job.setups[0].models, ["B1"]);
+        assert_eq!(job.setups[0].fixtures, ["JAW", "CLAMP"]);
+        assert_eq!(job.models.len(), 3);
         let text = camcraft_session::job_text(&job).unwrap();
         assert_eq!(camcraft_session::parse_job(&text, "test").unwrap(), job);
     }

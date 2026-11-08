@@ -205,6 +205,11 @@ pub struct OperationResult {
     pub sim: SimReport,
     /// What it saw of the tool above its flutes.
     pub clashes: Clashes,
+    /// Each fixture its tool meets, at each placement of the part.
+    pub fixtures: Vec<crate::run::FixtureHit>,
+    /// Cutting moves a 3D finish left out where its tool would meet a
+    /// fixture.
+    pub fixture_trimmed: u64,
     /// Cutting passes produced.
     pub passes: u64,
     /// Inter-pass travel removed by reordering, as a fraction.
@@ -243,6 +248,7 @@ impl OperationResult {
     pub fn is_clean(&self) -> bool {
         self.sim.is_clean()
             && self.clashes.found.is_empty()
+            && self.fixtures.is_empty()
             && !self.path.has_unplanned_links()
             && self.deepest_cut_descent_mm <= self.max_cut_step
     }

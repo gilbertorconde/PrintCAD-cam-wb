@@ -2745,3 +2745,79 @@ fn a_solid_stock_is_alone_and_not_the_part() {
     let e = job.check_setup(0).unwrap_err();
     assert!(e.to_string().contains("only stock"), "{e}");
 }
+
+/// The plate with a hole faced, held by a clamp: a block standing on the
+/// sheet at `at`, 10 mm square and 4 mm tall, under the clearance height, its foot on the sheet's top.
+fn clamped(strategy: StrategySpec, at: DVec2, avoid: bool) -> SetupResult {
+    use crate::job::ModelDef;
+    let mut job = sheet_job(strategy);
+    job.models.push(ModelDef {
+        name: "clamp".into(),
+        path: "clamp.stl".into(),
+        units: None,
+        transform: Default::default(),
+    });
+    job.setups[0].fixtures = vec!["clamp".into()];
+    let op = &mut job.setups[0].operations[0];
+    op.passes.avoid_fixtures = avoid;
+    // Lifting clear over what it leaves out: the links are the linker's,
+    // which knows the material and not the fixtures.
+    op.linking.stay_down = Some(0.0);
+    op.linking.retraction = crate::job::Retraction::Full;
+    let part = Body::derived(synthetic::plate_with_hole(20.0, 5.0, 4.0, 48));
+    let clamp = Body::derived(synthetic::cuboid(
+        at.extend(5.0) - DVec3::new(5.0, 5.0, 0.0),
+        at.extend(9.0) + DVec3::new(5.0, 5.0, 0.0),
+    ));
+    let bodies: Bodies<'_> = [("dome", &part), ("clamp", &clamp)].into_iter().collect();
+    run_setup(&job, 0, &bodies).unwrap()
+}
+
+/// A clamp on the part where a finish goes is a failed check: the operation
+/// is not clean, and it names the clamp and the first move to meet it, which
+/// is where the tool is beside it. Out of reach of every move, the clamp is
+/// met by none.
+#[test]
+fn a_clamp_in_the_path_fails_the_check() {
+    let finish = || StrategySpec::named("parallel").unwrap();
+    let held = clamped(finish(), dvec2(0.0, 0.0), false);
+    let op = &held.operations[0];
+    assert!(!op.is_clean());
+    let [hit] = op.fixtures.as_slice() else {
+        panic!("{:?}", op.fixtures);
+    };
+    assert_eq!(hit.fixture, "clamp");
+    assert!(hit.moves > 0 && hit.deepest > 1.0, "{hit:?}");
+    let first = op.path.moves()[hit.first_move].to;
+    // The tool, 6 mm across, is beside the clamp there.
+    assert!(
+        first.x.abs() < 5.0 + 3.5 && first.y.abs() < 5.0 + 3.5,
+        "{first}"
+    );
+    assert!(
+        op.path.moves()[..hit.first_move]
+            .iter()
+            .all(|m| { m.to.x.abs() > 5.0 + 2.5 || m.to.y.abs() > 5.0 + 2.5 || m.to.z > 9.0 })
+    );
+    assert!(
+        hit.line(None).contains("meets the fixture 'clamp'"),
+        "{}",
+        hit.line(None)
+    );
+    let clear = clamped(finish(), dvec2(100.0, 100.0), false);
+    assert!(clear.operations[0].fixtures.is_empty());
+    assert!(clear.operations[0].is_clean());
+}
+
+/// A 3D finish asked to avoid fixtures leaves out its cuts where the tool
+/// would meet the clamp, and then meets it nowhere.
+#[test]
+fn a_finish_avoids_the_fixtures_when_asked() {
+    let parallel = || StrategySpec::named("parallel").unwrap();
+    let met = clamped(parallel(), dvec2(18.0, 0.0), false);
+    assert!(!met.operations[0].fixtures.is_empty());
+    let kept_off = clamped(parallel(), dvec2(18.0, 0.0), true);
+    let op = &kept_off.operations[0];
+    assert!(op.fixture_trimmed > 0);
+    assert!(op.fixtures.is_empty(), "{:?}", op.fixtures);
+}

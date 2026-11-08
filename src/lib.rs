@@ -157,6 +157,8 @@ struct Cam {
     chosen_tool: Option<usize>,
     /// The setup panel's selected body.
     chosen_body: Option<usize>,
+    /// The setup panel's selected fixture.
+    chosen_fixture: Option<usize>,
     /// The setup panel's strategy for Add operation, by its place in
     /// [`STRATEGIES`].
     new_strategy: usize,
@@ -1088,6 +1090,7 @@ impl Cam {
         self.template_ui.name = None;
         self.template_ui.rules = None;
         self.load_templates();
+        self.chosen_fixture = None;
         self.refresh_for(id, false);
         if let Some(setup) = self.setup_of(id) {
             self.find_lines(&setup);
@@ -1233,6 +1236,7 @@ impl Cam {
                 .as_ref()
                 .filter(|_| data.stock == StockKind::Solid)
                 .map(name_of),
+            fixtures: data.fixtures.iter().map(name_of).collect(),
             bodies: data.bodies.iter().map(name_of).collect(),
             run,
             carried_from: source_of(&setup, &data)
@@ -1355,6 +1359,13 @@ impl Bench for Cam {
                              {from = \"previous\"}, what the setup before it leaves, or \
                              {from = <a setup's name>}, what that earlier one leaves; or \
                              {solid = <a body id>}, a body that is the stock, not machined",
+                        ),
+                        param(
+                            "fixtures",
+                            ParamKind::List,
+                            false,
+                            "body ids of what holds the part (vise jaws, clamps): never cut, \
+                             checked against every move, and not machined",
                         ),
                         param(
                             "size",
@@ -2201,10 +2212,22 @@ impl Bench for Cam {
                         }
                     },
                 };
-                // The stock's body is not machined, though it is shown.
+                let fixtures: Vec<String> = match args.get("fixtures") {
+                    Some(list) => serde_json::from_value(list.clone())
+                        .map_err(|_| "fixtures is a list of body ids")?,
+                    None => Vec::new(),
+                };
+                if let Some(f) = fixtures
+                    .iter()
+                    .find(|f| !host::bodies().iter().any(|b| &b.id == *f))
+                {
+                    return Err(format!("no body '{f}' for a fixture"));
+                }
+                // The stock's body and the fixtures are not machined, though
+                // they are shown.
                 let bodies: Vec<String> = bodies
                     .into_iter()
-                    .filter(|b| stock_body.as_ref() != Some(b))
+                    .filter(|b| stock_body.as_ref() != Some(b) && !fixtures.contains(b))
                     .collect();
                 let size: Option<[f64; 3]> = match args.get("size") {
                     Some(v) => Some(
@@ -2355,6 +2378,7 @@ impl Bench for Cam {
                         data.stock_from = stock_from;
                         data.stock_body = stock_body;
                     }
+                    data.fixtures = fixtures;
                     if let Some([x, y, z]) = size {
                         (data.size_x, data.size_y, data.size_z) = (x, y, z);
                     }

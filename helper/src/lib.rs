@@ -451,6 +451,28 @@ pub(crate) fn execute(
             .collect(),
         warnings: ran.warnings.clone(),
         stock,
+        fixtures: setup
+            .fixtures
+            .iter()
+            .filter_map(|name| {
+                let [low, high] = part_box(&loaded, std::slice::from_ref(name), &frame)?;
+                Some(cam_protocol::FixtureBox {
+                    name: name.clone(),
+                    corners: corners(
+                        &frame,
+                        Aabb {
+                            min: DVec3::from_array(low),
+                            max: DVec3::from_array(high),
+                        },
+                    ),
+                    met: ran
+                        .result
+                        .operations
+                        .iter()
+                        .any(|op| op.fixtures.iter().any(|h| &h.fixture == name)),
+                })
+            })
+            .collect(),
         cylinder: cylinder(&frame, &ran.result.stocks),
         origin: to_array(frame.to_model(DVec3::ZERO)),
         operations,

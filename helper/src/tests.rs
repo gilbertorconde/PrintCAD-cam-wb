@@ -2169,3 +2169,75 @@ fn a_body_is_the_stock_it_starts_from() {
     let (a, b) = (removed(&near), removed(&block));
     assert!(a > 0.0 && a < 0.5 * b, "{a} {b}");
 }
+
+/// A fixture where the roughing goes, a second hinge jig standing on the
+/// first a little to the side, is a failed check that names it, at the
+/// first move to meet it, and comes back to be drawn, met; the run is not
+/// passed. Far off to the side it is met by nothing.
+#[test]
+fn a_fixture_in_the_path_is_a_failed_check() {
+    let part = native("hinge_jig.step");
+    let run = |placement: [f64; 16]| {
+        let request = Request {
+            version: VERSION,
+            job: JOB
+                .replace(
+                    "[[stock]]",
+                    "[[model]]\nname = \"clamp\"\npath = \"clamp\"\n\n[[stock]]",
+                )
+                .replace(
+                    "stocks = [\"block\"]",
+                    "stocks = [\"block\"]\nfixtures = [\"clamp\"]",
+                ),
+            shapes: BTreeMap::from([
+                (
+                    "part".to_string(),
+                    Shape {
+                        text: part.clone(),
+                        placement: IDENTITY,
+                    },
+                ),
+                (
+                    "clamp".to_string(),
+                    Shape {
+                        text: part.clone(),
+                        placement,
+                    },
+                ),
+            ]),
+            max_points: 0,
+            ..Request::default()
+        };
+        answer(&request).unwrap()
+    };
+    let mut on = IDENTITY;
+    (on[3], on[11]) = (10.0, 20.0);
+    let held = run(on);
+    assert!(!held.passed);
+    let hit = held
+        .findings
+        .iter()
+        .find(|f| f.code == "CC113" && f.level == Level::Fail)
+        .expect("a failed fixture check");
+    assert!(
+        hit.text.contains("meets the fixture 'clamp'"),
+        "{}",
+        hit.text
+    );
+    assert_eq!(hit.operation, Some(0));
+    assert!(hit.at_move.is_some());
+    assert_eq!(held.fixtures.len(), 1);
+    assert!(held.fixtures[0].met);
+    let mut off = IDENTITY;
+    off[3] = 500.0;
+    let clear = run(off);
+    assert!(
+        clear
+            .findings
+            .iter()
+            .any(|f| f.code == "CC113" && f.level == Level::Pass),
+        "{:?}",
+        clear.findings
+    );
+    assert!(!clear.fixtures[0].met);
+}

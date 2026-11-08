@@ -16,7 +16,7 @@ pub const HELPER: &str = "camcraft-helper";
 
 /// Bumped whenever a request or response changes shape, so a package never
 /// reads an answer from a helper of another build.
-pub const VERSION: u32 = 9;
+pub const VERSION: u32 = 10;
 
 /// One setup to run.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -101,6 +101,10 @@ pub struct Run {
     /// The stock, when it is a round bar: drawn as one, inside its box.
     #[serde(default)]
     pub cylinder: Option<Cylinder>,
+    /// What holds the part, each fixture by the box round it, its corners as
+    /// [`Run::stock`]'s, for drawing.
+    #[serde(default)]
+    pub fixtures: Vec<FixtureBox>,
     /// The work zero.
     pub origin: [f64; 3],
     /// Each operation, in the setup's order.
@@ -130,6 +134,17 @@ pub struct Run {
     /// Where the part and its stock are, for the setup sheet.
     #[serde(default)]
     pub layout: Option<Layout>,
+}
+
+/// A fixture, for drawing.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct FixtureBox {
+    /// Its model's name in the job.
+    pub name: String,
+    /// The box round it as the setup sees it, by its corners.
+    pub corners: [[f64; 3]; 8],
+    /// Whether any operation's tool meets it.
+    pub met: bool,
 }
 
 /// How long a setup machines: its moves at their feeds and the machine's

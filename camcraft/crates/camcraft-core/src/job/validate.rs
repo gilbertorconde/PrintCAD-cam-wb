@@ -256,6 +256,29 @@ impl Job {
                 }
             }
         }
+        for f in &setup.fixtures {
+            let solid = setup
+                .stocks
+                .iter()
+                .filter_map(|s| self.stock(s))
+                .any(|d| matches!(&d.spec, StockSpec::Solid { model } if model == f));
+            let why = if self.model(f).is_none() {
+                Some("it is not in the job")
+            } else if setup.models.contains(f) {
+                Some("it is one of the models the setup machines")
+            } else if solid {
+                Some("it is the setup's stock")
+            } else {
+                None
+            };
+            if let Some(why) = why {
+                return Err(JobError::BadFixture {
+                    setup: name.clone(),
+                    model: f.clone(),
+                    why,
+                });
+            }
+        }
         if setup.operations.is_empty() {
             return Err(JobError::NoOperations(name.clone()));
         }

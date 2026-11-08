@@ -49,6 +49,16 @@ pub enum JobError {
         /// Why not.
         why: &'static str,
     },
+    /// A setup's fixture is one it cannot have.
+    #[error("setup '{setup}' is held by the fixture '{model}', but {why}")]
+    BadFixture {
+        /// Which setup.
+        setup: String,
+        /// The fixture's model.
+        model: String,
+        /// Why not.
+        why: &'static str,
+    },
     /// A setup machines no model.
     #[error("setup '{0}' has no model")]
     NoModels(String),

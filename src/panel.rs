@@ -644,6 +644,47 @@ pub fn setup_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
             ),
         ],
     ));
+    let name_of = |b: &String| {
+        bodies
+            .iter()
+            .find(|x| &x.id == b)
+            .map_or_else(|| "A body no longer there".into(), |x| x.name.clone())
+    };
+    let mut held = vec![Widget::Text {
+        text: "Bodies that hold the part: vise jaws, clamps, a board. They are never cut: \
+               the tool, its shank or its holder meeting one on any move, cutting or rapid, \
+               is a failed check that names it and the move."
+            .into(),
+        mono: false,
+    }];
+    if !setup.fixtures.is_empty() {
+        held.push(Widget::List {
+            id: "fixtures".into(),
+            items: setup
+                .fixtures
+                .iter()
+                .map(|b| ListItem {
+                    label: name_of(b),
+                    ..Default::default()
+                })
+                .collect(),
+            selected: cam.chosen_fixture,
+        });
+    }
+    held.push(Widget::Pick {
+        id: "fixture".into(),
+        label: "Add the selected body".into(),
+        value: None,
+        armed: false,
+    });
+    if !setup.fixtures.is_empty() {
+        held.push(button(
+            "remove_fixture",
+            "Remove the chosen fixture",
+            ButtonStyle::Small,
+            cam.chosen_fixture.is_some(),
+        ));
+    }
     let mut stock = vec![choice(
         "stock",
         "Stock",
@@ -807,6 +848,7 @@ pub fn setup_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
         value: setup.material.clone(),
     });
     panel.push(group("Stock", stock));
+    panel.push(group("Fixtures", held));
     let mut orientation = orientation_rows(cam, id, &setup);
     orientation.extend([
         choice(
@@ -1277,6 +1319,35 @@ pub fn setup_event(cam: &mut Cam, id: &str, event: PanelEvent) {
             cam.write_setup(id, &setup);
         }
         PanelEvent::Select { id: list, index } if list == "bodies" => cam.chosen_body = Some(index),
+        PanelEvent::Select { id: list, index } if list == "fixtures" => {
+            cam.chosen_fixture = Some(index);
+        }
+        PanelEvent::Pick { id: pick } if pick == "fixture" => {
+            match cam
+                .pointer
+                .selected_body
+                .clone()
+                .or(cam.pointer.body.clone())
+            {
+                Some(body) if setup.bodies.contains(&body) => {
+                    cam.hint = Some("The setup machines that body: it cannot hold it.".into());
+                }
+                Some(body) if !setup.fixtures.contains(&body) => {
+                    setup.fixtures.push(body);
+                    cam.write_setup(id, &setup);
+                }
+                Some(_) => cam.hint = Some("That body is a fixture already.".into()),
+                None => cam.hint = Some("Select a body in the view or the tree first.".into()),
+            }
+        }
+        PanelEvent::Button { id: b } if b == "remove_fixture" => {
+            if let Some(i) = cam.chosen_fixture.take()
+                && i < setup.fixtures.len()
+            {
+                setup.fixtures.remove(i);
+                cam.write_setup(id, &setup);
+            }
+        }
         PanelEvent::Select { id: list, index } if list == "operations" => {
             if let Some((op, _)) = operations_of(id).get(index) {
                 let op = op.id.clone();

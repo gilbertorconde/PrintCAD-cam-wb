@@ -412,6 +412,19 @@ panels, the drawing and the helper that runs camcraft.
   where they would meet the part, and links round what it left out; the
   check still runs, for the stock an earlier operation left. Other
   operations are only checked.
+- **Fixtures.** A setup can name the bodies that hold the part: vise jaws,
+  clamps, a sacrificial board, tabs on the table. They are not machined
+  and never cut: every move of every operation, cutting or rapid, is
+  checked against each, the tool whole (its cutter, its body past the
+  flutes, its shank and its holder), at each placement of the part, and
+  one that meets it is a failed check naming the fixture, what of the tool
+  met it and the first move it did, marked on the timeline ("holder segment
+  1 (Ø32.00) meets the fixture 'Jaw' on 6 move(s) from move 212, 4.10 mm
+  into it"). Each is drawn as the box round it, red where a tool meets it.
+  A 3D finish can be asked to Avoid fixtures: it leaves out its cuts where
+  the tool would meet one, as Use shank and holder does; the links round
+  what it leaves out are the linker's, which goes by the material, not the
+  fixtures, and are checked all the same.
 - **Playback,** as camcraft's: while a setup or one of its operations is
   open, a transport under the view plays its run back. A timeline has a span
   per operation as long as it takes to run, with failed checks marked filled
@@ -622,6 +635,7 @@ local side = cam.setup{bodies = {"<body id>"}, tool_axis = "-y", machine_x = "+x
 local placed = cam.setup{bodies = {"<body id>"}, post = "linuxcnc", wcs = "G59.1",
                         work_offset = {x = 250, y = -180, z = -95}}  -- in machine coordinates
 local cast = cam.setup{bodies = {"<body id>"}, stock = {solid = "<casting's body id>"}}
+local held = cam.setup{bodies = {"<body id>"}, fixtures = {"<jaw id>", "<clamp id>"}}
 local tilted = cam.setup{bodies = {"<body id>"}, tilt = {x = 30, y = 0}}
 local rotary = cam.setup{bodies = {"<body id>"}, stock = "cylinder", axis = "x",
                          post = "my-4-axis", wrap = {diameter = 40}}  -- or wrap = true
