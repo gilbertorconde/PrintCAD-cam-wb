@@ -117,12 +117,9 @@ pub(super) fn each_copy(
     // The material as the setup starts, on the same grid: where the grid is
     // lower now, something has cut it. For a setup that carries on from an
     // earlier one, what that one left, not its box.
-    let fresh = match (&planned, &work.prepared.carried) {
-        (Planned::Adaptive(_), Some((left, carry))) => {
-            Some(left.carried(carry, work.prepared.stock_bounds(), stock.floor(), pitch)?)
-        }
-        (Planned::Adaptive(_), None) => Some(Stock::from_blocks(blocks, stock.floor(), pitch)?),
-        (Planned::Clearing(_), _) => None,
+    let fresh = match &planned {
+        Planned::Adaptive(_) => Some(work.prepared.fresh_stock(stock.floor(), pitch)?),
+        Planned::Clearing(_) => None,
     };
     // What the copies start from: the material as it stands, for pocket
     // clearing and rest machining; else the setup's blocks, so adaptive
@@ -181,8 +178,14 @@ pub(super) fn each_copy(
                         let gone = was
                             .difference(&contour_above(field, h))
                             .map_err(|e| in_op(op)(StrategyError::from(e)))?;
-                        let blocks =
-                            material(blocks, z, level_arc(&a.params)).map_err(in_op(op))?;
+                        // Material of a shape of its own, a solid's or what
+                        // an earlier setup left, is where it stood above the
+                        // level; else the blocks, exactly.
+                        let blocks = if work.prepared.starts_shaped() {
+                            was.clone()
+                        } else {
+                            material(blocks, z, level_arc(&a.params)).map_err(in_op(op))?
+                        };
                         if gone.is_empty() {
                             blocks
                         } else {

@@ -2631,3 +2631,117 @@ fn a_rapid_through_air_the_setup_before_cut_is_clean() {
     let fresh = rapids(&crate::setup::prepare(&job, 1, &bodies).unwrap());
     assert!(fresh.rapid_contacts > 0, "{fresh:?}");
 }
+
+/// A plate with a hole roughed out of a casting of it: a plate a little
+/// bigger all round, its hole cast already, wider than the part's. The
+/// casting is the stock: the setup starts from its material, its box the
+/// stock's, and the hole is air in it.
+fn from_a_casting(stock: crate::job::StockSpec) -> (Job, SetupResult) {
+    use crate::job::{CutDirection, ModelDef};
+    let mut job = sheet_job(StrategySpec::Adaptive {
+        direction: CutDirection::Climb,
+        flat_areas: false,
+        rest: None,
+    });
+    job.models.push(ModelDef {
+        name: "casting".into(),
+        path: "casting.stl".into(),
+        units: None,
+        transform: Default::default(),
+    });
+    job.stocks[0].spec = stock;
+    job.setups[0].origin = crate::job::Origin::BoxPoint {
+        of: crate::job::BoxOf::Stock,
+        x: crate::job::Along::Min,
+        y: crate::job::Along::Min,
+        z: crate::job::Along::Max,
+        offset: [0.0; 3],
+    };
+    let part = Body::derived(synthetic::plate_with_hole(20.0, 5.0, 4.0, 48));
+    let casting = Body::derived(synthetic::plate_with_hole(22.0, 7.0, 7.0, 64));
+    let bodies: Bodies<'_> = [("dome", &part), ("casting", &casting)]
+        .into_iter()
+        .collect();
+    let result = run_setup(&job, 0, &bodies).unwrap();
+    (job, result)
+}
+
+/// How many of its first operation's cuts end within `r` of `at`, seen from
+/// above, below `z`.
+fn cuts_within(result: &SetupResult, at: DVec2, r: f64, z: f64) -> usize {
+    result.operations[0]
+        .path
+        .moves()
+        .iter()
+        .filter(|m| m.role == crate::path::toolpath::MoveRole::Cut)
+        .filter(|m| m.to.truncate().distance(at) < r && m.to.z < z)
+        .count()
+}
+
+/// Roughing a casting does not cut its hole again: the setup starts from
+/// the casting's material, each column from its bottom to its top, the
+/// hole air in it, and its stock is the box round the casting, which the
+/// work zero is on. Roughing a box the casting's size clears over the hole
+/// too.
+#[test]
+fn a_cast_pocket_is_not_cut_again() {
+    use crate::job::StockSpec;
+    let (_, cast) = from_a_casting(StockSpec::Solid {
+        model: "casting".into(),
+    });
+    let start = cast.keyframes[0].unpack().unwrap();
+    assert!(start.under().is_some(), "a solid keeps its bottoms");
+    // The work zero is the stock's top front-left corner: the casting's.
+    let top = cast.heights.stock_top;
+    assert!(top.abs() < 1e-9, "{top}");
+    assert!((cast.heights.stock_bottom + 7.0).abs() < 1e-9);
+    assert!(cast.stock_min.length() < 1e-9, "{}", cast.stock_min);
+    assert!((cast.stock_max - dvec2(44.0, 44.0)).length() < 1e-9);
+    let at = |x: f64, y: f64| start.height_at(x, y).unwrap();
+    assert!((at(5.0, 5.0) - top).abs() < 1e-6, "the casting's rim");
+    assert!((at(22.0, 22.0) - start.floor()).abs() < 1e-6, "its hole");
+    let rough = &cast.operations[0];
+    assert!(rough.sim.is_clean(), "{:?}", rough.warnings);
+    assert!(rough.sim.removed_mm3 > 0.0);
+    // Its hole is 7 mm round: a 6 mm tool whose centre is within 3.5 mm of
+    // its middle cuts nothing there.
+    let middle = dvec2(22.0, 22.0);
+    assert_eq!(cuts_within(&cast, middle, 3.5, top), 0);
+
+    let (_, boxed) = from_a_casting(StockSpec::AroundModels {
+        models: vec!["casting".into()],
+        margin: [0.0; 3],
+        below: 0.0,
+    });
+    assert!((boxed.stock_max - cast.stock_max).length() < 1e-9);
+    assert!(cuts_within(&boxed, middle, 3.5, top) > 0);
+    // Over the cast hole, 2 mm of the box above the part's top.
+    let over = std::f64::consts::PI * 7.0 * 7.0 * 2.0;
+    let more = boxed.operations[0].sim.removed_mm3 - rough.sim.removed_mm3;
+    assert!(more > 0.5 * over, "{more} {over}");
+}
+
+/// A solid stock is the setup's only one, and is not a part it machines.
+#[test]
+fn a_solid_stock_is_alone_and_not_the_part() {
+    use crate::job::{JobError, StockDef, StockSpec};
+    let mut job = sheet_job(StrategySpec::named("face").unwrap());
+    job.stocks[0].spec = StockSpec::Solid {
+        model: "dome".into(),
+    };
+    assert!(matches!(
+        job.check_setup(0),
+        Err(JobError::SolidStock { .. })
+    ));
+    job.stocks.push(StockDef {
+        name: "other".into(),
+        spec: StockSpec::AroundModels {
+            models: vec![],
+            margin: [1.0; 3],
+            below: 0.0,
+        },
+    });
+    job.setups[0].stocks.push("other".into());
+    let e = job.check_setup(0).unwrap_err();
+    assert!(e.to_string().contains("only stock"), "{e}");
+}

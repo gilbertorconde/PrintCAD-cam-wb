@@ -113,6 +113,8 @@ impl Job {
                     positive(&field("diameter"), *diameter)?;
                     positive(&field("length"), *length)?;
                 }
+                // Its model is checked above, with every stock's.
+                StockSpec::Solid { .. } => {}
             }
         }
 
@@ -228,11 +230,30 @@ impl Job {
             return Err(JobError::NoStock(name.clone()));
         }
         for s in &setup.stocks {
-            if self.stock(s).is_none() {
+            let Some(def) = self.stock(s) else {
                 return Err(JobError::UnknownStock {
                     setup: name.clone(),
                     stock: s.clone(),
                 });
+            };
+            // A solid's columns are its own: another block beside it would
+            // be one height a column with it, and the part cut from itself
+            // is no part.
+            if let StockSpec::Solid { model } = &def.spec {
+                let why = if setup.stocks.len() > 1 {
+                    Some("it must be the setup's only stock")
+                } else if setup.models.contains(model) {
+                    Some("it is one of the models the setup machines")
+                } else {
+                    None
+                };
+                if let Some(why) = why {
+                    return Err(JobError::SolidStock {
+                        setup: name.clone(),
+                        model: model.clone(),
+                        why,
+                    });
+                }
             }
         }
         if setup.operations.is_empty() {

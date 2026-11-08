@@ -2094,3 +2094,78 @@ fn a_setup_on_a_rotary_is_wrapped_round_it() {
     // No height planes across a bar.
     assert!(op.heights.is_empty());
 }
+
+/// What a run's operations say they removed, in cubic millimetres.
+fn removed(run: &cam_protocol::Run) -> f64 {
+    run.operations
+        .iter()
+        .filter_map(|op| op.summary.split("removed ").nth(1))
+        .filter_map(|r| r.split(' ').next()?.parse::<f64>().ok())
+        .sum()
+}
+
+/// A setup whose stock is a body of its own, a printed part near its net
+/// shape a millimetre higher than the part: its stock's box is that body's,
+/// it is not machined, and roughing takes only the millimetre, not a block
+/// round the part.
+#[test]
+fn a_body_is_the_stock_it_starts_from() {
+    let part = native("hinge_jig.step");
+    let mut up = IDENTITY;
+    up[11] = 1.0;
+    let request = |job: String, stock: bool| Request {
+        version: VERSION,
+        job,
+        shapes: BTreeMap::from_iter(
+            [
+                (
+                    "part".to_string(),
+                    Shape {
+                        text: part.clone(),
+                        placement: IDENTITY,
+                    },
+                ),
+                (
+                    "printed".to_string(),
+                    Shape {
+                        text: part.clone(),
+                        placement: up,
+                    },
+                ),
+            ]
+            .into_iter()
+            .take(if stock { 2 } else { 1 }),
+        ),
+        max_points: 0,
+        ..Request::default()
+    };
+    let solid = JOB
+        .replace(
+            "[[stock]]\nname = \"block\"\nkind = \"around-models\"\nmargin = [2.0, 2.0, 2.0]",
+            "[[model]]\nname = \"printed\"\npath = \"printed\"\n\n\
+             [[stock]]\nname = \"block\"\nkind = \"solid\"\nmodel = \"printed\"",
+        )
+        .replace("[[setup]]", "[[setup]]\norigin = { kind = \"box-point\", of = \"stock\", x = \"min\", y = \"min\", z = \"max\" }");
+    assert!(solid.contains("kind = \"solid\""));
+    let near = answer(&request(solid, true)).unwrap();
+    let block = answer(&request(JOB.into(), false)).unwrap();
+    assert!(
+        near.notes.iter().any(|n| n.contains("the solid 'printed'")),
+        "{:?}",
+        near.notes
+    );
+    // Its box is the printed part's, a millimetre up: X and Y as the part's,
+    // where the block is two more each way.
+    let size = |r: &cam_protocol::Run| {
+        let (a, b) = (r.stock[0], r.stock[7]);
+        [b[0] - a[0], b[1] - a[1], b[2] - a[2]]
+    };
+    let (n, b) = (size(&near), size(&block));
+    assert!((b[0] - n[0] - 4.0).abs() < 0.1, "{n:?} {b:?}");
+    assert!((near.stock[7][2] - block.stock[7][2] + 1.0).abs() < 0.1);
+    // The work zero on the stock's top front-left corner is on its box.
+    let corner = near.stock[4];
+    assert!((0..3).all(|i| (near.origin[i] - corner[i]).abs() < 1e-6));
+    let (a, b) = (removed(&near), removed(&block));
+    assert!(a > 0.0 && a < 0.5 * b, "{a} {b}");
+}

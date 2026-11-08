@@ -22,6 +22,8 @@ pub struct Sheet<'a> {
     pub run: &'a Run,
     /// The earlier setup its stock carries on from, by name, when it does.
     pub carried_from: Option<String>,
+    /// The body its stock is, by name, when it is one.
+    pub stock_body: Option<String>,
 }
 
 /// The sheet's look: plain, small and black on white, so it prints as it
@@ -196,6 +198,10 @@ impl Sheet<'_> {
                 self.carried_from
                     .as_deref()
                     .map_or_else(|| "the setup before".to_string(), |n| format!("setup {n}"))
+            ),
+            StockKind::Solid => format!(
+                "the body {}, as it is; its size is the box round it",
+                self.stock_body.as_deref().unwrap_or("picked")
             ),
         }
     }
@@ -823,6 +829,7 @@ mod tests {
             bodies: vec!["Bracket".into()],
             run: &run,
             carried_from: None,
+            stock_body: None,
         }
         .html()
     }
@@ -849,6 +856,7 @@ mod tests {
             bodies: vec!["Bracket".into()],
             run: &run,
             carried_from: None,
+            stock_body: None,
         }
         .html();
         assert!(
@@ -930,6 +938,7 @@ mod tests {
             bodies: vec!["Bracket".into()],
             run: &run,
             carried_from: None,
+            stock_body: None,
         }
         .html();
         assert!(html.contains("2 check(s) failed"), "{html}");
@@ -977,11 +986,23 @@ mod tests {
             bodies: vec!["Bracket".into()],
             run: &run,
             carried_from: Some("Top".into()),
+            stock_body: None,
         }
         .html();
         assert!(
             html.contains("what setup Top leaves after its last operation"),
             "{html}"
         );
+        setup.stock = StockKind::Solid;
+        let html = Sheet {
+            name: "Top",
+            setup: &setup,
+            bodies: vec!["Bracket".into()],
+            run: &run,
+            carried_from: None,
+            stock_body: Some("Casting".into()),
+        }
+        .html();
+        assert!(html.contains("the body Casting, as it is"), "{html}");
     }
 }

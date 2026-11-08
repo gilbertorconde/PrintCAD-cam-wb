@@ -692,6 +692,22 @@ chamfer (`tip-length`), a spot drill no longer a plain cone; and
 `cutter/tool/tests.rs`, `cutter/dropcutter/tests.rs`, `job/tests.rs`
 (`kinds`), `run/tests/kinds.rs` and the two imports'.
 
+And stock from a solid, as Fusion's "From solid". In `camcraft-core`,
+`StockSpec::Solid` names a model of the job that is the stock: a setup's
+only one, never one of its models (`JobError::SolidStock`). Anything that
+needs only a bound takes its box; `prepare_from` lays it out in the
+setup's frame (`Prepared::solid`), and `Prepared::fresh_stock` starts the
+run, and a pattern's or rest machining's copies, from it, as from what an
+earlier setup left. In `camcraft-sim`, `Stock::from_solid` samples a mesh
+into columns, each from the lowest it comes over the column's middle to
+the highest, the bottom kept as the underside (`part::extremes` rasterises
+both). An adaptive clearing whose setup starts from such material, a
+solid's or what an earlier setup left (`Prepared::starts_shaped`), is
+worked out as a pattern's one copy is, its material at each level where
+that stands above it rather than its blocks, so it does not clear a cast
+pocket, or what the side before cut, again. In `camcraft-session`, the
+run's notes name the solid.
+
 And one test: ogeom is 0.11.1 here, which printCAD's shapes need, and it
 meshes `round_edge_loose_fit.step`'s seam that 0.11.0 drew off the torus, so
 `a_loose_fit_is_refused_for_ogeoms_seam` became

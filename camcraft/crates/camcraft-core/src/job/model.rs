@@ -132,6 +132,14 @@ pub enum StockSpec {
     },
     /// A round bar of a fixed size, placed against models.
     FixedCylinder(FixedCylinder),
+    /// A body of the job's own, as Fusion's "From solid": a casting, a blank
+    /// cut before, a printed part near its net shape. The setup starts from
+    /// its material, each column of it from the lowest it comes to the highest
+    /// along the tool, and its box is the stock's.
+    Solid {
+        /// The model it is, by name: never one the setup machines.
+        model: String,
+    },
 }
 
 impl StockSpec {
@@ -143,6 +151,7 @@ impl StockSpec {
             | StockSpec::FixedBox(FixedBox { models, .. })
             | StockSpec::CylinderAroundModels { models, .. }
             | StockSpec::FixedCylinder(FixedCylinder { models, .. }) => models,
+            StockSpec::Solid { model } => std::slice::from_ref(model),
         }
     }
 }

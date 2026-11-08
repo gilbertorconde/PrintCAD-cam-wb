@@ -39,6 +39,16 @@ pub enum JobError {
         /// Which stock.
         stock: String,
     },
+    /// A setup's stock is a solid it cannot start from.
+    #[error("setup '{setup}' starts from the solid '{model}', but {why}")]
+    SolidStock {
+        /// Which setup.
+        setup: String,
+        /// The solid's model.
+        model: String,
+        /// Why not.
+        why: &'static str,
+    },
     /// A setup machines no model.
     #[error("setup '{0}' has no model")]
     NoModels(String),

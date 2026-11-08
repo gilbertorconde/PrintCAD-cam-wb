@@ -47,7 +47,8 @@ mod tests;
 use std::sync::Arc as Shared;
 
 use camcraft_geom::arc::Arc;
-use camcraft_geom::heightmap::{HeightMap, HeightMapError, cell_index};
+use camcraft_geom::heightmap::{HeightMap, HeightMapError, cell_index, narrow};
+use camcraft_geom::mesh::TriMesh;
 use glam::{DVec2, DVec3};
 use rayon::prelude::*;
 
@@ -437,6 +438,56 @@ impl Stock {
             field,
             floor,
             under: None,
+            round: None,
+        })
+    }
+
+    /// A solid's material over `[min, max]`: each column from the lowest the
+    /// mesh comes over its middle to the highest, as one stretch, its bottom
+    /// kept as an underside ([`Stock::under`]), so a casting's pocket open
+    /// from above is air and one open from below stands on its bottom. What
+    /// lies hidden inside a column, a pocket the tool cannot reach down it, is
+    /// taken as material, never the other way round. Columns it does not
+    /// cover hold `floor`: no material.
+    pub fn from_solid(
+        mesh: &TriMesh,
+        min: DVec2,
+        max: DVec2,
+        floor: f64,
+        pitch: f64,
+    ) -> Result<Self, StockError> {
+        if !floor.is_finite() {
+            return Err(StockError::Inverted { top: floor, floor });
+        }
+        let mut field = HeightMap::covering(min, max, pitch, floor)?;
+        let (high, low, window) = part::extremes(mesh, min, max, pitch)?;
+        let mut under = vec![narrow(floor); field.data().len()];
+        let nx = field.nx() as usize;
+        let mut any = false;
+        for wy in 0..high.ny() {
+            for wx in 0..high.nx() {
+                let (Some(top), Some(bottom)) = (high.get(wx, wy), low.get(wx, wy)) else {
+                    continue;
+                };
+                let bottom = bottom.max(floor);
+                if top <= bottom + THIN {
+                    continue;
+                }
+                let (ix, iy) = (wx + window.x0, wy + window.y0);
+                field.set(ix, iy, top);
+                if let Some(u) = under.get_mut(iy as usize * nx + ix as usize) {
+                    *u = narrow(bottom);
+                }
+                any = true;
+            }
+        }
+        if !any {
+            return Err(StockError::NoBlocks);
+        }
+        Ok(Self {
+            field,
+            floor,
+            under: Some(under.into()),
             round: None,
         })
     }

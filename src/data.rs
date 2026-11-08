@@ -38,6 +38,9 @@ pub enum StockKind {
     /// operation, turned as this setup sees it, as Fusion's "Continue from
     /// previous setup".
     Earlier,
+    /// A body of the document, as Fusion's "From solid": a casting, a blank
+    /// cut before, a printed part near its net shape.
+    Solid,
 }
 
 /// Which way a cylinder of stock lies, as the part sits.
@@ -222,6 +225,10 @@ pub struct SetupData {
     /// before it in the document; `None` for the one just before it.
     #[serde(default)]
     pub stock_from: Option<String>,
+    /// The body that is the stock, by id, for [`StockKind::Solid`]: never
+    /// one of the bodies it machines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stock_body: Option<String>,
     /// Extra material each side in X and Y, round the bodies.
     pub margin_side: f64,
     /// Extra material on top of the bodies.
@@ -362,6 +369,7 @@ impl SetupData {
             bodies,
             stock: StockKind::Around,
             stock_from: None,
+            stock_body: None,
             margin_side: 2.0,
             margin_top: 2.0,
             margin_below: 0.0,
@@ -498,8 +506,9 @@ impl SetupData {
             },
             // The helper starts from what the earlier setup left, which its
             // request carries, and lays the setup out round that; the job
-            // still names a stock, the bodies' box.
-            StockKind::Earlier => StockSpec::AroundModels {
+            // still names a stock, the bodies' box. A solid is named by its
+            // model, which only the job knows ([`job`]).
+            StockKind::Earlier | StockKind::Solid => StockSpec::AroundModels {
                 models: Vec::new(),
                 margin: [0.0; 3],
                 below: 0.0,
@@ -719,6 +728,19 @@ impl SetupData {
         }
         if self.wraps() && self.probe_correct {
             return Some("On a rotary the depths are not corrected to probe results.".into());
+        }
+        if self.stock == StockKind::Solid {
+            match &self.stock_body {
+                None => return Some("Pick the body the stock is.".into()),
+                Some(b) if self.bodies.contains(b) => {
+                    return Some(
+                        "The stock's body is one the setup machines: take it out of its \
+                         bodies, or pick another."
+                            .into(),
+                    );
+                }
+                Some(_) => {}
+            }
         }
         if self.stock == StockKind::Fixed
             && ![self.size_x, self.size_y, self.size_z]
@@ -1371,6 +1393,15 @@ fn fit_stepover(
     }
 }
 
+/// What a body is to a setup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// A part it machines.
+    Part,
+    /// The stock it starts from.
+    Stock,
+}
+
 /// A body of the document as one of a job's models.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BodyModel {
@@ -1378,13 +1409,21 @@ pub struct BodyModel {
     pub body: String,
     /// Its model's name in the job.
     pub name: String,
+    /// What it is to the setup.
+    pub role: Role,
 }
 
 /// The models a setup's bodies make: each body once, named after it, the names
-/// made unique.
+/// made unique; its parts first, then the body its stock is.
 pub fn models_of(setup: &SetupData, name_of: impl Fn(&str) -> Option<String>) -> Vec<BodyModel> {
     let mut out: Vec<BodyModel> = Vec::new();
-    for body in &setup.bodies {
+    let stock = setup
+        .stock_body
+        .iter()
+        .filter(|_| setup.stock == StockKind::Solid)
+        .map(|b| (b, Role::Stock));
+    let bodies = setup.bodies.iter().map(|b| (b, Role::Part)).chain(stock);
+    for (body, role) in bodies {
         if out.iter().any(|m| &m.body == body) {
             continue;
         }
@@ -1398,6 +1437,7 @@ pub fn models_of(setup: &SetupData, name_of: impl Fn(&str) -> Option<String>) ->
         out.push(BodyModel {
             body: body.clone(),
             name,
+            role,
         });
     }
     out
@@ -1418,7 +1458,8 @@ pub fn job(
             .map(|m| m.name.clone())
     };
     let mut camcraft = Setup::new(name);
-    camcraft.models = models.iter().map(|m| m.name.clone()).collect();
+    let named = |role: Role| models.iter().filter(move |m| m.role == role);
+    camcraft.models = named(Role::Part).map(|m| m.name.clone()).collect();
     camcraft.stocks = vec!["stock".into()];
     camcraft.wcs = setup
         .wcs
@@ -1467,7 +1508,12 @@ pub fn job(
             .collect(),
         stocks: vec![StockDef {
             name: "stock".into(),
-            spec: setup.stock_spec(),
+            spec: match named(Role::Stock).next() {
+                Some(m) => StockSpec::Solid {
+                    model: m.name.clone(),
+                },
+                None => setup.stock_spec(),
+            },
         }],
         setups: vec![camcraft],
         ..Job::default()
@@ -1512,6 +1558,36 @@ mod tests {
         setup.stock_from = Some("s1".into());
         assert_eq!(SetupData::from(&setup.to_value()).unwrap(), setup);
         assert_eq!(setup.to_value()["stock"], "earlier");
+    }
+
+    /// A body that is the stock is a model of the job, its stock a solid
+    /// of it, and not one of the models the setup machines.
+    #[test]
+    fn a_body_as_the_stock_is_a_solid_of_the_job() {
+        let mut setup = SetupData::new(vec!["b1".into()], "grbl", 0.05);
+        setup.stock = StockKind::Solid;
+        assert!(setup.problem().unwrap().contains("Pick the body"));
+        setup.stock_body = Some("b1".into());
+        assert!(setup.problem().unwrap().contains("one the setup machines"));
+        setup.stock_body = Some("b2".into());
+        assert_eq!(setup.problem(), None);
+        assert_eq!(SetupData::from(&setup.to_value()).unwrap(), setup);
+        let models = models_of(&setup, |b| {
+            Some(if b == "b1" { "Part" } else { "Casting" }.into())
+        });
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[1].role, Role::Stock);
+        let job = job("Setup 1", &setup, &models, &[]);
+        assert_eq!(job.setups[0].models, ["Part"]);
+        assert_eq!(job.models.len(), 2);
+        assert_eq!(
+            job.stocks[0].spec,
+            StockSpec::Solid {
+                model: "Casting".into()
+            }
+        );
+        let text = camcraft_session::job_text(&job).unwrap();
+        assert_eq!(camcraft_session::parse_job(&text, "test").unwrap(), job);
     }
 
     #[test]

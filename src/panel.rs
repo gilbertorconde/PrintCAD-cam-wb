@@ -566,6 +566,16 @@ fn machining(run: &Run) -> Widget {
     }
 }
 
+/// The document's bodies `setup` does not machine, by id and name: those
+/// its stock may be.
+fn other_bodies(setup: &SetupData) -> Vec<(String, String)> {
+    host::bodies()
+        .into_iter()
+        .filter(|b| !setup.bodies.contains(&b.id))
+        .map(|b| (b.id, b.name))
+        .collect()
+}
+
 /// The setups before setup `id` in the document, by id and name: those its
 /// stock may carry on from.
 fn earlier_setups(id: &str) -> Vec<(String, String)> {
@@ -642,15 +652,36 @@ pub fn setup_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
             "A box of a fixed size".into(),
             "Cylinder".into(),
             "From an earlier setup".into(),
+            "A body (from solid)".into(),
         ],
         match setup.stock {
             StockKind::Around => 0,
             StockKind::Fixed => 1,
             StockKind::Cylinder => 2,
             StockKind::Earlier => 3,
+            StockKind::Solid => 4,
         },
     )];
     match setup.stock {
+        StockKind::Solid => {
+            let others = other_bodies(&setup);
+            let mut names = vec!["Choose a body".to_string()];
+            names.extend(others.iter().map(|(_, name)| name.clone()));
+            let chosen = setup
+                .stock_body
+                .as_ref()
+                .and_then(|b| others.iter().position(|(o, _)| o == b))
+                .map_or(0, |i| i + 1);
+            stock.push(choice("stock_body", "Body", names, chosen));
+            stock.push(Widget::Text {
+                text: "A body of the document that is the stock: a casting, a blank cut \
+                       before, a printed part. Its material is what the setup starts from, \
+                       each column of it from its lowest to its highest along the tool; it \
+                       is not machined, and a work zero on the stock is on its box."
+                    .into(),
+                mono: false,
+            });
+        }
         StockKind::Earlier => {
             let earlier = earlier_setups(id);
             let mut names = vec!["The setup before".to_string()];
@@ -1150,8 +1181,15 @@ pub fn setup_event(cam: &mut Cam, id: &str, event: PanelEvent) {
                         1 => StockKind::Fixed,
                         2 => StockKind::Cylinder,
                         3 => StockKind::Earlier,
+                        4 => StockKind::Solid,
                         _ => StockKind::Around,
                     }
+                }
+                "stock_body" => {
+                    setup.stock_body = index
+                        .checked_sub(1)
+                        .and_then(|i| other_bodies(&setup).into_iter().nth(i))
+                        .map(|(b, _)| b);
                 }
                 "stock_from" => {
                     setup.stock_from = index

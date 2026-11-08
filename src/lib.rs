@@ -1219,19 +1219,21 @@ impl Cam {
             State::Failed(e) => return Err(e.clone()),
         };
         let bodies = host::bodies();
+        let name_of = |b: &String| {
+            bodies
+                .iter()
+                .find(|x| &x.id == b)
+                .map_or_else(|| b.clone(), |x| x.name.clone())
+        };
         let html = sheet::Sheet {
             name: &node.name,
             setup: &data,
-            bodies: data
-                .bodies
-                .iter()
-                .map(|b| {
-                    bodies
-                        .iter()
-                        .find(|x| &x.id == b)
-                        .map_or_else(|| b.clone(), |x| x.name.clone())
-                })
-                .collect(),
+            stock_body: data
+                .stock_body
+                .as_ref()
+                .filter(|_| data.stock == StockKind::Solid)
+                .map(name_of),
+            bodies: data.bodies.iter().map(name_of).collect(),
             run,
             carried_from: source_of(&setup, &data)
                 .and_then(Result::ok)
@@ -1351,7 +1353,8 @@ impl Bench for Cam {
                             false,
                             "box (round the bodies, the default), fixed-box or cylinder; or \
                              {from = \"previous\"}, what the setup before it leaves, or \
-                             {from = <a setup's name>}, what that earlier one leaves",
+                             {from = <a setup's name>}, what that earlier one leaves; or \
+                             {solid = <a body id>}, a body that is the stock, not machined",
                         ),
                         param(
                             "size",
@@ -2149,20 +2152,32 @@ impl Bench for Cam {
         let number = |key: &str| args.get(key).and_then(Value::as_f64);
         match suffix(command).unwrap_or_default() {
             SETUP => {
-                let bodies = match args.get("bodies") {
+                let bodies: Vec<String> = match args.get("bodies") {
                     Some(list) => serde_json::from_value(list.clone())
                         .map_err(|_| "bodies is a list of body ids")?,
                     None => self.chosen_bodies(),
                 };
                 // Read before the setup is made, so a wrong one makes none.
                 let mut stock_from = None;
+                let mut stock_body = None;
                 let stock = match args.get("stock") {
                     None => None,
-                    Some(Value::Object(o)) => {
-                        let from = o
-                            .get("from")
+                    Some(Value::Object(o)) if o.contains_key("solid") => {
+                        let body = o
+                            .get("solid")
                             .and_then(Value::as_str)
-                            .ok_or("stock is a kind, or {from = \"previous\"} or a setup's name")?;
+                            .ok_or("stock = {solid = <a body id>}")?;
+                        if !host::bodies().iter().any(|b| b.id == body) {
+                            return Err(format!("no body '{body}' for the stock"));
+                        }
+                        stock_body = Some(body.to_string());
+                        Some(StockKind::Solid)
+                    }
+                    Some(Value::Object(o)) => {
+                        let from = o.get("from").and_then(Value::as_str).ok_or(
+                            "stock is a kind, {from = \"previous\"} or a setup's name, or \
+                             {solid = <a body id>}",
+                        )?;
                         if from != "previous" {
                             let (n, _) = setups()
                                 .into_iter()
@@ -2186,6 +2201,11 @@ impl Bench for Cam {
                         }
                     },
                 };
+                // The stock's body is not machined, though it is shown.
+                let bodies: Vec<String> = bodies
+                    .into_iter()
+                    .filter(|b| stock_body.as_ref() != Some(b))
+                    .collect();
                 let size: Option<[f64; 3]> = match args.get("size") {
                     Some(v) => Some(
                         serde_json::from_value(v.clone()).map_err(|_| "size is {x, y, z} in mm")?,
@@ -2333,6 +2353,7 @@ impl Bench for Cam {
                     if let Some(kind) = stock {
                         data.stock = kind;
                         data.stock_from = stock_from;
+                        data.stock_body = stock_body;
                     }
                     if let Some([x, y, z]) = size {
                         (data.size_x, data.size_y, data.size_z) = (x, y, z);

@@ -82,6 +82,14 @@ pub fn run_setup_from(
     let bodies: Bodies<'_> = models.iter().map(|(n, m)| (*n, &m.body)).collect();
     progress(Stage::Preparing);
     let prepared = prepare_from(job, index, &bodies, carried)?;
+    if prepared.solid.is_some()
+        && let Some(def) = setup.stocks.first().and_then(|s| job.stock(s))
+    {
+        notes.push(format!(
+            "stock: the solid '{}', as it is",
+            def.spec.models().join("', '")
+        ));
+    }
     let result = run_prepared_planned(job, index, &prepared, &bodies, plans, progress)?;
     notes.extend(summary(&result));
 

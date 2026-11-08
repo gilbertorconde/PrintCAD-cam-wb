@@ -201,8 +201,13 @@ pub(super) fn run_operation(
     }
     // A pattern of a strategy the material steers is worked out copy by
     // copy, each against the material where it is.
-    // So is an adaptive clearing that rest machines, alone the one copy.
-    let rests = matches!(op.strategy, StrategySpec::Adaptive { rest: Some(_), .. });
+    // So is an adaptive clearing that rest machines, alone the one copy, or
+    // that starts from material of a shape of its own, which its blocks are
+    // only the box round.
+    let rests = match op.strategy {
+        StrategySpec::Adaptive { rest, .. } => rest.is_some() || work.prepared.starts_shaped(),
+        _ => false,
+    };
     let copied = if op.transform.repeats() || rests {
         each_copy(work, limit, stock, &mut warnings)?
     } else {

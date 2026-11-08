@@ -114,13 +114,13 @@ pub fn run_prepared_planned(
     let sim_pitch = round.map_or(sim_pitch, |r| round_pitch(&r, sim_pitch));
     let blocks = &prepared.stocks;
     // What an earlier setup left, carried into this frame, when it carries on
-    // from one; else its blocks, fresh, on the rotary when it is on one.
-    let fresh = || match (&prepared.carried, round) {
-        (Some((left, carry)), _) => left.carried(carry, all, ctx.stock_bottom - 1.0, sim_pitch),
-        (None, Some(round)) => {
+    // from one; its solid, when it starts from one; else its blocks, fresh,
+    // on the rotary when it is on one.
+    let fresh = || match round {
+        Some(round) if !prepared.starts_shaped() => {
             Stock::from_blocks(blocks, ctx.stock_bottom - 1.0, sim_pitch)?.rounded(round)
         }
-        (None, None) => Stock::from_blocks(blocks, ctx.stock_bottom - 1.0, sim_pitch),
+        _ => prepared.fresh_stock(ctx.stock_bottom - 1.0, sim_pitch),
     };
     let mut stock = fresh()?;
     // The part's top on the simulator's grid: what the tool above its flutes

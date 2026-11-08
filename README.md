@@ -55,6 +55,17 @@ panels, the drawing and the helper that runs camcraft.
   from its bottom up to its top, so turned over it is the same material;
   seen from the side, or tilted, a pocket hidden inside the material along
   the new tool axis is taken as material, never the other way round.
+- **Stock from a body,** as Fusion's "From solid": a setup's stock can be a
+  body of the document, a casting, a blank cut before or a printed part
+  near its net shape. It is not machined: the setup starts from its
+  material as the setup sees it, each column from the lowest the body
+  comes over it to the highest along the tool, so a pocket cast open from
+  above is air and roughing does not cut it again (adaptive clearing
+  clears what stands, not the box round it); one hidden inside the
+  material, out of the tool's reach, is taken as material. Its box is the
+  stock's, which a work zero on the stock is placed on. The checks, the
+  simulation, playback and the times start from it, and the setup sheet
+  names the body.
 - **Tilted setups (3+2).** A setup's tool axis can be any direction: out of
   a flat face picked on the part, along a straight edge picked on it (either
   way), the document's Z tilted by angles about its X and then its Y, or a
@@ -610,6 +621,7 @@ local disc = cam.setup{bodies = {"<body id>"}, stock = "cylinder", axis = "tool"
 local side = cam.setup{bodies = {"<body id>"}, tool_axis = "-y", machine_x = "+x"}
 local placed = cam.setup{bodies = {"<body id>"}, post = "linuxcnc", wcs = "G59.1",
                         work_offset = {x = 250, y = -180, z = -95}}  -- in machine coordinates
+local cast = cam.setup{bodies = {"<body id>"}, stock = {solid = "<casting's body id>"}}
 local tilted = cam.setup{bodies = {"<body id>"}, tilt = {x = 30, y = 0}}
 local rotary = cam.setup{bodies = {"<body id>"}, stock = "cylinder", axis = "x",
                          post = "my-4-axis", wrap = {diameter = 40}}  -- or wrap = true
