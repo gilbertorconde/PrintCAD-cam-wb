@@ -252,6 +252,29 @@ panels, the drawing and the helper that runs camcraft.
   probe is a kind of its own, its ball's diameter, which only a probe
   operation takes. A setup takes a copy of a tool when an operation first cuts with it, so a document never
   depends on the machine it is opened on.
+- **Templates,** as Fusion's: a setup, or some of its operations, kept to
+  make again on another part. A template keeps the setup's stock, work
+  zero, orientation, post, tolerance and programs, and each operation's
+  strategy, tool, heights, linking, passes and pattern; not the bodies,
+  what is picked on them, or probe results. Save as template is in a
+  setup's and an operation's menu in the tree, and in a setup's Templates
+  group, which also applies one: its operations added after the setup's
+  own, and its stock, work zero and post taken too when asked (asked
+  already for a setup with no operations). Setup from template on the
+  toolbar makes a setup on the selected body, or every shown one, with
+  that group first. An operation that cut what was picked waits for a
+  pick on the new part, its badge saying "Needs a pick" and what, unless
+  its template fills it by a rule: its boundary or outline the part's
+  silhouette, or every hole of a diameter, which a hole operation taking
+  every hole as wide as one picked keeps as the picked hole's. Each tool
+  is the setup's, another setup's or the library's with the same number,
+  kind and size (diameter, corner, angle), else one of the same size,
+  else the template's own, added. Templates are JSON files, each saying
+  its version, in the package's data folder (`templates/`), which an
+  update keeps; Export… and Import… pass them on. Two come built in:
+  aluminium with a 6 mm flat (face, adaptive rough, contour finish,
+  chamfer) and a sheet part with a 1/4" upcut (adaptive clear, profile
+  out on tabs).
 - **Status in the tree.** Each setup and operation shows how its run went:
   running (with how far), done, warnings, failed, or out of date.
 - **Turned off.** An operation, or a whole setup, can be turned off without
@@ -525,6 +548,11 @@ cam.add_post{text = profile_toml}       -- a machine profile of your own
 local program = cam.gcode{id = setup.feature}  -- the setup's; an operation's id gives it too
 local own = cam.gcode{id = each_op}             -- one program an operation: the operation's
 local sheet = cam.setup_sheet{id = setup.feature}  -- its setup sheet, as HTML
+cam.save_template{setup = setup.feature, name = "Plate", fill = {["pocket 1"] = "silhouette"}}
+                                        -- or operations = {ids}; fill: pick, {holes = 6.8}
+local made = cam.apply_template{template = "Plate", bodies = {"<other body id>"}}
+                                        -- or setup = <id>: its operations appended
+cam.templates{}                         -- built in and saved, with each operation's fill
 ```
 
 ## How it works

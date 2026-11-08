@@ -33,6 +33,7 @@ mod runs;
 mod session;
 mod sheet;
 mod sketches;
+mod templates;
 mod tools;
 
 use std::collections::BTreeMap;
@@ -62,6 +63,8 @@ const EDIT: &str = "edit";
 const ADD_OPERATION: &str = "add_operation";
 const TURN_OFF: &str = "turn_off";
 const TURN_ON: &str = "turn_on";
+const FROM_TEMPLATE: &str = "from_template";
+const SAVE_AS_TEMPLATE: &str = "save_as_template";
 
 const SETUP: &str = "setup";
 const OPERATION: &str = "operation";
@@ -73,6 +76,10 @@ const STATUS: &str = "status";
 const GCODE: &str = "gcode";
 const ENABLE: &str = "enable";
 const SETUP_SHEET: &str = "setup_sheet";
+const SAVE_TEMPLATE: &str = "save_template";
+const APPLY_TEMPLATE: &str = "apply_template";
+const TEMPLATES: &str = "templates";
+const DELETE_TEMPLATE: &str = "delete_template";
 
 /// The package's id for `suffix`.
 fn id(suffix: &str) -> String {
@@ -184,6 +191,13 @@ struct Cam {
     /// Setups to check for changes once the [`LATER`] job under way ends:
     /// every setup when `None`.
     later: Option<(u64, Option<Vec<String>>)>,
+    /// The templates, built in and the user's, read once
+    /// ([`Cam::templates`]), with each file that does not read.
+    templates: std::cell::RefCell<Option<templates::Shelf>>,
+    /// The template file jobs under way, and what each does.
+    template_jobs: std::cell::RefCell<Vec<(u64, templates::Work)>>,
+    /// What the setup panel's Templates group has chosen.
+    template_ui: templates::Ui,
 }
 
 /// A job that does nothing, so its end comes as an event printCAD gives
@@ -929,10 +943,16 @@ impl Cam {
     /// cannot be looked up then: the run says which of its operations this
     /// is.
     fn status_of(&self, node: &Node) -> FeatureStatus {
-        let off = if node.kind == SETUP_KIND {
-            SetupData::from(&node.data).is_some_and(|d| !d.enabled)
-        } else {
-            OperationData::from(&node.data).is_some_and(|d| !d.operation.enabled)
+        // An operation's data read once: a big one takes a while.
+        let op_data = (node.kind != SETUP_KIND)
+            .then(|| OperationData::from(&node.data))
+            .flatten();
+        let off = match &op_data {
+            None if node.kind == SETUP_KIND => {
+                SetupData::from(&node.data).is_some_and(|d| !d.enabled)
+            }
+            None => false,
+            Some(d) => !d.operation.enabled,
         };
         if off {
             return status(
@@ -940,11 +960,14 @@ impl Cam {
                 "Turned off: not run, simulated, checked or posted",
             );
         }
+        // Made from a template, it waits for its picks on this part.
+        if let Some(what) = op_data.as_ref().and_then(|d| d.waits_for_pick()) {
+            return status(FeatureState::Warnings, &format!("Needs a pick: {what}"));
+        }
         let (setup, op) = if node.kind == SETUP_KIND {
             (Some(node.id.clone()), None)
         } else {
-            let setup = OperationData::from(&node.data).and_then(|d| d.setup);
-            (setup, Some(node.id.as_str()))
+            (op_data.and_then(|d| d.setup), Some(node.id.as_str()))
         };
         match setup.and_then(|s| self.runs.get(&s)) {
             Some(computed) => computed_status(computed, op),
@@ -1061,6 +1084,10 @@ impl Cam {
         });
         self.hint = None;
         self.chosen_body = None;
+        self.template_ui.first = false;
+        self.template_ui.name = None;
+        self.template_ui.rules = None;
+        self.load_templates();
         self.refresh_for(id, false);
         if let Some(setup) = self.setup_of(id) {
             self.find_lines(&setup);
@@ -1298,6 +1325,7 @@ impl Bench for Cam {
                 tool(NEW_SETUP, "New setup", "setup"),
                 tool(NEW_OPERATION, "New operation", "operation"),
                 tool(GENERATE, "Generate", "generate"),
+                tool(FROM_TEMPLATE, "Setup from template", "template"),
             ],
             commands: vec![
                 Command {
@@ -1558,8 +1586,8 @@ impl Bench for Cam {
                             ParamKind::Any,
                             false,
                             "drill, bore, circular, thread: {same_diameter: boolean, every \
-                             hole as wide as one picked; order: nearest|x-then-y|as-picked \
-                             (nearest)}",
+                             hole as wide as one picked; diameter: mm, every hole that wide, \
+                             picked or not; order: nearest|x-then-y|as-picked (nearest)}",
                         ),
                         param(
                             "conventional",
@@ -1793,6 +1821,137 @@ impl Bench for Cam {
                     ],
                     read_only: true,
                     see_also: vec![id(GCODE), id(STATUS)],
+                    ..Default::default()
+                },
+                Command {
+                    id: id(SAVE_TEMPLATE),
+                    summary: "Keep a setup, or some of its operations, as a template to make \
+                              again on other parts"
+                        .into(),
+                    params: vec![
+                        param("name", ParamKind::String, true, "the template's name"),
+                        param(
+                            "setup",
+                            ParamKind::Id,
+                            false,
+                            "the setup: its rules and every operation",
+                        ),
+                        param(
+                            "operations",
+                            ParamKind::List,
+                            false,
+                            "operation ids, all of one setup: those alone, without the \
+                             setup's rules",
+                        ),
+                        param(
+                            "whole",
+                            ParamKind::Bool,
+                            false,
+                            "keep the setup's rules too (true for a setup, false for \
+                             operations)",
+                        ),
+                        param("description", ParamKind::String, false, "a line about it"),
+                        param(
+                            "fill",
+                            ParamKind::Any,
+                            false,
+                            "{<operation name> = nothing|pick|silhouette|{holes = mm}}: how \
+                             each is filled on the next part; as it picks unless given",
+                        ),
+                        param(
+                            "replace",
+                            ParamKind::Bool,
+                            false,
+                            "replace a template of that name; refused otherwise",
+                        ),
+                    ],
+                    returns: "{name, file, replaced, operations = [{name, fill}], text}".into(),
+                    notes: vec![
+                        "A template keeps the setup's stock, work zero, orientation, post, \
+                         tolerance and programs, and each operation's strategy, tool, \
+                         heights, linking, passes and pattern; not its bodies, what is \
+                         picked on them, or its probe results. It is a JSON file in the \
+                         package's data folder (templates/), which says its version."
+                            .into(),
+                        "An operation that cuts what is picked waits for a pick on the next \
+                         part (pick), unless filled by a rule: silhouette makes its boundary \
+                         or outline the part's silhouette; {holes = 6.8} takes every hole \
+                         6.8 mm across along the tool. A hole operation taking every hole as \
+                         wide as one picked keeps that hole's diameter as its rule."
+                            .into(),
+                    ],
+                    see_also: vec![id(APPLY_TEMPLATE), id(TEMPLATES)],
+                    ..Default::default()
+                },
+                Command {
+                    id: id(APPLY_TEMPLATE),
+                    summary: "Make a setup from a template on bodies, or add a template's \
+                              operations to a setup"
+                        .into(),
+                    params: vec![
+                        param(
+                            "template",
+                            ParamKind::String,
+                            false,
+                            "a template's name, built in or saved",
+                        ),
+                        param(
+                            "text",
+                            ParamKind::String,
+                            false,
+                            "a template file's text, instead of a name",
+                        ),
+                        param(
+                            "bodies",
+                            ParamKind::List,
+                            false,
+                            "body ids for a new setup; every shown body when neither this \
+                             nor setup is given",
+                        ),
+                        param(
+                            "setup",
+                            ParamKind::Id,
+                            false,
+                            "a setup to add the operations to, after its own",
+                        ),
+                        param(
+                            "rules",
+                            ParamKind::Bool,
+                            false,
+                            "with setup: take the template's stock, work zero and post too \
+                             (false)",
+                        ),
+                        param("name", ParamKind::String, false, "a new setup's name"),
+                    ],
+                    returns: "{setup, operations, tools = [{template, as, from = \
+                              setup|document|library|template}], needs_pick}"
+                        .into(),
+                    notes: vec![
+                        "Each tool is the setup's, another setup's or the library's with \
+                         the same number, kind, diameter, corner and angle, else one of the \
+                         same shape, else the template's own, added. An operation in \
+                         needs_pick does not run until something is picked for it."
+                            .into(),
+                    ],
+                    see_also: vec![id(SAVE_TEMPLATE), id(TEMPLATES), id(STATUS)],
+                    ..Default::default()
+                },
+                Command {
+                    id: id(TEMPLATES),
+                    summary: "The templates, built in and saved".into(),
+                    returns: "a list of {name, built_in, file?, description, setup, \
+                              operations = [{name, strategy, tool, fill}]}"
+                        .into(),
+                    read_only: true,
+                    see_also: vec![id(APPLY_TEMPLATE)],
+                    ..Default::default()
+                },
+                Command {
+                    id: id(DELETE_TEMPLATE),
+                    summary: "Delete a saved template".into(),
+                    params: vec![param("name", ParamKind::String, true, "its name")],
+                    returns: "{deleted}".into(),
+                    see_also: vec![id(TEMPLATES)],
                     ..Default::default()
                 },
                 Command {
@@ -2392,6 +2551,133 @@ impl Bench for Cam {
                 let id = text("id").unwrap_or_default();
                 Ok(Value::String(self.sheet_of(&id)?.1))
             }
+            SAVE_TEMPLATE => {
+                self.load_templates_now();
+                let name = text("name").ok_or("the template's name, as `name`")?;
+                let ops: Vec<String> = match args.get("operations") {
+                    Some(v) => serde_json::from_value(v.clone())
+                        .map_err(|_| "operations is a list of operation ids")?,
+                    None => Vec::new(),
+                };
+                let setup = match (text("setup"), ops.first()) {
+                    (Some(s), _) => s,
+                    (None, Some(op)) => operation_node(op)
+                        .and_then(|(_, d)| d.setup)
+                        .ok_or_else(|| format!("no operation '{op}' in a setup"))?,
+                    (None, None) => return Err("give setup, or operations".into()),
+                };
+                if let Some(bad) = ops.iter().find(|o| {
+                    operation_node(o).and_then(|(_, d)| d.setup).as_deref() != Some(&setup)
+                }) {
+                    return Err(format!("'{bad}' is no operation of that setup"));
+                }
+                let whole = args
+                    .get("whole")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(ops.is_empty());
+                let mut fills = BTreeMap::new();
+                if let Some(given) = args.get("fill") {
+                    let given = given
+                        .as_object()
+                        .ok_or("fill: {<operation name> = a rule}")?;
+                    for (op, rule) in given {
+                        fills.insert(
+                            op.clone(),
+                            templates::Fill::named(rule).map_err(|e| format!("fill.{op}: {e}"))?,
+                        );
+                    }
+                }
+                let t = self.template_of(
+                    &name,
+                    &text("description").unwrap_or_default(),
+                    &setup,
+                    &ops,
+                    whole,
+                    &fills,
+                )?;
+                if let Some(unknown) = fills
+                    .keys()
+                    .find(|n| !t.operations.iter().any(|o| &o.name == *n))
+                {
+                    return Err(format!("fill: no operation '{unknown}' kept"));
+                }
+                let replace = args
+                    .get("replace")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let (file, replaced) = self.keep_template(&t, replace)?;
+                Ok(json!({
+                    "name": t.name,
+                    "file": file,
+                    "replaced": replaced,
+                    "operations": t.operations.iter().map(|o| json!({
+                        "name": o.name,
+                        "fill": o.fill,
+                    })).collect::<Vec<_>>(),
+                    "text": templates::text_of(&t),
+                }))
+            }
+            APPLY_TEMPLATE => {
+                self.load_templates_now();
+                let t = match (text("template"), text("text")) {
+                    (Some(name), _) => self.template_named(&name)?,
+                    (None, Some(t)) => templates::parse(&t).map_err(|e| format!("text: {e}"))?,
+                    (None, None) => return Err("give template, a name, or text".into()),
+                };
+                let target = match text("setup") {
+                    Some(id) => {
+                        setup_node(&id).ok_or("no such setup")?;
+                        templates::Target::Setup {
+                            id,
+                            rules: args.get("rules").and_then(Value::as_bool).unwrap_or(false),
+                        }
+                    }
+                    None => templates::Target::New {
+                        bodies: match args.get("bodies") {
+                            Some(list) => serde_json::from_value(list.clone())
+                                .map_err(|_| "bodies is a list of body ids")?,
+                            None => self.chosen_bodies(),
+                        },
+                        name: text("name"),
+                    },
+                };
+                Ok(self.apply_template(&t, target)?.value())
+            }
+            TEMPLATES => Ok(Value::Array({
+                self.load_templates_now();
+                self.templates()
+                    .0
+                    .iter()
+                    .map(|k| {
+                        json!({
+                            "name": k.template.name,
+                            "built_in": k.file.is_none(),
+                            "file": k.file,
+                            "description": k.template.description,
+                            "setup": k.template.setup.is_some(),
+                            "operations": k.template.operations.iter().map(|o| json!({
+                                "name": o.name,
+                                "strategy": strategy_word(&o.data.strategy()),
+                                "tool": o.data.operation.tool,
+                                "fill": o.fill,
+                            })).collect::<Vec<_>>(),
+                        })
+                    })
+                    .collect()
+            })),
+            DELETE_TEMPLATE => {
+                self.load_templates_now();
+                let name = text("name").ok_or("the template's name, as `name`")?;
+                let all = self.templates();
+                let kept = all
+                    .0
+                    .iter()
+                    .find(|k| k.template.name == name)
+                    .ok_or_else(|| format!("no template '{name}'"))?;
+                let file = kept.file.as_deref().ok_or("a built-in template stays")?;
+                self.drop_template(file);
+                Ok(json!({ "deleted": name }))
+            }
             _ => Err(format!("no command `{command}`")),
         }
     }
@@ -2436,6 +2722,18 @@ impl Bench for Cam {
                         }
                     }
                     Some(GENERATE) => self.refresh_all(true),
+                    // A setup to apply a template to, its Templates group
+                    // first and open.
+                    Some(FROM_TEMPLATE) => match self.make_setup(self.chosen_bodies(), None) {
+                        Ok(id) => {
+                            host::request(Request::JournalLabel {
+                                label: "Setup from template".into(),
+                            });
+                            self.open(&id, true);
+                            self.template_ui.first = true;
+                        }
+                        Err(e) => host::error(&format!("No setup: {e}")),
+                    },
                     _ => return false,
                 }
                 true
@@ -2458,6 +2756,11 @@ impl Bench for Cam {
                 target,
                 before,
             } => self.move_operation(feature, target, *before),
+            Event::FileOpened { id, files } if id == templates::OPEN_TEMPLATE => {
+                self.hint = Some(templates::imported(self, files));
+                host::redraw();
+                true
+            }
             Event::FileOpened { id, files } => {
                 if let Some(setup) = id.strip_prefix(tools::OPEN_PROBE) {
                     let Some(f) = files.first() else {
@@ -2506,6 +2809,10 @@ impl Bench for Cam {
                         }
                     }
                 });
+                true
+            }
+            Event::JobFinished { job, result } if self.template_job_finished(*job, result) => {
+                host::redraw();
                 true
             }
             Event::JobFinished { job, result } => {
@@ -2661,11 +2968,25 @@ impl Bench for Cam {
                 item(ADD_OPERATION, "Add operation", "operation"),
                 item(GENERATE, "Generate", "generate"),
                 toggle(f, "setup", "setup"),
+                MenuItem {
+                    hint: Some(
+                        "Keep its stock, work zero, post and operations, not its picks, to \
+                         make again on another part"
+                            .into(),
+                    ),
+                    separator_before: true,
+                    ..item(SAVE_AS_TEMPLATE, "Save as template", "template")
+                },
             ],
             MenuScope::TreeFeature(f) if operation_node(f).is_some() => vec![
                 item(EDIT, "Edit operation", "operation"),
                 item(GENERATE, "Generate its setup", "generate"),
                 toggle(f, "operation", "operation"),
+                MenuItem {
+                    hint: Some("Keep it, not its picks, to add to another setup".into()),
+                    separator_before: true,
+                    ..item(SAVE_AS_TEMPLATE, "Save as template", "template")
+                },
             ],
             _ => Vec::new(),
         })
@@ -2690,6 +3011,10 @@ impl Bench for Cam {
                     Err(e) => host::error(&e),
                 }
             }
+            Some(SAVE_AS_TEMPLATE) => match self.save_from_tree(feature) {
+                Ok(said) => host::info(&said),
+                Err(e) => host::error(&format!("Not saved as a template: {e}")),
+            },
             Some(ADD_OPERATION) => {
                 let strategy = STRATEGIES
                     .get(self.new_strategy)
@@ -2722,6 +3047,10 @@ impl Bench for Cam {
     fn job(entry: &str, input: &str) -> Result<String, String> {
         if entry == LATER {
             return Ok(String::new());
+        }
+        if entry == templates::JOB {
+            let work = serde_json::from_str(input).map_err(|e| e.to_string())?;
+            return templates::work(std::path::Path::new(templates::DIR), &work);
         }
         if entry != JOB {
             return Err(format!("no job `{entry}`"));
