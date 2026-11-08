@@ -29,6 +29,20 @@ use super::{Axis, CellRect, Stock, StockError, SweptTool};
 /// parallel.
 const PARALLEL_CELLS: usize = 20_000;
 
+/// Where one stamp of a tool is, on a rotary: along the bar, round it and
+/// out from its axis, and the first and last cell along it reaches.
+struct Stamp {
+    along: f64,
+    at: f64,
+    r0: f64,
+    a0: u32,
+    a1: u32,
+}
+
+/// The cells of a row round the bar that stamps lowered: each one's place
+/// along it, what is left, and the most one stamp took.
+type Lowered = Vec<(u32, f64, f64)>;
+
 /// How a stock's grid goes round a rotary's axis.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Round {
@@ -108,22 +122,31 @@ impl Stock {
         tool: &T,
         round: Round,
     ) -> (f64, Option<CellRect>) {
+        self.stamp_round_all(&[tip], tool, round)
+    }
+
+    /// [`Stock::stamp_round`] at each of `tips` in turn, as one: the same
+    /// cells lowered as far, how far the deepest was cut by any one of them.
+    ///
+    /// Each column is cut by the tips in order, and by nothing but its own
+    /// height and theirs, so the rows round the bar are worked out apart: in
+    /// parallel, where a move's stamps cover many cells between them, as a
+    /// long pass's do. Stamped one at a time, each covers too few to share
+    /// out, and a pass on a rotary is all stamps.
+    pub(super) fn stamp_round_all<T: SweptTool>(
+        &mut self,
+        tips: &[DVec3],
+        tool: &T,
+        round: Round,
+    ) -> (f64, Option<CellRect>) {
         let rt = tool.max_radius();
         let pitch = self.field.pitch();
         let Some(turn) = cells_round(&round, pitch) else {
             return (0.0, None);
         };
-        if !tip.is_finite() || !rt.is_finite() || rt <= 0.0 {
+        if !rt.is_finite() || rt <= 0.0 {
             return (0.0, None);
         }
-        let (along, at, r0) = round.split(tip);
-        // How far round a column can be and still meet the tool: its side is
-        // `rt` across, and nothing it touches is nearer the axis than its tip.
-        let reach = if r0 > rt * 1e-3 {
-            (rt / r0).atan().min(FRAC_PI_2)
-        } else {
-            FRAC_PI_2
-        };
         let origin = self.field.origin();
         let na = match round.round {
             Axis::X => self.field.ny(),
@@ -133,106 +156,181 @@ impl Stock {
             Axis::X => (origin.y, origin.x),
             _ => (origin.x, origin.y),
         };
-        let a0 = cell_index(((along - rt - oa) / pitch).floor(), na);
-        let a1 = cell_index(((along + rt - oa) / pitch).ceil(), na);
-        let span = reach * round.radius;
-        let k0 = ((at - span - or) / pitch).floor();
-        let k1 = ((at + span - or) / pitch).ceil();
-        if !k0.is_finite() || !k1.is_finite() {
-            return (0.0, None);
-        }
-        // Never more than a turn: a column is one ray, whichever way round.
-        let k1 = k1.min(k0 + f64::from(turn) - 1.0);
-        let floor = self.floor;
-        // Each row round worked out on its own, from the field as it was,
-        // in parallel where there are many cells, then written.
-        let rows: Vec<f64> = {
-            let mut v = Vec::new();
+        // Each tip's place, and the cells along and the rows round it reaches.
+        let mut stamps: Vec<Stamp> = Vec::with_capacity(tips.len());
+        // Each row of a turn: the stamps that reach it, in order, and the row
+        // round from the first each is, unwrapped.
+        let mut rows: Vec<Vec<(u32, f64)>> = Vec::new();
+        let mut cells = 0usize;
+        for &tip in tips {
+            if !tip.is_finite() {
+                continue;
+            }
+            let (along, at, r0) = round.split(tip);
+            // How far round a column can be and still meet the tool: its side
+            // is `rt` across, and nothing it touches is nearer the axis than
+            // its tip.
+            let reach = if r0 > rt * 1e-3 {
+                (rt / r0).atan().min(FRAC_PI_2)
+            } else {
+                FRAC_PI_2
+            };
+            let a0 = cell_index(((along - rt - oa) / pitch).floor(), na);
+            let a1 = cell_index(((along + rt - oa) / pitch).ceil(), na);
+            let span = reach * round.radius;
+            let k0 = ((at - span - or) / pitch).floor();
+            let k1 = ((at + span - or) / pitch).ceil();
+            if !k0.is_finite() || !k1.is_finite() {
+                continue;
+            }
+            // Never more than a turn: a column is one ray, whichever way round.
+            let k1 = k1.min(k0 + f64::from(turn) - 1.0);
+            let Ok(n) = u32::try_from(stamps.len()) else {
+                break;
+            };
+            if rows.is_empty() {
+                rows = vec![Vec::new(); turn as usize];
+            }
             let mut k = k0;
             while k <= k1 {
-                v.push(k);
+                // Bounded above by a turn, and wrapped into it, so the
+                // narrowing is exact.
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let ir = k.rem_euclid(f64::from(turn)) as usize;
+                if let Some(row) = rows.get_mut(ir) {
+                    row.push((n, k));
+                    cells += (a1 - a0 + 1) as usize;
+                }
                 k += 1.0;
             }
-            v
-        };
+            stamps.push(Stamp {
+                along,
+                at,
+                r0,
+                a0,
+                a1,
+            });
+        }
+        let floor = self.floor;
         let field = &self.field;
-        let row = |&k: &f64| -> Vec<(u32, u32, f64, f64)> {
-            let mut out = Vec::new();
-            let s = or + k * pitch;
-            let dth = (s - at) / round.radius;
-            let (sin, cos) = dth.sin_cos();
-            if cos <= 1e-9 {
+        // One row round: each cell along it cut by the stamps that reach it,
+        // in order, each from where the one before left it; what is left in
+        // each cell it lowered, and the most one stamp took there.
+        let row = |(ir, reaching): (u32, &Vec<(u32, f64)>)| -> Lowered {
+            let mut out: Lowered = Vec::new();
+            let (Some(lo), Some(hi)) = (
+                reaching
+                    .iter()
+                    .filter_map(|(n, _)| stamps.get(*n as usize))
+                    .map(|s| s.a0)
+                    .min(),
+                reaching
+                    .iter()
+                    .filter_map(|(n, _)| stamps.get(*n as usize))
+                    .map(|s| s.a1)
+                    .max(),
+            ) else {
                 return out;
-            }
-            // Bounded above by a turn, and wrapped into it, so the narrowing
-            // is exact.
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let ir = (k.rem_euclid(f64::from(turn))) as u32;
-            for ia in a0..=a1 {
-                let dx = oa + f64::from(ia) * pitch - along;
-                if dx.abs() > rt {
+            };
+            // Each cell's height as the stamps before left it, and the most
+            // one took; NaN until one cuts it.
+            let mut now = vec![(f64::NAN, 0.0f64); (hi - lo + 1) as usize];
+            for &(n, k) in reaching {
+                let Some(st) = stamps.get(n as usize) else {
+                    continue;
+                };
+                let s = or + k * pitch;
+                let dth = (s - st.at) / round.radius;
+                let (sin, cos) = dth.sin_cos();
+                if cos <= 1e-9 {
                     continue;
                 }
-                let (ix, iy) = match round.round {
-                    Axis::X => (ir, ia),
-                    _ => (ia, ir),
-                };
-                let Some(cur) = field.get(ix, iy) else {
-                    continue;
-                };
-                // The first point of the ray in the tool: from its tip's
-                // height up, the tool's underside rising as the ray goes out
-                // across it. Each step is no further out than the answer, so
-                // it is never past it.
-                let mut rho = r0 / cos;
-                let mut inside = true;
-                for _ in 0..12 {
-                    let d = dx.hypot(rho * sin);
-                    let Some(h) = tool.height_at(d) else {
-                        inside = false;
-                        break;
-                    };
-                    let next = (r0 + h) / cos;
-                    let done = next - rho < 1e-7;
-                    rho = next;
-                    if done {
-                        break;
+                for ia in st.a0..=st.a1 {
+                    let dx = oa + f64::from(ia) * pitch - st.along;
+                    if dx.abs() > rt {
+                        continue;
                     }
+                    let Some(slot) = now.get_mut((ia - lo) as usize) else {
+                        continue;
+                    };
+                    let cur = if slot.0.is_nan() {
+                        let (ix, iy) = match round.round {
+                            Axis::X => (ir, ia),
+                            _ => (ia, ir),
+                        };
+                        match field.get(ix, iy) {
+                            Some(h) => h,
+                            None => continue,
+                        }
+                    } else {
+                        slot.0
+                    };
+                    // The first point of the ray in the tool: from its tip's
+                    // height up, the tool's underside rising as the ray goes
+                    // out across it. Each step is no further out than the
+                    // answer, so it is never past it.
+                    let mut rho = st.r0 / cos;
+                    let mut inside = true;
+                    for _ in 0..12 {
+                        let d = dx.hypot(rho * sin);
+                        let Some(h) = tool.height_at(d) else {
+                            inside = false;
+                            break;
+                        };
+                        let next = (st.r0 + h) / cos;
+                        let done = next - rho < 1e-7;
+                        rho = next;
+                        if done {
+                            break;
+                        }
+                    }
+                    if !inside || rho >= cur {
+                        continue;
+                    }
+                    // Out past where the ray leaves the tool's side, the
+                    // material is beside the tool, not under it.
+                    if sin.abs() > 1e-12 && (rt * rt - dx * dx).max(0.0).sqrt() / sin.abs() < cur {
+                        continue;
+                    }
+                    let left = f64::from(narrow(rho.max(floor)));
+                    *slot = (left, slot.1.max(cur - left));
                 }
-                if !inside || rho >= cur {
-                    continue;
-                }
-                // Out past where the ray leaves the tool's side, the material
-                // is beside the tool, not under it.
-                if sin.abs() > 1e-12 && (rt * rt - dx * dx).max(0.0).sqrt() / sin.abs() < cur {
-                    continue;
-                }
-                let left = f64::from(narrow(rho.max(floor)));
-                out.push((ix, iy, left, cur - left));
-                // The same column again past a whole turn.
-                let again = ir + turn;
-                let (jx, jy) = match round.round {
-                    Axis::X => (again, ia),
-                    _ => (ia, again),
-                };
-                if field.get(jx, jy).is_some() {
-                    out.push((jx, jy, left, 0.0));
+            }
+            for (ia, (left, took)) in (lo..).zip(now) {
+                if !left.is_nan() {
+                    out.push((ia, left, took));
                 }
             }
             out
         };
-        let cells = rows.len() * (a1 - a0 + 1) as usize;
-        let cuts: Vec<Vec<(u32, u32, f64, f64)>> = if cells >= PARALLEL_CELLS {
-            rows.par_iter().map(row).collect()
+        let busy = (0..turn).zip(&rows).filter(|(_, r)| !r.is_empty());
+        let cuts: Vec<(u32, Lowered)> = if cells >= PARALLEL_CELLS {
+            busy.collect::<Vec<_>>()
+                .into_par_iter()
+                .map(|r| (r.0, row(r)))
+                .collect()
         } else {
-            rows.iter().map(row).collect()
+            busy.map(|r| (r.0, row(r))).collect()
         };
         let mut deepest = 0.0f64;
         let mut touched: Option<CellRect> = None;
-        for (ix, iy, left, took) in cuts.into_iter().flatten() {
-            self.field.set(ix, iy, left);
-            deepest = deepest.max(took);
-            touched = CellRect::join(touched, Some(CellRect::cell(ix, iy)));
+        let at = |ir: u32, ia: u32| match round.round {
+            Axis::X => (ir, ia),
+            _ => (ia, ir),
+        };
+        for (ir, cut) in cuts {
+            for (ia, left, took) in cut {
+                let (ix, iy) = at(ir, ia);
+                self.field.set(ix, iy, left);
+                deepest = deepest.max(took);
+                touched = CellRect::join(touched, Some(CellRect::cell(ix, iy)));
+                // The same column again past a whole turn.
+                let (jx, jy) = at(ir + turn, ia);
+                if self.field.get(jx, jy).is_some() {
+                    self.field.set(jx, jy, left);
+                    touched = CellRect::join(touched, Some(CellRect::cell(jx, jy)));
+                }
+            }
         }
         (deepest, touched)
     }
@@ -431,6 +529,37 @@ mod tests {
             },
         ];
         assert_eq!(stock.apply(&back, &tool).rapid_contacts, 1);
+    }
+
+    /// A move's stamps cut as one leave every cell as they do one by one,
+    /// back over cells an earlier stamp lowered, and say as deep and where,
+    /// whether shared out over many cells or not.
+    #[test]
+    fn stamps_as_one_are_stamps_one_by_one() {
+        let tool = Flat(1.5);
+        let tips: Vec<DVec3> = (0..400)
+            .map(|i| {
+                let t = f64::from(i) / 399.0;
+                dvec3(4.0 + 12.0 * t, 25.0 + 30.0 * t, 9.5 - 1.5 * (t * 7.0).sin())
+            })
+            .collect();
+        let round = bar().round().unwrap();
+        // Hundreds of stamps, shared out; a few, not.
+        for count in [tips.len(), 5] {
+            let mut all = bar();
+            let mut each = bar();
+            let (mut deepest, mut touched) = (0.0f64, None);
+            for &tip in tips.iter().take(count) {
+                let (d, t) = each.stamp_round(tip, &tool, round);
+                deepest = deepest.max(d);
+                touched = CellRect::join(touched, t);
+            }
+            let some: Vec<DVec3> = tips.iter().take(count).copied().collect();
+            let (d, t) = all.stamp_round_all(&some, &tool, round);
+            assert_eq!(all.field().data(), each.field().data(), "{count}");
+            assert_eq!((d, t), (deepest, touched), "{count}");
+            assert!(deepest > 0.5 && touched.is_some(), "{count}: {deepest}");
+        }
     }
 
     #[test]

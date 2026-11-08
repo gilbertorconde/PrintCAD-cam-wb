@@ -800,3 +800,188 @@ fn a_setup_of_two_vises_posts_each_part_in_its_offset() {
         "{past:?}"
     );
 }
+
+/// A rod 24 across and 40 long along Y, as triangles, `n` sides round.
+fn rod_along_y(n: u32) -> camcraft_geom::mesh::TriMesh {
+    let (r, length) = (12.0, 40.0);
+    let mut v = Vec::new();
+    for y in [0.0, length] {
+        for i in 0..n {
+            let a = std::f64::consts::TAU * f64::from(i) / f64::from(n);
+            v.push(glam::DVec3::new(r * a.sin(), y, r * a.cos()));
+        }
+    }
+    v.push(glam::DVec3::new(0.0, 0.0, 0.0));
+    v.push(glam::DVec3::new(0.0, length, 0.0));
+    let (c0, c1) = (2 * n, 2 * n + 1);
+    let mut t = Vec::new();
+    for i in 0..n {
+        let j = (i + 1) % n;
+        t.push([i, j, n + i]);
+        t.push([j, n + j, n + i]);
+        t.push([c0, i, j]);
+        t.push([c1, n + j, n + i]);
+    }
+    camcraft_geom::mesh::TriMesh::new(v, t).unwrap()
+}
+
+/// A rod along Y in a bar round it on a rotary, B turning it about Y: the
+/// bar finished down to the rod round a helix, then a line engraved round
+/// the rod half way along. Run, every check passed; posted as one program
+/// for LinuxCNC with a B, which is `linuxcnc-wrap-b.nc` among the post's
+/// golden programs, X kept at zero over the axis and B turning as it cuts
+/// in inverse time; read back to both paths; and within the B's limits.
+#[test]
+fn a_bar_along_y_is_wrapped_round_b_end_to_end() {
+    use crate::model::Model;
+    use camcraft_geom::topology::Body;
+    let text = r#"
+version = 1
+tolerance = 0.05
+
+[tools.flat-6]
+kind = "flat"
+diameter = 6.0
+number = 1
+rpm = 12000
+
+[tools.flat-2]
+kind = "flat"
+diameter = 2.0
+number = 2
+rpm = 16000
+
+[[model]]
+name = "rod"
+path = "rod"
+
+[[stock]]
+name = "bar"
+kind = "cylinder-around-models"
+axis = "y"
+margin = 1.5
+ends = 1.0
+
+[[setup]]
+name = "turned"
+models = ["rod"]
+stocks = ["bar"]
+post = "linuxcnc"
+wrap = {}
+
+[[setup.operation]]
+name = "finish"
+strategy = "parallel"
+angle = 90.0
+tool = "flat-6"
+passes = { stepover = 4.0, feed = 1200.0 }
+
+[[setup.operation]]
+name = "line"
+strategy = "engrave"
+tool = "flat-2"
+depth = 0.4
+passes = { feed = 600.0 }
+selection = { curves = [{ start = [-40.0, 20.0, 12.0], segments = [{ to = [40.0, 20.0, 12.0] }] }] }
+"#;
+    let job = parse_job(text, "wrap-b").unwrap();
+    let body = Body::derived(rod_along_y(96));
+    let model = Model {
+        bounds: body.mesh().bounds().unwrap(),
+        file: std::sync::Arc::new(body.clone()),
+        body,
+        path: "rod".into(),
+        units: "mm".into(),
+        notes: Vec::new(),
+        warnings: Vec::new(),
+    };
+    let models: crate::Models<'_> = [("rod", &model)].into_iter().collect();
+    let ran = run_setup(&job, 0, &models).unwrap();
+    assert!(ran.passed(), "{:?}", ran.checks.failure_lines());
+    let result = &ran.result;
+    let wrap = result.frame.wrap.unwrap();
+    assert_eq!(wrap.along, camcraft_sim::stock::Axis::Y);
+    assert!((wrap.radius - 13.5).abs() < 1e-6, "{wrap:?}");
+    assert_eq!(result.verify.gouged, 0);
+    // The finish comes down onto the rod, the line half a millimetre into it.
+    for (op, want) in result.operations.iter().zip([12.0, 11.6]) {
+        let lowest = op
+            .path
+            .moves()
+            .iter()
+            .map(|m| m.to.z)
+            .fold(f64::MAX, f64::min);
+        assert!(
+            (lowest - want).abs() < job.tolerance,
+            "{}: {lowest}",
+            op.name
+        );
+    }
+
+    let mut profile = load_profile("linuxcnc", None).unwrap();
+    profile.rotary =
+        Some(toml::from_str("axes = [\"B\"]\n[B]\nlimits = [-99999, 99999]\n").unwrap());
+    let setup = &job.setups[0];
+    let title = Title {
+        name: &setup.name,
+        number: setup.number,
+        date: None,
+    };
+    let joined = setup_program(setup, result, &profile, &title).unwrap();
+    let text = &joined.text;
+    assert!(text.contains("wrapped round B about Y"), "{text}");
+    assert!(text.contains("G93") && text.contains("G94"), "{text}");
+    // Over the axis, X is zero wherever the tool goes.
+    for l in text.lines().filter(|l| !l.starts_with('(')) {
+        for w in l.split_whitespace() {
+            if let Some(v) = w.strip_prefix('X') {
+                assert_eq!(v.parse::<f64>().unwrap(), 0.0, "{l}");
+            }
+        }
+    }
+    let specs = setup_specs(setup, result, &profile).unwrap();
+    let paths = setup_paths(result, &specs, &profile);
+    let sections: Vec<Section> = specs
+        .iter()
+        .zip(&paths)
+        .map(|((_, spec), path)| Section {
+            path: path.as_ref(),
+            spec,
+        })
+        .collect();
+    if let Err(p) = camcraft_post::readback::check_setup(text, &sections, &profile) {
+        panic!("does not read back: {p}\n{text}");
+    }
+    for op in &result.operations {
+        let past = travel_check(op, setup, &result.frame, &profile).past;
+        assert!(past.is_empty(), "{}: {past:?}", op.name);
+    }
+    golden(text, "linuxcnc-wrap-b");
+}
+
+/// `got` against the post's golden program `<file>.nc`, or written there
+/// with `UPDATE_GOLDEN`, as the post's own golden programs are.
+fn golden(got: &str, file: &str) {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../camcraft-post/tests/golden")
+        .join(format!("{file}.nc"));
+    if std::env::var("UPDATE_GOLDEN").is_ok() {
+        std::fs::write(&path, got).unwrap();
+        return;
+    }
+    let want = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "cannot read {}: {e}\nrun with UPDATE_GOLDEN=1 to create it",
+            path.display()
+        )
+    });
+    let want = want.replace("\r\n", "\n");
+    for (i, (a, b)) in want.lines().zip(got.lines()).enumerate() {
+        assert_eq!(a, b, "{file}.nc line {}", i + 1);
+    }
+    assert_eq!(
+        want.lines().count(),
+        got.lines().count(),
+        "{file}.nc length"
+    );
+}

@@ -121,7 +121,12 @@ panels, the drawing and the helper that runs camcraft.
   part; given a stepdown, it roughs down from the stock's top a level at a
   time first. Each point is as near the axis as the tool comes without
   meeting the part as the simulation holds it, its side as well as its
-  tip, so what it plans it verifies. The work zero is on the axis,
+  tip, so what it plans it verifies. A pass is broken where it would fall
+  down a wall (off the part's end, into a hole) at the cutting feed, and
+  each pass is entered straight down at the plunge feed and left by
+  lifting to the retract height, never staying down between passes,
+  since a link that stayed down would be measured as if the part were
+  flat. The work zero is on the axis,
   across it: Y0 Z0 (or X0 Z0), Z out from the axis. Its program moves X,
   Z and the rotary at once, each move fed in inverse time (`G93`, its own
   `F` one over its minutes along the material at the tool's tip) or,
@@ -349,8 +354,11 @@ panels, the drawing and the helper that runs camcraft.
     radially;
   - a **face mill**: its diameter at the face, its inserts' corner, and its
     lead angle from the axis (0 square, 45 a 45° mill) up its cutting
-    height. It faces and finishes flats, 95% of its flat a pass, and goes
-    off the stock by its widest;
+    height. It faces and finishes flats, 95% of its flat a pass. Facing
+    runs each pass off the stock only as far as clears its edge as deep as
+    a level cuts (its face and its lead up that depth, not its widest,
+    high up its inserts), then the pass extension, as a flat end mill runs
+    off by its radius;
   - a **lollipop** and a **slot (key) cutter**: a head, a ball or a disc its
     cutting height thick, on a neck narrower than it. They undercut, in a
     2D profile or a slot at one height (multiple depths off, the bottom

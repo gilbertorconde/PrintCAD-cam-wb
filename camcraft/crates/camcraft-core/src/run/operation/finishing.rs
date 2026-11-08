@@ -83,6 +83,7 @@ pub(super) fn rotary_paths(
         levels,
         tolerance: job.tolerance,
         feed: op.passes.feed,
+        max_cut_step: op.passes.max_cut_step,
     };
     let (path, report) = rotary_finish(&part, work.tool, &params).map_err(in_op(op))?;
     Ok((
@@ -90,6 +91,7 @@ pub(super) fn rotary_paths(
         report.passes,
         StrategyDetail::Parallel(ParallelReport {
             passes: report.passes,
+            wall_breaks: report.wall_breaks,
             ..ParallelReport::default()
         }),
     ))

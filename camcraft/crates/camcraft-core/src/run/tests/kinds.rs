@@ -5,6 +5,7 @@
 use super::*;
 use crate::job::{FaceDirection, Piece, StockSpec, ToolKind, ToolSpec};
 use crate::path::toolpath::MoveRole;
+use std::f64::consts::FRAC_1_SQRT_2;
 
 fn cuts(op: &OperationResult) -> Vec<DVec3> {
     op.path
@@ -16,8 +17,10 @@ fn cuts(op: &OperationResult) -> Vec<DVec3> {
 }
 
 /// A 45° face mill 20 mm across at its face faces the stock above the plate
-/// down to its top, its passes 95% of its flat apart and off the stock by
-/// its widest, past its corner and up its lead, and nothing of the part.
+/// down to its top, its passes 95% of its flat apart and off the stock only
+/// as far as its edge reaches as deep as a level cuts, past its corner and up
+/// its lead that far, not by its widest; and nothing of the part. A flat end
+/// mill as wide at its face runs off by its radius, the lead less.
 #[test]
 fn a_face_mill_faces_the_stock_to_the_part() {
     let plate = Body::derived(synthetic::plate_with_hole(20.0, 5.0, 4.0, 48));
@@ -63,11 +66,19 @@ fn a_face_mill_faces_the_stock_to_the_part() {
     let cuts = cuts(op);
     let deepest = cuts.iter().map(|p| p.z).fold(f64::MAX, f64::min);
     assert!((deepest - top).abs() < 1e-9, "down to {deepest}, not {top}");
+    // 3 mm in two levels of 1.5: the corner's centre is 9.2 out and 0.8 up,
+    // the flank leaves it 45° out, and is 1.5 up 1.5 less its foot's height
+    // further.
+    let foot = 0.8 * (1.0 - FRAC_1_SQRT_2);
+    let edge = 9.2 + 0.8 * FRAC_1_SQRT_2 + (1.5 - foot);
+    assert!((edge - 11.031).abs() < 1e-3, "{edge}");
+    let off = |cuts: &[DVec3]| cuts.iter().map(|p| p.x.abs() - 30.0).collect::<Vec<_>>();
     assert!(
-        cuts.iter()
-            .all(|p| (p.x.abs() - (30.0 + widest + 1.0)).abs() < 1e-9),
-        "off the stock by its widest"
+        off(&cuts).iter().all(|d| (d - (edge + 1.0)).abs() < 1e-9),
+        "off the stock by {:?}, not its edge {edge} 1.5 up and the extension",
+        off(&cuts)
     );
+    assert!(edge < widest - 2.0);
     // Rows across the 60 mm, 95% of its flat apart.
     let mut rows: Vec<i64> = cuts.iter().map(|p| (p.y * 1000.0).round() as i64).collect();
     rows.sort_unstable();
@@ -81,6 +92,26 @@ fn a_face_mill_faces_the_stock_to_the_part() {
     assert!((taken - 10_800.0).abs() < 400.0, "took {taken}");
     assert!(result.is_clean(), "{:?}", result.warnings());
     assert_eq!(result.verify.gouged, 0);
+
+    let end_mill = ToolSpec {
+        kind: ToolKind::Flat,
+        diameter: 20.0,
+        ..ToolSpec::default()
+    };
+    job.tools.insert("rough".into(), end_mill);
+    let result = run_setup(&job, 0, &bodies).unwrap();
+    let op = &result.operations[0];
+    let flat = super::kinds::cuts(op);
+    assert!(
+        off(&flat).iter().all(|d| (d - 11.0).abs() < 1e-9),
+        "off the stock by {:?}, not its radius and the extension",
+        off(&flat)
+    );
+    assert!(
+        (op.sim.removed_mm3 - taken).abs() < 1.0,
+        "{}",
+        op.sim.removed_mm3
+    );
 }
 
 /// The dome finished with a tapered ball, its ball the plain ball's: where

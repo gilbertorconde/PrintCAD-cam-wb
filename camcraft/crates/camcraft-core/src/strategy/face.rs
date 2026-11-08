@@ -16,6 +16,10 @@
 //! the tool's reach, and the tool enters and leaves off the stock. The passes are
 //! spaced evenly, no more than the stepover apart.
 //!
+//! Clear is the tool's cutting edge as deep as a level cuts: a flat end mill's
+//! radius, but a face mill's at its face and its lead up that depth, not its
+//! widest, high up its inserts above the material ([`LevelsAsked::deepest`]).
+//!
 //! # Direction
 //!
 //! Both ways by default, as Fusion's: back and forth, stepping over off the stock
@@ -41,7 +45,9 @@ pub struct FaceParams {
     pub stepover: f64,
     /// How far each pass runs on once the tool is clear of the area.
     pub extension: f64,
-    /// The tool's radius.
+    /// How far out from its axis the tool cuts within the deepest level, which
+    /// each pass runs on past the area before the extension: a flat end mill's
+    /// radius, a face mill's at its face and its lead up that depth.
     pub radius: f64,
     /// The levels cut, from the top down; the last is the bottom.
     pub levels: LevelsAsked,
@@ -64,6 +70,23 @@ pub struct LevelsAsked {
     /// Deepest a level may be below the one above: Fusion's multiple depths.
     /// `None` cuts the bottom alone.
     pub stepdown: Option<f64>,
+}
+
+impl LevelsAsked {
+    /// The most material a level cuts, from the level above down to it, the
+    /// first from the top or from `material`, the material's top, if that is
+    /// higher; `None` when no level is cut.
+    pub fn deepest(&self, material: f64) -> Option<f64> {
+        let zs = levels(self.top, self.bottom, self.stepdown);
+        let mut above = self.top.max(material);
+        zs.iter()
+            .map(|&z| {
+                let d = above - z;
+                above = z;
+                d
+            })
+            .reduce(f64::max)
+    }
 }
 
 /// The passes facing `params.area`, at each level.

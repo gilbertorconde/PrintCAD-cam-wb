@@ -2095,6 +2095,101 @@ fn a_setup_on_a_rotary_is_wrapped_round_it() {
     assert!(op.heights.is_empty());
 }
 
+/// The part in a bar along Y on a rotary turned by B: finished round it
+/// along the bar, then engraved along a line round it half way along. Every
+/// check passes; the program turns B as it cuts, X held over the axis, in
+/// inverse time; and the bar is drawn along Y, the material round it.
+#[test]
+fn a_bar_along_y_is_wrapped_round_b() {
+    let request = |post: Option<String>, curve: &str| {
+        let mut r = wrapped_request(post, "linuxcnc");
+        r.job = r
+            .job
+            .replace("axis = \"x\"", "axis = \"y\"")
+            .replace(
+                "[[setup.operation]]\nname = \"rough\"",
+                "[[setup.operation]]\nname = \"finish\"\nstrategy = \"parallel\"\n\
+                 tool = \"flat-6\"\npasses = { stepover = 4.0, feed = 1200.0 }\n\n\
+                 [[setup.operation]]\nname = \"rough\"",
+            )
+            .replace(
+                "start = [0.0, -60.0, 0.0], segments = [{ to = [0.0, 60.0, 0.0] }]",
+                curve,
+            );
+        r
+    };
+    // Where the bar is, to draw the line round it at its top.
+    let probe = answer(&request(
+        None,
+        "start = [0.0, 0.0, 0.0], segments = [{ to = [1.0, 0.0, 0.0] }]",
+    ))
+    .unwrap();
+    let c = probe.cylinder.expect("the bar");
+    let [a, b] = c.ends;
+    assert!(
+        (a[0] - b[0]).abs() < 1e-9 && (a[2] - b[2]).abs() < 1e-9,
+        "along Y"
+    );
+    let (x, y, z) = (a[0], 0.5 * (a[1] + b[1]), a[2] + c.radius);
+    let curve = format!(
+        "start = [{}, {y}, {z}], segments = [{{ to = [{}, {y}, {z}] }}]",
+        x - 60.0,
+        x + 60.0
+    );
+    let profile = format!(
+        "{}\n[rotary]\naxes = [\"B\"]\n[rotary.B]\ncontinuous = true\n",
+        include_str!("../../camcraft/crates/camcraft-post/profiles/linuxcnc.toml")
+    );
+    let run = answer(&request(Some(profile), &curve)).unwrap();
+    for f in run.findings.iter().filter(|f| f.level == Level::Fail) {
+        panic!("{f:?}");
+    }
+    assert!(run.passed);
+    assert_eq!(run.operations.len(), 2);
+    for op in &run.operations {
+        let program = &op.program.as_ref().unwrap().text;
+        assert!(program.contains("wrapped round B about Y"), "{program}");
+        assert!(
+            program.contains("G93") && program.contains("G94"),
+            "{program}"
+        );
+        // Over the axis, X is zero wherever the tool goes; B indexes between
+        // the finish's passes along the bar, and turns as the line round it
+        // is engraved, in blocks that say their F.
+        let (mut turning, mut indexing) = (0, 0);
+        for l in program.lines().filter(|l| !l.starts_with('(')) {
+            let words: Vec<&str> = l.split_whitespace().collect();
+            for w in &words {
+                if let Some(v) = w.strip_prefix('X') {
+                    assert_eq!(v.parse::<f64>().unwrap(), 0.0, "{l}");
+                }
+            }
+            let has = |c: char| words.iter().any(|w| w.starts_with(c));
+            turning += usize::from(!l.starts_with("G0") && has('B') && has('F'));
+            indexing += usize::from(has('B') && !has('F'));
+        }
+        if op.name == "finish" {
+            assert!(indexing > 10, "{program}");
+        } else {
+            assert!(turning > 0, "{}: {program}", op.name);
+        }
+    }
+    let off = |p: [f32; 3]| {
+        let (dx, dz) = (f64::from(p[0]) - x, f64::from(p[2]) - a[2]);
+        (dx * dx + dz * dz).sqrt()
+    };
+    let material = run.material.as_ref().unwrap();
+    for p in &material.positions {
+        assert!(off(*p) <= c.radius + 1e-3, "{p:?} {}", off(*p));
+    }
+    assert!(
+        material.positions.iter().any(|p| f64::from(p[2]) < a[2]),
+        "under the axis"
+    );
+    let play = run.playback.as_ref().unwrap();
+    assert!(play.about.is_some());
+}
+
 /// What a run's operations say they removed, in cubic millimetres.
 fn removed(run: &cam_protocol::Run) -> f64 {
     run.operations

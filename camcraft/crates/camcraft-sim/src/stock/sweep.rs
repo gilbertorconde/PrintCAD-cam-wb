@@ -288,14 +288,19 @@ impl Stock {
         // Bounded, so a pathological coordinate cannot turn one move into an
         // unbounded loop.
         let steps = bounded_count((span / step).ceil());
+        let at = |k: u32| from + (to - from) * (f64::from(k) / f64::from(steps));
+        // On a rotary the move's stamps are cut as one, which shares them out.
+        if let Some(round) = self.round {
+            let tips: Vec<DVec3> = (u32::from(!first)..=steps).map(at).collect();
+            return self.stamp_round_all(&tips, tool, round);
+        }
         let mut worst = 0.0f64;
         let mut touched = None;
         // The start was stamped as the end of the move before, unless this is the
         // first move swept; stamping lowers to a minimum, so doing it again would
         // change nothing, and leaving it out changes nothing either.
         for k in u32::from(!first)..=steps {
-            let t = f64::from(k) / f64::from(steps);
-            let (cut, cells) = self.stamp(from + (to - from) * t, tool);
+            let (cut, cells) = self.stamp(at(k), tool);
             worst = worst.max(cut);
             touched = CellRect::join(touched, cells);
         }

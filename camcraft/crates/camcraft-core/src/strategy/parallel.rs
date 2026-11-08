@@ -503,7 +503,11 @@ fn open_runs(runs: Vec<Vec<DVec3>>) -> Vec<Run> {
 ///
 /// The stretch is left out: the linker retracts from its top and plunges, at the
 /// plunge feed, to its foot.
-fn break_steep(run: Vec<DVec3>, max_cut_step: f64, report: &mut ParallelReport) -> Vec<Vec<DVec3>> {
+pub(crate) fn break_steep(
+    run: Vec<DVec3>,
+    max_cut_step: f64,
+    report: &mut ParallelReport,
+) -> Vec<Vec<DVec3>> {
     // How far a segment falls (negative: climbs), when it is steeper than the ratio.
     let steep = |a: DVec3, b: DVec3| -> Option<f64> {
         let fall = a.z - b.z;

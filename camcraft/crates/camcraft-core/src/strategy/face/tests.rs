@@ -155,3 +155,17 @@ fn a_bad_extension_is_refused() {
     };
     assert!(face(&p).unwrap().0.moves().is_empty());
 }
+
+/// The most a level cuts: the whole depth alone, the even step with a
+/// stepdown, the first from the material's top where that is above the top,
+/// and nothing with no level.
+#[test]
+fn the_deepest_level_is_the_step() {
+    let mut asked = params().levels;
+    assert_eq!(asked.deepest(0.0), Some(3.0));
+    asked.stepdown = Some(2.0);
+    assert!((asked.deepest(3.0).unwrap() - 1.5).abs() < 1e-12);
+    assert!((asked.deepest(4.0).unwrap() - 2.5).abs() < 1e-12);
+    asked.bottom = asked.top;
+    assert_eq!(asked.deepest(4.0), None);
+}

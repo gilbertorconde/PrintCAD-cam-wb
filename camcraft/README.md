@@ -588,9 +588,12 @@ the unrolled frame stands on a radius, and each column round it, a ray
 out from the axis at an angle to it, is cut down to where the tool's
 underside first meets the ray (`stamp_round`), every move sampled as a
 straight line in the unrolled frame, the seam no edge; a column the
-tool's side leaves before its top keeps its material. Its volume is the
-wedges'. `PackedStock` keeps the round, in its bytes too (after
-everything else, so a stock kept before reads as it did). On a rotary
+tool's side leaves before its top keeps its material. A move's stamps are
+cut as one (`stamp_round_all`): each column by them in turn, from its own
+height, so each row round the bar is worked out alone, in parallel where
+they cover many cells, as one stamp alone covers too few to share out.
+Its volume is the wedges'. `PackedStock` keeps the round, in its bytes
+too (after everything else, so a stock kept before reads as it did). On a rotary
 `sweep_watching` only sweeps: the shank and holder are not watched. In
 `camcraft-post`, `[rotary]` has `feed` (`rotary::RotaryFeed`: inverse
 time, the default, or degrees) and `unwind`, and a rotary
@@ -634,7 +637,24 @@ the tool's height there, the column taken no higher than where the ray
 leaves the tool's side, rows round from the tool's taken while they could
 still be met higher than the best yet. Points are sampled a quarter of
 the tool's radius apart, again between two where the tip strays from
-the line between them, in parallel, and simplified. `JobError::Wrap`
+the line between them, and simplified: every pass of a level at once,
+each sampled and refined in parallel. Each pass is broken where it falls
+further than `max_cut_step` down a steep stretch, as parallel finishing's
+are (`parallel::break_steep`, shared; `RotaryReport::wall_breaks`), and
+linked lifting clear: rotary finishing never stays down, has no leads or
+helix in, plunges straight down onto each pass and lifts to the retract
+height between them, whatever its retraction (`link_params`,
+`run_operation`), as the linker would measure a link against the part
+unrolled as a flat tool meets a flat part. And on a rotary the linker
+measures the material (`Cutting::highest`) on the grid's turn wherever
+the path is round the bar, a turn either side too, and as wide round as
+the tool spans there, `atan(r / ρ)` at the wrap radius, `ρ` the top it
+found or the axis: it used to look past the grid's edge, finding
+nothing, and over a disc as wide as the tool, narrower than the tool
+spans near the axis, so a rapid could come down into material.
+A whole run on a bar along Y, finished and engraved round a B and posted
+for LinuxCNC as one program, is the golden `linuxcnc-wrap-b.nc`, written
+by `camcraft-session`'s test. `JobError::Wrap`
 lets parallel finishing through, and `StrategyError::RotaryGrid` refuses a
 part on a grid that does not go round in whole cells.
 
@@ -666,6 +686,10 @@ thread's minor diameter, `5/8 H` a side, up its chamfer; a spot drill
 and a countersink cones at 90° unless given), `check` asks for what
 each needs, and `flat_diameter`, `cutting_diameter`, `head_height`,
 `point_angle`, `spot_depth` and `shape_words` say what their names do.
+Facing runs its passes off the stock only as far as the real tool's edge
+reaches as deep as a level cuts (`LevelsAsked::deepest`, the radius there),
+not by its widest: a face mill's at its face and its lead up that depth, a
+flat end mill's its radius as before.
 `above_flutes` checks an undercutting head's neck from the head up, and
 a tapered mill's body as wide as its flank's top. `Operation::cannot_use`
 (its kinds now in `cannot_use_kind` and `cannot_drill`) takes a face
