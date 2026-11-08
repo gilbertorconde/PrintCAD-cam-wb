@@ -16,7 +16,7 @@ pub const HELPER: &str = "camcraft-helper";
 
 /// Bumped whenever a request or response changes shape, so a package never
 /// reads an answer from a helper of another build.
-pub const VERSION: u32 = 10;
+pub const VERSION: u32 = 11;
 
 /// One setup to run.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -109,6 +109,12 @@ pub struct Run {
     /// the run shown is the first's, each other cut as it is.
     #[serde(default)]
     pub placements: Vec<PlacedPart>,
+    /// The run as its program cuts it: each operation at each part, in
+    /// order, when each starts and how long it takes. Between two at
+    /// different parts the tool goes from one to the other. Empty when not
+    /// known: each operation in turn, at the first part.
+    #[serde(default)]
+    pub sections: Vec<Section>,
     /// The work zero.
     pub origin: [f64; 3],
     /// Each operation, in the setup's order.
@@ -138,6 +144,44 @@ pub struct Run {
     /// Where the part and its stock are, for the setup sheet.
     #[serde(default)]
     pub layout: Option<Layout>,
+}
+
+/// One stretch of a setup's run: an operation cut at one part.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct Section {
+    /// The operation, by its index among the run's.
+    pub op: usize,
+    /// The part, by its index among [`Run::placements`]; 0 for the one.
+    pub part: usize,
+    /// When it starts, in machining seconds from the setup's start.
+    pub start: f64,
+    /// How long it takes: its operation's [`OperationRun::seconds`].
+    pub seconds: f64,
+}
+
+impl Run {
+    /// [`Run::sections`], or when not known each operation in turn at the
+    /// first part.
+    pub fn cut(&self) -> Vec<Section> {
+        if !self.sections.is_empty() {
+            return self.sections.clone();
+        }
+        let mut start = 0.0;
+        self.operations
+            .iter()
+            .enumerate()
+            .map(|(op, o)| {
+                let s = Section {
+                    op,
+                    part: 0,
+                    start,
+                    seconds: o.seconds,
+                };
+                start += o.seconds;
+                s
+            })
+            .collect()
+    }
 }
 
 /// One part of a setup that cuts several.
@@ -321,19 +365,27 @@ pub struct Playback {
 /// One moment of a [`Playback`].
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Moment {
-    /// Which operation is cutting, from zero.
+    /// Which of the run's sections is under way, and its operation and
+    /// part.
+    #[serde(default)]
+    pub section: usize,
     pub op: usize,
+    #[serde(default)]
+    pub part: usize,
     /// How many of its moves it has made, and of how many.
     pub moves: usize,
     pub of: usize,
-    /// Where the tool's tip is, in the model's coordinates.
+    /// Where the tool's tip is, in the model's coordinates, at the part
+    /// it cuts.
     pub tool: [f32; 3],
     /// How many of the operation's drawn points it has gone through.
     pub drawn: usize,
     /// When, in machining seconds from the setup's start.
     #[serde(default)]
     pub seconds: f64,
-    /// The material's height at each point of the grid.
+    /// The material's height at each point of the grid, at the part it
+    /// cuts; each other part's is as its last moment left it, or the
+    /// first moment's before it has one.
     pub heights: Vec<u16>,
 }
 
@@ -374,7 +426,8 @@ pub struct Finding {
 pub struct Mark {
     /// How many of the operation's moves had been made.
     pub moves: usize,
-    /// When, in machining seconds from the setup's start.
+    /// When, in machining seconds from the operation's start: at each part
+    /// it is cut at, as the same moves are.
     pub seconds: f64,
     /// A failure; a warning otherwise.
     pub fail: bool,
@@ -487,6 +540,11 @@ pub struct Program {
     /// line before's. Empty for an operation's own program.
     #[serde(default)]
     pub operations: Vec<u32>,
+    /// For each line, the section of the run it is of, by its index among
+    /// [`Run::sections`], whose moves [`Program::moves`] counts: never one
+    /// before the line before's. Empty when not known.
+    #[serde(default)]
+    pub sections: Vec<u32>,
 }
 
 impl Program {
@@ -533,6 +591,33 @@ impl Program {
             }
         }
         Some(low.min(last))
+    }
+
+    /// The line the tool stands on once `made` moves of section `section`
+    /// are made, by halves: the first at or past it, else the last. `None`
+    /// when the lines' sections are not known.
+    pub fn line_in(&self, section: usize, made: usize) -> Option<usize> {
+        let last = self.moves.len().min(self.sections.len()).checked_sub(1)?;
+        let at = Some((section, made));
+        let (mut low, mut high) = (0, last + 1);
+        while low < high {
+            let mid = low + (high - low) / 2;
+            if self.place(mid) < at {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        Some(low.min(last))
+    }
+
+    /// The section line `line` is of, and how many of its moves are made
+    /// once it has run; `None` past the end, or when not known.
+    pub fn place(&self, line: usize) -> Option<(usize, usize)> {
+        Some((
+            *self.sections.get(line)? as usize,
+            *self.moves.get(line)? as usize,
+        ))
     }
 
     /// The operation, in a setup's program, and how many of its moves are
@@ -625,9 +710,13 @@ pub struct SessionReady {
     /// A height is `low + step * h` for a packed `h`.
     pub low: f32,
     pub step: f32,
-    /// When each move of each operation ends, in machining seconds from
-    /// the setup's start.
+    /// When each move of each section ends, as [`Run::sections`] has them,
+    /// in machining seconds from the setup's start.
     pub times: Vec<Vec<f32>>,
+    /// How far each part's grid is from the first's, in the model's
+    /// coordinates: each part has a grid of its own. Empty for one part.
+    #[serde(default)]
+    pub parts: Vec<[f32; 3]>,
     /// Its run's [`timing`], as [`Run::timing`] has it.
     #[serde(default)]
     pub timing: u64,
@@ -692,21 +781,35 @@ pub mod class {
     pub const CLEAR: u8 = 3;
 }
 
-/// A seek's answer: where it stands, and a rectangle of the material grid
-/// that changed (none when nothing did).
+/// A seek's answer: where it stands, and for each part whose material
+/// changed a rectangle of its grid.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct StockPatch {
     /// The machining seconds it stands at.
     pub seconds: f64,
-    /// The operation under way, and how many of its moves are made, of how
-    /// many.
+    /// The section under way, as [`Run::sections`] has them, its operation
+    /// and part, and how many of its moves are made, of how many. Between
+    /// two sections at different parts, the one the tool goes to, none
+    /// made.
+    pub section: usize,
     pub op: usize,
+    pub part: usize,
     pub moves: usize,
     pub of: usize,
     /// Where the tool's tip is, in the model's coordinates.
     pub tool: [f32; 3],
     /// How many of the operation's drawn points come before the tool.
     pub drawn: usize,
+    /// What changed, a rectangle a part.
+    pub changed: Vec<GridPatch>,
+}
+
+/// A rectangle of one part's material grid.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct GridPatch {
+    /// The part, by its index among [`SessionReady::parts`] (0 for the
+    /// first).
+    pub part: usize,
     pub col: u32,
     pub row: u32,
     pub width: u32,
@@ -819,6 +922,45 @@ mod tests {
         assert!(!own.is_setups());
         assert_eq!(own.line_at(5, 1), Some(1), "its own operation's");
         assert_eq!(own.moment(1), None);
+    }
+
+    /// Each line knows its section, so a move at the second part finds its
+    /// own line, not the first part's.
+    #[test]
+    fn a_line_and_its_sections_move_find_each_other() {
+        // Section 0's header and two moves, section 1 (the same operation
+        // at another part) its offset change and two moves, the footer.
+        let program = Program {
+            sections: vec![0, 0, 0, 1, 1, 1, 1],
+            moves: vec![0, 1, 2, 0, 1, 2, 2],
+            ..Program::default()
+        };
+        assert_eq!(program.line_in(0, 1), Some(1));
+        assert_eq!(program.line_in(1, 1), Some(4));
+        assert_eq!(program.line_in(1, 2), Some(5), "the first of its lines");
+        assert_eq!(program.line_in(5, 0), Some(6), "past the end, the last");
+        assert_eq!(program.place(4), Some((1, 1)));
+        assert_eq!(program.place(7), None);
+        assert_eq!(Program::default().line_in(0, 0), None, "not known");
+    }
+
+    #[test]
+    fn a_run_without_sections_is_its_operations_in_turn() {
+        let op = |seconds| OperationRun {
+            seconds,
+            ..OperationRun::default()
+        };
+        let run = Run {
+            operations: vec![op(10.0), op(0.0), op(30.0)],
+            ..Run::default()
+        };
+        let cut = run.cut();
+        assert_eq!(
+            cut.iter()
+                .map(|s| (s.op, s.part, s.start))
+                .collect::<Vec<_>>(),
+            [(0, 0, 0.0), (1, 0, 10.0), (2, 0, 10.0)]
+        );
     }
 
     #[test]

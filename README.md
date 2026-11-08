@@ -85,8 +85,17 @@ panels, the drawing and the helper that runs camcraft.
   that part is, and the travel, where its work offset is on the machine
   (each known one's own, else the first's moved as far). Stocks so close
   they overlap are a warning. The view draws each part's stock and work
-  zero; playback is the first part's; the machining time is every part's;
-  the setup sheet lists each part's offset.
+  zero. Playback runs the program as it is posted: each operation at each
+  part in its order, the tool going up, across and down from one part to
+  the next, each part's material cut at its own place as far as the
+  program has cut that part by then, so by tool the second part is
+  roughed while the first waits for its finish. The timeline has a span
+  for each operation at each part, named with its offset, a line where the
+  program goes on to another part; the listing follows the playhead into
+  each part's lines, and a click on one goes to that part's move. The
+  machining time is every part's and the tool's way between them, which
+  the panel and the setup sheet show apart; the setup sheet lists each
+  part's offset.
 - **Tilted setups (3+2).** A setup's tool axis can be any direction: out of
   a flat face picked on the part, along a straight edge picked on it (either
   way), the document's Z tilted by angles about its X and then its Y, or a
@@ -468,7 +477,8 @@ panels, the drawing and the helper that runs camcraft.
   faster); Left and Right step (Shift: ten); Up and Down go to the operation
   before and after; Home and End; Minus and Equals change the speed.
   Once playing, the material is swept again at full resolution by the helper
-  kept running for it (up to 600 points a side), and steps go a move at a
+  kept running for it (up to 600 points a side, shared among a setup's
+  parts), and steps go a move at a
   time; until then, and where it cannot, the run's coarse moments play.
   The helper runs the setup from the same request as the run shown, even
   when the document has changed since without the setup running again,
@@ -788,7 +798,9 @@ useful there.
   plane's X and Y, so it is not written. `CYCLE83` backs off 0.25 mm to
   break the chip, as cycle 203 does.
 - Machining time is the toolpath's: the moves a setup's program adds
-  between two operations, a drill's dwell, the spindle getting up to
+  between two operations (between two parts, the tool is taken straight
+  up as high as either end, across and down, lower than a machine's own
+  way clear), a drill's dwell, the spindle getting up to
   speed and anything a machine does to speed up or slow down are not in
   it. A setup sheet has no picture of the part, as a package cannot take
   one of the view.

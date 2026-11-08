@@ -6,11 +6,16 @@
 //! The package opens it with [`SessionIn::Open`] and a setup, as it asks for
 //! a run; the session answers [`SessionOut::Ready`] once it has run, then a
 //! [`SessionOut::Stock`] for each [`SessionIn::Seek`]. One line each way.
+//!
+//! A setup of several parts plays back as its program cuts them: each part
+//! has material of its own, cut as far as the program has cut that part by
+//! then, so roughing the second part by tool leaves the first's roughed and
+//! waiting for its finish. Between parts the tool goes from one to the next.
 
 use std::io::{BufRead, Write};
 
 use cam_protocol::{
-    GridRound, SessionIn, SessionOut, SessionReady, StockPatch, base64, class, pack_bare,
+    GridPatch, GridRound, SessionIn, SessionOut, SessionReady, StockPatch, base64, class, pack_bare,
 };
 use camcraft_core::replay::{Changed, Live, Position, Replay};
 use camcraft_sim::stock::{Axis, Block};
@@ -33,20 +38,19 @@ const SEEK_BUDGET: usize = 1_000_000;
 struct Kept {
     done: Executed,
     replay: Replay,
-    live: Live,
+    /// Each part's material, as far as it is cut.
+    lives: Vec<Live>,
     /// Stock cells a grid point stands for, a side.
     every: u32,
     cols: u32,
     rows: u32,
     low: f64,
     quantum: f64,
-    /// When each operation starts, in machining seconds.
-    starts: Vec<f64>,
     /// How far from the part the material counts as finished: the run's
     /// gouge budget.
     band: f64,
-    /// Whether the package has had the whole grid: the first seek sends it
-    /// all, whatever changed.
+    /// Whether the package has had each part's whole grid: the first seek
+    /// sends it all, whatever changed.
     sent: bool,
 }
 
@@ -106,10 +110,18 @@ fn open(request: &cam_protocol::Request) -> Result<(Kept, SessionReady), String>
     let setup = done.job.setups.first().ok_or("the job has no setup")?;
     let r = &done.ran.result;
     let replay = Replay::new(&done.job, setup, r).map_err(|e| e.to_string())?;
-    let live = Live::new(&replay, CHECKPOINT_BYTES).ok_or("the run kept no material")?;
-    let field = live.stock().field();
+    // Each part's checkpoints share what one would hold.
+    let parts = done.cut.parts.len().max(1);
+    let lives = (0..parts)
+        .map(|_| Live::new(&replay, CHECKPOINT_BYTES / parts))
+        .collect::<Option<Vec<_>>>()
+        .ok_or("the run kept no material")?;
+    let field = lives[0].stock().field();
     let (nx, ny, pitch) = (field.nx(), field.ny(), field.pitch());
-    let every = nx.max(ny).div_ceil(MOST_POINTS).max(1);
+    // Several parts share the points one would have: the package takes
+    // every part's grid in, and draws it, within one frame's budget.
+    let most = (f64::from(MOST_POINTS) / (parts as f64).sqrt()).max(2.0) as u32;
+    let every = nx.max(ny).div_ceil(most).max(1);
     let (cols, rows) = ((nx - 1) / every + 1, (ny - 1) / every + 1);
     let corner = field.origin().extend(0.0);
     let at = |p: DVec3| r.frame.shown(p);
@@ -154,18 +166,27 @@ fn open(request: &cam_protocol::Request) -> Result<(Kept, SessionReady), String>
         return Err("the stock has no height".into());
     }
     let quantum = (high - low) / f64::from(u16::MAX);
-    let mut starts = Vec::new();
-    let mut elapsed = 0.0;
     let times = done
-        .draws
+        .cut
+        .sections
         .iter()
-        .map(|d| {
-            starts.push(elapsed);
-            let t: Vec<f32> = d.times.iter().map(|s| (elapsed + s) as f32).collect();
-            elapsed += d.times.last().copied().unwrap_or(0.0);
-            t
+        .map(|s| {
+            done.draws.get(s.op).map_or_else(Vec::new, |d| {
+                d.times.iter().map(|t| (s.start + t) as f32).collect()
+            })
         })
         .collect();
+    // Each part's grid is the first's, moved as far as the part is.
+    let zero = r.frame.to_model(DVec3::ZERO);
+    let offsets = if parts > 1 {
+        done.cut
+            .parts
+            .iter()
+            .map(|a| to_f32(r.frame.to_model(*a) - zero))
+            .collect()
+    } else {
+        Vec::new()
+    };
     // Squares with no stock at the start, so round stock's box's corners
     // are not drawn.
     let squares = (0..rows.saturating_sub(1))
@@ -193,6 +214,7 @@ fn open(request: &cam_protocol::Request) -> Result<(Kept, SessionReady), String>
         low: low as f32,
         step: quantum as f32,
         times,
+        parts: offsets,
         timing: done.run.timing,
         bare,
     };
@@ -201,13 +223,12 @@ fn open(request: &cam_protocol::Request) -> Result<(Kept, SessionReady), String>
         Kept {
             done,
             replay,
-            live,
+            lives,
             every,
             cols,
             rows,
             low,
             quantum,
-            starts,
             band,
             sent: false,
         },
@@ -216,17 +237,26 @@ fn open(request: &cam_protocol::Request) -> Result<(Kept, SessionReady), String>
 }
 
 impl Kept {
-    /// The operation, moves made and fraction of the next, at `seconds`.
-    fn place(&self, seconds: f64) -> (usize, usize, f64) {
-        let k = self.starts.iter().rposition(|s| *s <= seconds).unwrap_or(0);
-        let Some(drawn) = self.done.draws.get(k) else {
-            return (0, 0, 0.0);
+    /// The section under way at `seconds`, the moves made and fraction of
+    /// the next, and where the tool is if it is going there from another
+    /// part (then none made).
+    fn place(&self, seconds: f64) -> (usize, usize, f64, Option<DVec3>) {
+        let cut = &self.done.cut;
+        let k = cut.section_at(seconds);
+        if let Some(tip) = cut.between(k + 1, seconds) {
+            return (k + 1, 0, 0.0, Some(tip));
+        }
+        let Some(section) = cut.sections.get(k) else {
+            return (0, 0, 0.0, None);
         };
-        let local = seconds - self.starts[k];
+        let Some(drawn) = self.done.draws.get(section.op) else {
+            return (k, 0, 0.0, None);
+        };
+        let local = seconds - section.start;
         let times = &drawn.times;
         let made = times.partition_point(|t| *t <= local);
         if made >= times.len() {
-            return (k, times.len(), 0.0);
+            return (k, times.len(), 0.0, None);
         }
         let before = made.checked_sub(1).map_or(0.0, |i| times[i]);
         let span = times[made] - before;
@@ -235,73 +265,111 @@ impl Kept {
         } else {
             0.0
         };
-        (k, made, fraction)
+        (k, made, fraction, None)
     }
 
-    /// Stand at `seconds`: the material that changed since the last seek,
-    /// the tool, and how far the toolpath has gone.
+    /// Stand at `seconds`: the material that changed at each part since
+    /// the last seek, the tool, and how far the toolpath has gone.
     fn seek(&mut self, seconds: f64) -> StockPatch {
-        let (op, made, fraction) = self.place(seconds);
-        let target = Position { op, moves: made };
-        let mut changed = Changed::Nothing;
-        loop {
-            let (step, reached) = self.live.seek(&self.replay, target, fraction, SEEK_BUDGET);
-            changed = changed.and(step);
-            if reached {
-                break;
+        let (k, made, fraction, between) = self.place(seconds);
+        let cut = &self.done.cut;
+        let section = cut.sections.get(k).copied().unwrap_or_default();
+        let op = section.op;
+        // Each part as far as the program has cut it: the section under
+        // way at its own part, each other where its last section left it.
+        // A section done is its operation done, however the simulator
+        // counts its moves.
+        let done = usize::MAX;
+        let of = self.done.draws.get(op).map_or(0, |d| d.ends.len());
+        let targets: Vec<(Position, f64)> = cut
+            .standing(k)
+            .into_iter()
+            .map(|last| match last {
+                Some(j) if j == k && made < of => (Position { op, moves: made }, fraction),
+                Some(j) => {
+                    let op = cut.sections[j].op;
+                    (Position { op, moves: done }, 0.0)
+                }
+                None => (Position { op: 0, moves: 0 }, 0.0),
+            })
+            .collect();
+        let first = !std::mem::replace(&mut self.sent, true);
+        let mut changes = Vec::new();
+        for (part, (target, fraction)) in targets.into_iter().enumerate() {
+            let Some(live) = self.lives.get_mut(part) else {
+                continue;
+            };
+            let mut changed = Changed::Nothing;
+            loop {
+                let (step, reached) = live.seek(&self.replay, target, fraction, SEEK_BUDGET);
+                changed = changed.and(step);
+                if reached {
+                    break;
+                }
             }
+            if first {
+                changed = Changed::All;
+            }
+            changes.push((part, changed));
         }
         let drawn = &self.done.draws[op];
         let end = |i: usize| drawn.ends.get(i).copied();
-        let tip = match made {
-            0 => end(0),
-            m => match (end(m - 1), end(m)) {
-                (Some(a), Some(b)) => Some(a.lerp(b, fraction)),
-                (a, _) => a,
-            },
-        }
-        .unwrap_or(DVec3::ZERO);
+        let tip = between
+            .or_else(|| {
+                match made {
+                    0 => end(0),
+                    m => match (end(m - 1), end(m)) {
+                        (Some(a), Some(b)) => Some(a.lerp(b, fraction)),
+                        (a, _) => a,
+                    },
+                }
+                .map(|p| p + cut.offset(k))
+            })
+            .unwrap_or(DVec3::ZERO);
         let mut patch = StockPatch {
             seconds,
+            section: k,
             op,
+            part: section.part,
             moves: made,
             of: drawn.ends.len(),
             tool: to_f32(self.done.ran.result.frame.shown(tip)),
             drawn: drawn.drawn_after(made),
             ..StockPatch::default()
         };
-        if !std::mem::replace(&mut self.sent, true) {
-            changed = Changed::All;
-        }
-        let rect = match changed {
-            Changed::Nothing => None,
-            Changed::All => Some((0, 0, self.cols - 1, self.rows - 1)),
-            Changed::Cells(c) => {
-                let (d, lc, lr) = (self.every, self.cols - 1, self.rows - 1);
-                Some((
-                    (c.x0 / d).min(lc),
-                    (c.y0 / d).min(lr),
-                    c.x1.div_ceil(d).min(lc),
-                    c.y1.div_ceil(d).min(lr),
-                ))
-            }
-        };
-        if let Some((c0, r0, c1, r1)) = rect {
-            let (heights, classes) = self.points(c0, r0, c1, r1);
-            patch.col = c0;
-            patch.row = r0;
-            patch.width = c1 - c0 + 1;
-            patch.height = r1 - r0 + 1;
-            patch.heights = base64(&heights);
-            patch.classes = base64(&classes);
+        for (part, changed) in changes {
+            let rect = match changed {
+                Changed::Nothing => continue,
+                Changed::All => (0, 0, self.cols - 1, self.rows - 1),
+                Changed::Cells(c) => {
+                    let (d, lc, lr) = (self.every, self.cols - 1, self.rows - 1);
+                    (
+                        (c.x0 / d).min(lc),
+                        (c.y0 / d).min(lr),
+                        c.x1.div_ceil(d).min(lc),
+                        c.y1.div_ceil(d).min(lr),
+                    )
+                }
+            };
+            let (c0, r0, c1, r1) = rect;
+            let (heights, classes) = self.points(part, c0, r0, c1, r1);
+            patch.changed.push(GridPatch {
+                part,
+                col: c0,
+                row: r0,
+                width: c1 - c0 + 1,
+                height: r1 - r0 + 1,
+                heights: base64(&heights),
+                classes: base64(&classes),
+            });
         }
         patch
     }
 
-    /// The grid's points from `(c0, r0)` to `(c1, r1)`, row by row: their
-    /// heights packed, and how each stands against the part.
-    fn points(&self, c0: u32, r0: u32, c1: u32, r1: u32) -> (Vec<u8>, Vec<u8>) {
-        let stock = self.live.stock();
+    /// Part `part`'s grid's points from `(c0, r0)` to `(c1, r1)`, row by
+    /// row: their heights packed, and how each stands against the part.
+    fn points(&self, part: usize, c0: u32, r0: u32, c1: u32, r1: u32) -> (Vec<u8>, Vec<u8>) {
+        let stock = self.lives[part].stock();
         let field = stock.field();
         let floor = stock.floor();
         let part = &self.done.ran.result.part;

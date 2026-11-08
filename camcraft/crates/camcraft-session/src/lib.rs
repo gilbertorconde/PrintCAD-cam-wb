@@ -35,9 +35,9 @@ pub use finish::{FinishSpec, single_operation};
 pub use job_file::{job_text, parse_job, read_job, read_probe_results, write_job};
 pub use model::{Model, Models, load_job_model, load_model, load_models, models_of, units_of};
 pub use post::{
-    Posting, Program, SetupProgram, builtin_posts, custom_gcode, load_profile, next_tools,
-    placed_program, placed_specs, plan_posting, posted_path, probe_log_name, program, program_name,
-    program_spec, program_with, setup_paths, setup_profile, setup_program, setup_program_name,
-    setup_specs, travel_check, write_posting,
+    Posting, Program, SetupProgram, builtin_posts, custom_gcode, cut_order, load_profile,
+    next_tools, placed_program, placed_specs, plan_posting, posted_path, probe_log_name, program,
+    program_name, program_spec, program_with, setup_paths, setup_profile, setup_program,
+    setup_program_name, setup_specs, travel_check, write_posting,
 };
 pub use run::{Passed, Ran, check_runnable, gate, run_setup, run_setup_from, run_setup_planned};

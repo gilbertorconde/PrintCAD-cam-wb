@@ -32,9 +32,9 @@ use camcraft_post::profile::{ProbeStyle, Profile, Rapid};
 use camcraft_post::render::{Title, render_program};
 use camcraft_session::checks::Level as CheckLevel;
 use camcraft_session::{
-    Model, Models, Ran, custom_gcode, load_profile, next_tools, parse_job, placed_program,
-    placed_specs, posted_path, program_spec, read_probe_results, run_setup_from, setup_program,
-    setup_program_name, travel_check,
+    Model, Models, Ran, custom_gcode, cut_order, load_profile, next_tools, parse_job,
+    placed_program, placed_specs, posted_path, program_spec, read_probe_results, run_setup_from,
+    setup_program, setup_program_name, travel_check,
 };
 use camcraft_sim::stock::{Axis, Block};
 use glam::{DAffine3, DMat4, DVec2, DVec3};
@@ -114,6 +114,8 @@ pub(crate) struct Executed {
     pub job: camcraft_core::job::Job,
     pub ran: Ran,
     pub draws: Vec<Drawn>,
+    /// The run as its program cuts it, part by part.
+    pub cut: cut::Cut,
 }
 
 /// [`answer_reporting`], keeping what the answer was made from.
@@ -181,8 +183,6 @@ pub(crate) fn execute(
     // could not be for.
     let mut unchecked: std::collections::BTreeMap<String, Vec<usize>> = Default::default();
     let mut with_paths = 0;
-    // Machining seconds before the operation under way.
-    let mut elapsed = 0.0;
     let custom = custom_gcode(setup, &ran.result.operations);
     let next = next_tools(&ran.result.operations);
     let date = today();
@@ -195,6 +195,11 @@ pub(crate) fn execute(
     let rapid = profile.rapids();
     // What the programs' headers say of a tilt, once.
     let mut tilt: Option<Vec<String>> = None;
+    // Each operation at each part, in the order the programs cut them: a
+    // line of a program is of one of these.
+    let order = cut_order(setup, &ran.result.operations, !one_each);
+    let section_of =
+        |k: usize, part: usize| order.iter().position(|s| *s == (k, part)).unwrap_or(k);
     for (k, op) in ran.result.operations.iter().enumerate() {
         let heights = match (setup.operations.get(k), stock_box) {
             _ if op.made == Made::Text => Vec::new(),
@@ -251,6 +256,7 @@ pub(crate) fn execute(
                     )
                 } else {
                     lower_counted(&posted_path(op, &spec, 0.0), &spec)
+                        .map(|(ops, made)| (ops, made.into_iter().map(|n| (0, n)).collect()))
                 }
             });
             match posted {
@@ -263,13 +269,20 @@ pub(crate) fn execute(
                     };
                     numbered += 1;
                     let (text, report) = render_program(&ops, &profile, &title);
+                    // Each part's moves its own section's.
+                    let made: Vec<(usize, usize)> = made
+                        .into_iter()
+                        .map(|(part, n)| (section_of(k, part), n))
+                        .collect();
+                    let (sections, moves) = line_moments(&made, &report.op_lines, report.lines);
                     Some(Program {
                         name,
                         extension: profile.extension.clone(),
                         post: profile.name.clone(),
                         lines: usize::try_from(report.lines).unwrap_or(usize::MAX),
-                        moves: line_moves(&made, &report.op_lines, report.lines),
+                        moves,
                         operations: Vec::new(),
+                        sections,
                         text,
                     })
                 }
@@ -349,7 +362,7 @@ pub(crate) fn execute(
                 .get(k)
                 .filter(|_| op.made.has_paths())
                 .and_then(|spec| cutting(spec, op, &drawn, &profile)),
-            marks: marks(&ran, k, op, &drawn, elapsed),
+            marks: marks(&ran, k, op, &drawn),
             outlines: setup.operations.get(k).and_then(|spec| {
                 let uses = spec.strategy.uses();
                 if !(uses.boundary || uses.outline || uses.traces || uses.carves) {
@@ -368,7 +381,6 @@ pub(crate) fn execute(
                 .outlines(spec)
             }),
         });
-        elapsed += drawn.times.last().copied().unwrap_or(0.0);
         draws.push(drawn);
     }
 
@@ -386,6 +398,13 @@ pub(crate) fn execute(
             Ok(p) => {
                 tool_changes = p.tool_changes;
                 let (operations, moves) = line_moments(&p.made, &p.report.op_lines, p.report.lines);
+                let made: Vec<(usize, usize)> = p
+                    .made
+                    .iter()
+                    .zip(&p.parts)
+                    .map(|(&(k, n), &part)| (section_of(k, part), n))
+                    .collect();
+                let (sections, _) = line_moments(&made, &p.report.op_lines, p.report.lines);
                 Some(Program {
                     name,
                     extension: profile.extension.clone(),
@@ -393,6 +412,7 @@ pub(crate) fn execute(
                     lines: usize::try_from(p.report.lines).unwrap_or(usize::MAX),
                     moves,
                     operations,
+                    sections,
                     text: p.text,
                 })
             }
@@ -415,16 +435,22 @@ pub(crate) fn execute(
     if tool_changes == 0 {
         tool_changes = changes_by_tool(&ran.result.operations);
     }
-    // Each part machined as the first is.
-    let parts = setup.placed().len();
+    // Each part machined as the first is, in the programs' order, the tool
+    // going from part to part between.
+    let placed = setup.placed();
+    let offsets: Vec<DVec3> = placed.iter().map(|p| DVec3::from_array(p.at)).collect();
+    let cut = cut::Cut::of(&order, &draws, &offsets, &rapid);
     let machining = Machining {
-        moves: elapsed * parts as f64,
+        moves: cut.total(),
         tool_changes: u32::try_from(tool_changes).unwrap_or(u32::MAX),
         tool_change: profile.tool_change_seconds,
         rapid: [rapid.x, rapid.y, rapid.z],
         rapid_given: profile.rapid.is_some(),
     };
-    let tools = tool_uses(&job, setup, &ran.result.operations, &draws);
+    let mut tools = tool_uses(&job, setup, &ran.result.operations, &draws);
+    for t in &mut tools {
+        t.seconds *= placed.len() as f64;
+    }
     // On a rotary the stock's box is the bar's, not the bar unrolled.
     let stock_box = stock_box.map(|b| match frame.wrap {
         Some(w) => bar_box(&w, b),
@@ -484,8 +510,7 @@ pub(crate) fn execute(
             })
             .collect(),
         cylinder: cylinder(&frame, &ran.result.stocks),
-        placements: setup
-            .placed()
+        placements: placed
             .iter()
             .map(|p| cam_protocol::PlacedPart {
                 wcs: profile
@@ -500,7 +525,8 @@ pub(crate) fn execute(
         origin: to_array(frame.to_model(DVec3::ZERO)),
         operations,
         material: material(&ran),
-        playback: playback::playback(&job, &ran, &draws),
+        sections: cut.sections.clone(),
+        playback: playback::playback(&job, &ran, &draws, &cut),
         program,
         seconds: started.elapsed().as_secs_f64(),
         timing: cam_protocol::timing(draws.iter().map(|d| d.times.as_slice())),
@@ -513,6 +539,7 @@ pub(crate) fn execute(
         job,
         ran,
         draws,
+        cut,
     })
 }
 
@@ -812,23 +839,21 @@ pub(crate) fn load(request: &Request, job: &Job) -> Result<Vec<(String, Model)>,
 
 /// Where operation `k`'s checks found something at a move, and its steep
 /// descents deeper than it may plunge, as camcraft's app marks its timeline:
-/// in order, a failure kept over a warning at the same place. `start` is
-/// when the operation starts, in the setup's machining seconds.
+/// in order, a failure kept over a warning at the same place, each timed
+/// from the operation's start.
 fn marks(
     ran: &Ran,
     k: usize,
     op: &camcraft_core::run::OperationResult,
     drawn: &Drawn,
-    start: f64,
 ) -> Vec<Mark> {
     let at = |moves: usize, fail: bool| Mark {
         moves,
-        seconds: start
-            + moves
-                .checked_sub(1)
-                .and_then(|i| drawn.times.get(i))
-                .copied()
-                .unwrap_or(0.0),
+        seconds: moves
+            .checked_sub(1)
+            .and_then(|i| drawn.times.get(i))
+            .copied()
+            .unwrap_or(0.0),
         fail,
     };
     let mut out: Vec<Mark> = ran
@@ -955,29 +980,10 @@ fn travel_notes(
     out
 }
 
-/// For each of a program's `lines`, how many moves are made once it has run:
-/// `made` says it of each instruction, and `op_lines` how many lines are
-/// written once each is. The header's lines make none.
-pub(crate) fn line_moves(made: &[usize], op_lines: &[u64], lines: u64) -> Vec<u32> {
-    let mut out = Vec::with_capacity(usize::try_from(lines).unwrap_or(0));
-    let mut now = 0;
-    for (n, upto) in made.iter().zip(op_lines) {
-        now = u32::try_from(*n).unwrap_or(u32::MAX);
-        while (out.len() as u64) < *upto {
-            out.push(now);
-        }
-    }
-    // The footer's.
-    while (out.len() as u64) < lines {
-        out.push(now);
-    }
-    out
-}
-
-/// For each of a setup's program's `lines`, the operation it is of and how
-/// many of that operation's moves are made once it has run: `made` says it
-/// of each instruction, and `op_lines` how many lines are written once each
-/// is. The header's lines are the first operation's, making none.
+/// For each of a program's `lines`, the operation (or section) it is of and
+/// how many of its moves are made once it has run: `made` says it of each
+/// instruction, and `op_lines` how many lines are written once each is. The
+/// header's lines are the first's, making none.
 pub(crate) fn line_moments(
     made: &[(usize, usize)],
     op_lines: &[u64],
@@ -1410,6 +1416,7 @@ fn material(ran: &Ran) -> Option<Material> {
 }
 
 pub mod cache;
+mod cut;
 mod left;
 mod outlines;
 mod playback;

@@ -9,10 +9,15 @@
 //! The playhead is a time: machining seconds from the setup's start, which
 //! the helper works out for every move. The material is what the helper sent
 //! for the last moment at or before it.
+//!
+//! A setup of several parts plays as its program cuts them: the timeline is
+//! its sections, each operation at each part in the program's order, the
+//! tool going from part to part between, and each part's material is cut as
+//! far as the program has cut that part.
 
 use std::time::Instant;
 
-use cam_protocol::{Moment, Playback, Run};
+use cam_protocol::{Moment, Playback, Run, Section};
 use printcad_bench_sdk::api::*;
 
 use crate::panel::{button, choice};
@@ -104,32 +109,43 @@ pub struct Playing {
     pub running: Option<(Instant, bool)>,
 }
 
-/// What a run's timeline holds: when each operation starts, how long the
-/// whole is, and where its problems are.
+/// What a run's timeline holds: its sections (each operation at each
+/// part), how long the whole is, and where its problems are.
 struct Timeline {
-    starts: Vec<f64>,
+    sections: Vec<Section>,
     total: f64,
     marks: Vec<(f64, bool)>,
 }
 
 impl Timeline {
     fn of(run: &Run) -> Self {
-        let mut starts = Vec::new();
-        let mut total = 0.0;
-        for op in &run.operations {
-            starts.push(total);
-            total += op.seconds;
-        }
-        let marks = run
-            .operations
+        let sections = run.cut();
+        let total = sections
             .iter()
-            .flat_map(|o| o.marks.iter().map(|m| (m.seconds, m.fail)))
+            .map(|s| s.start + s.seconds)
+            .fold(0.0, f64::max);
+        // An operation's problems at each part it is cut at.
+        let mut marks: Vec<(f64, bool)> = sections
+            .iter()
+            .flat_map(|s| {
+                run.operations
+                    .get(s.op)
+                    .into_iter()
+                    .flat_map(|o| o.marks.iter())
+                    .map(|m| (s.start + m.seconds, m.fail))
+            })
             .collect();
+        marks.sort_by(|a, b| a.0.total_cmp(&b.0));
         Self {
-            starts,
+            sections,
             total,
             marks,
         }
+    }
+
+    /// When section `s` starts; the end past the last.
+    fn start(&self, s: usize) -> f64 {
+        self.sections.get(s).map_or(self.total, |s| s.start)
     }
 
     /// The places playing stops by itself.
@@ -139,19 +155,24 @@ impl Timeline {
             out.extend(self.marks.iter().map(|(s, _)| *s));
         }
         if t.stop_at_ops {
-            out.extend(self.starts.iter().skip(1));
+            out.extend(self.sections.iter().skip(1).map(|s| s.start));
         }
         out.sort_by(f64::total_cmp);
         out
     }
 
-    /// The operation under way at `at`.
-    fn op_at(&self, at: f64) -> usize {
-        self.starts
+    /// The section under way at `at`: the last started by then.
+    fn section_at(&self, at: f64) -> usize {
+        self.sections
             .iter()
-            .rposition(|s| *s <= at + 1e-9)
+            .rposition(|s| s.start <= at + 1e-9)
             .unwrap_or(0)
     }
+}
+
+/// The operation section `section` of `run` cuts, and at which part.
+pub fn section_of(run: &Run, section: usize) -> Option<Section> {
+    run.cut().get(section).copied()
 }
 
 /// The place in `moments` showing time `at`: the last at or before it.
@@ -174,6 +195,24 @@ impl Playing {
 
     pub fn moment<'a>(&self, play: &'a Playback) -> Option<&'a Moment> {
         play.moments.get(moment_index(play, self.at))
+    }
+
+    /// Each of `parts` parts' material as it stands: the last moment of
+    /// that part at or before the playhead, else the start (the first
+    /// moment), before the part is cut.
+    pub fn materials<'a>(&self, play: &'a Playback, parts: usize) -> Vec<&'a Moment> {
+        let here = moment_index(play, self.at);
+        let Some(start) = play.moments.first() else {
+            return Vec::new();
+        };
+        (0..parts.max(1))
+            .map(|p| {
+                play.moments[..=here.min(play.moments.len() - 1)]
+                    .iter()
+                    .rfind(|m| m.part == p)
+                    .unwrap_or(start)
+            })
+            .collect()
     }
 
     /// Move on with the time passed, at `transport`'s speed, stopping where
@@ -267,20 +306,19 @@ pub fn apply(
         Command::Start => p.stand(0.0, total),
         Command::End => p.stand(total, total),
         Command::PreviousOp => {
-            let op = line.op_at(p.at);
-            let start = line.starts.get(op).copied().unwrap_or(0.0);
-            // At an operation's start already, the one before's.
-            let to = if p.at - start < 1e-6 && op > 0 {
-                line.starts.get(op - 1).copied().unwrap_or(0.0)
+            let s = line.section_at(p.at);
+            let start = line.start(s).min(total);
+            // At a section's start already, the one before's.
+            let to = if p.at - start < 1e-6 && s > 0 {
+                line.start(s - 1)
             } else {
                 start
             };
             p.stand(to, total);
         }
         Command::NextOp => {
-            let op = line.op_at(p.at);
-            let to = line.starts.get(op + 1).copied().unwrap_or(total);
-            p.stand(to, total);
+            let s = line.section_at(p.at);
+            p.stand(line.start(s + 1), total);
         }
         Command::StepBack(n) => {
             let to = if p.at > moment_time(here) + 1e-9 {
@@ -334,19 +372,44 @@ pub fn transport_widgets(
             0.0
         }
     };
-    for (i, op) in run.operations.iter().enumerate() {
-        let (a, b) = (x(line.starts[i]), x(line.starts[i] + op.seconds));
+    let several = run.placements.len() > 1;
+    for (i, s) in line.sections.iter().enumerate() {
+        let Some(op) = run.operations.get(s.op) else {
+            continue;
+        };
+        let (a, b) = (x(s.start), x(s.start + s.seconds));
         shapes.push(DiagramShape::Path {
             points: vec![[a, 12.0], [b, 12.0], [b, 32.0], [a, 32.0]],
             closed: true,
             stroke: DiagramStroke::Outline,
             fill: false,
         });
-        // A name where it fits.
-        if b - a > 9.0 * op.name.chars().count() as f32 {
+        // Where the program goes on to another part, a line across.
+        let wcs = run.placements.get(s.part).map(|p| p.wcs.as_str());
+        if several && i > 0 && line.sections[i - 1].part != s.part {
+            shapes.push(DiagramShape::Path {
+                points: vec![[a, 8.0], [a, 36.0]],
+                closed: false,
+                stroke: DiagramStroke::Outline,
+                fill: false,
+            });
+        }
+        // A name where it fits, and the part's offset: else the offset
+        // alone.
+        let fits = |t: &str| b - a > 9.0 * t.chars().count() as f32;
+        let named = match wcs.filter(|_| several) {
+            Some(w) => format!("{} {w}", op.name),
+            None => op.name.clone(),
+        };
+        let label = if fits(&named) {
+            Some(named)
+        } else {
+            wcs.filter(|w| several && fits(w)).map(str::to_string)
+        };
+        if let Some(text) = label {
             shapes.push(DiagramShape::Text {
                 at: [(a + b) / 2.0, 22.0],
-                text: op.name.clone(),
+                text,
                 mono: false,
             });
         }
@@ -426,11 +489,19 @@ pub fn transport_widgets(
             on: t.stop_at_ops,
         },
     ];
-    if let Some((op, moves, of)) = under_way(run, playing, exact) {
-        let name = run.operations.get(op).map_or("", |o| o.name.as_str());
+    if let Some((s, moves, of)) = under_way(run, playing, exact) {
+        let section = line.sections.get(s).copied().unwrap_or_default();
+        let name = run
+            .operations
+            .get(section.op)
+            .map_or("", |o| o.name.as_str());
+        let value = match run.placements.get(section.part).filter(|_| several) {
+            Some(p) => format!("{name} at {}, move {moves} of {of}", p.wcs),
+            None => format!("{name}, move {moves} of {of}"),
+        };
         out.push(Widget::Value {
             label: String::new(),
-            value: format!("{name}, move {moves} of {of}"),
+            value,
             mono: false,
         });
     }
@@ -446,10 +517,10 @@ pub fn transport_widgets(
     out
 }
 
-/// The operation under way at the playhead, how many of its moves are made,
-/// and of how many: `exact`, as a playback session last answered, or else
-/// worked out between the run's moments either side of the playhead (at its
-/// end while it is not played back).
+/// The section under way at the playhead (an operation at a part), how
+/// many of its moves are made, and of how many: `exact`, as a playback
+/// session last answered, or else worked out between the run's moments
+/// either side of the playhead (at its end while it is not played back).
 pub fn under_way(
     run: &Run,
     playing: Option<&Playing>,
@@ -459,46 +530,45 @@ pub fn under_way(
         run.playback.as_ref()?;
         let line = Timeline::of(run);
         let at = playing.map_or(line.total, |p| p.at);
-        let op = line.op_at(at);
-        let known = moments_of(run, op, &line);
+        let s = line.section_at(at);
+        let known = moments_of(run, s, &line);
         let of = known.last().map_or(0, |(n, _)| *n);
-        let before = known.iter().rfind(|(_, s)| *s <= at + 1e-9)?;
-        let made = match known.iter().find(|(_, s)| *s > at + 1e-9) {
+        let before = known.iter().rfind(|(_, t)| *t <= at + 1e-9)?;
+        let made = match known.iter().find(|(_, t)| *t > at + 1e-9) {
             Some(after) if after.1 > before.1 => {
                 let f = (at - before.1) / (after.1 - before.1);
                 before.0 + (f * (after.0 - before.0) as f64) as usize
             }
             _ => before.0,
         };
-        Some((op, made, of))
+        Some((s, made, of))
     })
 }
 
-/// Operation `op`'s moments as moves made and when: its start, with none
-/// made, then each of the run's.
-fn moments_of(run: &Run, op: usize, line: &Timeline) -> Vec<(usize, f64)> {
-    let start = line.starts.get(op).copied().unwrap_or(line.total);
-    std::iter::once((0, start))
+/// Section `section`'s moments as moves made and when: its start, with
+/// none made, then each of the run's.
+fn moments_of(run: &Run, section: usize, line: &Timeline) -> Vec<(usize, f64)> {
+    std::iter::once((0, line.start(section)))
         .chain(
             run.playback
                 .iter()
                 .flat_map(|p| p.moments.iter())
-                .filter(|m| m.op == op)
+                .filter(|m| m.section == section)
                 .map(|m| (m.moves, m.seconds)),
         )
         .collect()
 }
 
-/// When operation `op` of `run` has made `made` of its moves, in machining
-/// seconds from the setup's start: from when each move ends (`times`, from a
-/// playback session) where they are known, else between the run's moments
-/// either side. Where the ends are known, a hair past it, so a seek there
-/// stands with that many made whatever the rounding, but never as far as
-/// the next move's end.
-pub fn time_of(run: &Run, times: Option<&[Vec<f32>]>, op: usize, made: usize) -> f64 {
+/// When section `section` of `run` (an operation at a part) has made
+/// `made` of its moves, in machining seconds from the setup's start: from
+/// when each move ends (`times`, from a playback session) where they are
+/// known, else between the run's moments either side. Where the ends are
+/// known, a hair past it, so a seek there stands with that many made
+/// whatever the rounding, but never as far as the next move's end.
+pub fn time_of(run: &Run, times: Option<&[Vec<f32>]>, section: usize, made: usize) -> f64 {
     let line = Timeline::of(run);
-    let start = line.starts.get(op).copied().unwrap_or(line.total);
-    if let Some(ends) = times.and_then(|t| t.get(op)) {
+    let start = line.start(section);
+    if let Some(ends) = times.and_then(|t| t.get(section)) {
         let end = |i: usize| ends.get(i).map(|t| f64::from(*t));
         let at = made.checked_sub(1).and_then(end).unwrap_or(start);
         // At the last, no further: past it is the next operation's start.
@@ -507,7 +577,7 @@ pub fn time_of(run: &Run, times: Option<&[Vec<f32>]>, op: usize, made: usize) ->
             None => at,
         };
     }
-    let known = moments_of(run, op, &line);
+    let known = moments_of(run, section, &line);
     let before = known.iter().rfind(|(n, _)| *n <= made).copied();
     let after = known.iter().find(|(n, _)| *n >= made).copied();
     match (before, after) {
@@ -602,8 +672,9 @@ pub fn key_command(key: &str, shift: bool, big: usize) -> Option<Command> {
     })
 }
 
-/// The material at `m`, as a mesh over the grid.
-pub fn material_at(play: &Playback, m: &Moment) -> Mesh {
+/// The material at `m`, as a mesh over the grid, moved by `offset` to the
+/// part it is of.
+pub fn material_at(play: &Playback, m: &Moment, offset: [f32; 3]) -> Mesh {
     let positions = play
         .base
         .iter()
@@ -613,7 +684,7 @@ pub fn material_at(play: &Playback, m: &Moment) -> Mesh {
             let z = play.low + play.step * f32::from(*h);
             // On a rotary each point stands out from the axis its own way.
             let up = play.axes.get(i).unwrap_or(&play.axis);
-            [b[0] + up[0] * z, b[1] + up[1] * z, b[2] + up[2] * z]
+            std::array::from_fn(|k| b[k] + up[k] * z + offset[k])
         })
         .collect();
     Mesh {
@@ -692,7 +763,7 @@ mod tests {
                     30.0,
                     vec![Problem {
                         moves: 7,
-                        seconds: 25.0,
+                        seconds: 15.0,
                         fail: true,
                     }],
                 ),
@@ -707,6 +778,7 @@ mod tests {
                 step: 0.5,
                 moments: (0..=8)
                     .map(|i| Moment {
+                        section: usize::from(i > 2),
                         op: usize::from(i > 2),
                         seconds: f64::from(i) * 5.0,
                         heights: vec![20],
@@ -797,6 +869,7 @@ mod tests {
         moments.retain(|m| m.op == 0);
         for (moves, seconds) in [(4, 20.0), (8, 40.0)] {
             moments.push(Moment {
+                section: 1,
                 op: 1,
                 moves,
                 of: 8,
@@ -828,6 +901,7 @@ mod tests {
         moments.retain(|m| m.op == 0);
         for (moves, seconds) in [(4, 20.0), (8, 40.0)] {
             moments.push(Moment {
+                section: 1,
                 op: 1,
                 moves,
                 of: 8,
@@ -846,7 +920,101 @@ mod tests {
     fn the_material_stands_where_the_heights_say() {
         let run = run();
         let play = run.playback.as_ref().unwrap();
-        let mesh = material_at(play, &play.moments[0]);
+        let mesh = material_at(play, &play.moments[0], [0.0; 3]);
         assert_eq!(mesh.positions, vec![[0.0, 0.0, 0.0]]);
+        let moved = material_at(play, &play.moments[0], [100.0, 0.0, 0.0]);
+        assert_eq!(moved.positions, vec![[100.0, 0.0, 0.0]], "at its part");
+    }
+
+    /// The run of [`run`] at two parts by tool: the face at G54 (0 to 10
+    /// s), the tool across to G55 (2 s), the face there (12 to 22 s), back
+    /// (2 s), the profile at G54 (24 to 54 s), across, and at G55 (56 to 86
+    /// s). A moment at each section's end.
+    fn two_parts() -> Run {
+        use cam_protocol::{PlacedPart, Section};
+        let mut run = run();
+        run.placements = ["G54", "G55"]
+            .map(|w| PlacedPart {
+                wcs: w.into(),
+                ..PlacedPart::default()
+            })
+            .to_vec();
+        run.sections = [(0, 0, 0.0), (0, 1, 12.0), (1, 0, 24.0), (1, 1, 56.0)]
+            .map(|(op, part, start)| Section {
+                op,
+                part,
+                start,
+                seconds: run.operations[op].seconds,
+            })
+            .to_vec();
+        let play = run.playback.as_mut().unwrap();
+        play.moments = std::iter::once((0, 0, 0, 0.0))
+            .chain([
+                (0, 0, 4, 10.0),
+                (1, 0, 4, 22.0),
+                (2, 1, 8, 54.0),
+                (3, 1, 8, 86.0),
+            ])
+            .map(|(section, op, moves, seconds)| Moment {
+                section,
+                op,
+                part: section % 2,
+                moves,
+                of: moves,
+                seconds,
+                heights: vec![u16::try_from(section).unwrap()],
+                ..Moment::default()
+            })
+            .collect();
+        run
+    }
+
+    /// Several parts play as the program cuts them: section by section,
+    /// the operation buttons going from one to the next, each operation's
+    /// problems at each part, and each part's material as far as it is cut.
+    #[test]
+    fn several_parts_play_section_by_section() {
+        let run = two_parts();
+        let line = Timeline::of(&run);
+        assert_eq!(line.total, 86.0);
+        assert_eq!(
+            line.marks,
+            vec![(39.0, true), (71.0, true)],
+            "the profile's failure at each part"
+        );
+        let (mut p, mut t) = (None, Transport::default());
+        let mut go = |c| {
+            let steps = steps(&run, None);
+            apply(&mut p, &mut t, "s", &run, c, &steps);
+            p.as_ref().unwrap().at
+        };
+        assert_eq!(go(Command::Seek(11.0)), 11.0, "on the way to G55");
+        assert_eq!(go(Command::NextOp), 12.0, "the face at G55");
+        assert_eq!(go(Command::NextOp), 24.0);
+        assert_eq!(go(Command::PreviousOp), 12.0);
+        let playing = |at| Playing {
+            setup: "s".into(),
+            at,
+            running: None,
+        };
+        assert_eq!(under_way(&run, Some(&playing(17.0)), None), Some((1, 2, 4)));
+        assert_eq!(under_way(&run, Some(&playing(70.0)), None).unwrap().0, 3);
+        // Seeking a move finds its own part's time.
+        assert_eq!(time_of(&run, None, 3, 8), 86.0);
+        assert_eq!(time_of(&run, None, 1, 0), 12.0);
+        // Each part's material: the second untouched until its face, then
+        // faced while the first is profiled.
+        let play = run.playback.as_ref().unwrap();
+        let heights = |at| -> Vec<u16> {
+            playing(at)
+                .materials(play, 2)
+                .iter()
+                .map(|m| m.heights[0])
+                .collect()
+        };
+        assert_eq!(heights(5.0), [0, 0]);
+        assert_eq!(heights(30.0), [0, 1]);
+        assert_eq!(heights(60.0), [2, 1]);
+        assert_eq!(heights(86.0), [2, 3]);
     }
 }

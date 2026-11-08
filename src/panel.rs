@@ -346,7 +346,8 @@ fn run_widgets(cam: &Cam, setup: &str, only: Option<usize>) -> Vec<Widget> {
     // The program being played: the operation's own, or in a setup's panel
     // the one under way.
     let here = cam.under_way(setup);
-    if let Some(op) = only.or(here.map(|(op, _)| op)) {
+    let under = here.and_then(|(s, _)| crate::playback::section_of(run, s));
+    if let Some(op) = only.or(under.map(|s| s.op)) {
         let mut kept = cam.listing.borrow_mut();
         out.extend(crate::listing::widgets(run, op, here, &mut kept));
     }
@@ -523,16 +524,31 @@ fn sheet_button() -> Widget {
 /// whole, and what that leaves out.
 fn machining(run: &Run) -> Widget {
     let m = &run.machining;
+    // With several parts, each operation at each, and the tool's way
+    // between them.
+    let parts = run.placements.len().max(1);
     let mut rows: Vec<Widget> = run
         .operations
         .iter()
         .filter(|o| o.seconds > 0.0)
         .map(|o| Widget::Value {
             label: o.name.clone(),
-            value: crate::sheet::duration(o.seconds),
+            value: if parts > 1 {
+                format!("{} × {parts}", crate::sheet::duration(o.seconds))
+            } else {
+                crate::sheet::duration(o.seconds)
+            },
             mono: false,
         })
         .collect();
+    let between = crate::sheet::between_parts(run);
+    if between > 0.0 {
+        rows.push(Widget::Value {
+            label: "Between parts".into(),
+            value: crate::sheet::duration(between),
+            mono: false,
+        });
+    }
     rows.push(Widget::Value {
         label: "Tool changes".into(),
         value: match m.tool_change {
