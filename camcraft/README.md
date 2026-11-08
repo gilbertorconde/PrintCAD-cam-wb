@@ -588,9 +588,12 @@ the unrolled frame stands on a radius, and each column round it, a ray
 out from the axis at an angle to it, is cut down to where the tool's
 underside first meets the ray (`stamp_round`), every move sampled as a
 straight line in the unrolled frame, the seam no edge; a column the
-tool's side leaves before its top keeps its material. Its volume is the
-wedges'. `PackedStock` keeps the round, in its bytes too (after
-everything else, so a stock kept before reads as it did). On a rotary
+tool's side leaves before its top keeps its material. A move's stamps are
+cut as one (`stamp_round_all`): each column by them in turn, from its own
+height, so each row round the bar is worked out alone, in parallel where
+they cover many cells, as one stamp alone covers too few to share out.
+Its volume is the wedges'. `PackedStock` keeps the round, in its bytes
+too (after everything else, so a stock kept before reads as it did). On a rotary
 `sweep_watching` only sweeps: the shank and holder are not watched. In
 `camcraft-post`, `[rotary]` has `feed` (`rotary::RotaryFeed`: inverse
 time, the default, or degrees) and `unwind`, and a rotary
@@ -634,7 +637,8 @@ the tool's height there, the column taken no higher than where the ray
 leaves the tool's side, rows round from the tool's taken while they could
 still be met higher than the best yet. Points are sampled a quarter of
 the tool's radius apart, again between two where the tip strays from
-the line between them, in parallel, and simplified. `JobError::Wrap`
+the line between them, and simplified: every pass of a level at once,
+each sampled and refined in parallel. `JobError::Wrap`
 lets parallel finishing through, and `StrategyError::RotaryGrid` refuses a
 part on a grid that does not go round in whole cells.
 

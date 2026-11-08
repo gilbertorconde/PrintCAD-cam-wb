@@ -257,26 +257,48 @@ pub fn rotary_finish<T: ToolProfile + Sync>(
             // turn as it goes.
             RotaryPattern::Helical => vec![((lo, 0.0), (hi, (hi - lo) / p.stepover * period))],
         };
-        for (a, b) in runs {
-            let at = |t: f64| (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t);
-            let length = (b.0 - a.0).hypot(b.1 - a.1);
-            let n = (length / step).ceil().clamp(1.0, 1e7);
-            // Bounded, so the narrowing is exact.
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let n = n as usize;
-            let ts: Vec<f64> = (0..=n).map(|i| i as f64 / n as f64).collect();
-            let first: Vec<(f64, DVec3)> = ts.par_iter().map(|&t| (t, point(at(t)))).collect();
-            let mut points = Vec::with_capacity(first.len());
-            for pair in first.windows(2) {
-                let [a, b] = pair else { continue };
-                points.push(a.1);
-                refine(&point, &at, *a, *b, p.tolerance * 0.25, 6, &mut points);
-            }
-            if let Some(&(_, last)) = first.last() {
-                points.push(last);
-            }
-            report.samples += points.len() as u64;
-            let kept = crate::strategy::vcarve::simplified(&points, p.tolerance * 0.25);
+        // Every pass at once, each sampled and refined in parallel too: the
+        // helix is one long pass, and along the bar each is short.
+        let passes: Vec<(Vec<DVec3>, u64)> = runs
+            .par_iter()
+            .map(|&(a, b)| {
+                let at = |t: f64| (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t);
+                let length = (b.0 - a.0).hypot(b.1 - a.1);
+                let n = (length / step).ceil().clamp(1.0, 1e7);
+                // Bounded, so the narrowing is exact.
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let n = n as usize;
+                let first: Vec<(f64, DVec3)> = (0..=n)
+                    .into_par_iter()
+                    .map(|i| {
+                        let t = i as f64 / n as f64;
+                        (t, point(at(t)))
+                    })
+                    .collect();
+                let between: Vec<Vec<DVec3>> = first
+                    .par_windows(2)
+                    .map(|pair| {
+                        let mut out = Vec::new();
+                        if let [a, b] = pair {
+                            out.push(a.1);
+                            refine(&point, &at, *a, *b, p.tolerance * 0.25, 6, &mut out);
+                        }
+                        out
+                    })
+                    .collect();
+                let mut points: Vec<DVec3> = between.into_iter().flatten().collect();
+                if let Some(&(_, last)) = first.last() {
+                    points.push(last);
+                }
+                let samples = points.len() as u64;
+                (
+                    crate::strategy::vcarve::simplified(&points, p.tolerance * 0.25),
+                    samples,
+                )
+            })
+            .collect();
+        for (kept, samples) in passes {
+            report.samples += samples;
             let Some((&start, rest)) = kept.split_first() else {
                 continue;
             };
