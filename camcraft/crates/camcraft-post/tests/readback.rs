@@ -18,7 +18,10 @@ use camcraft_post::readback::check;
 use camcraft_post::readback::check_setup;
 use camcraft_post::render::render;
 use camcraft_post::setup::{Joining, Section, lower_setup};
-use common::{chip_breaking, drilling, fixture, milled_holes, rigid_tapping, setup, spec, tapping};
+use common::{
+    chip_breaking, drilling, fixture, milled_holes, rigid_tapping, setup, spec, tapping, wrapped,
+    wrapping,
+};
 use glam::{DVec3, dvec3};
 
 fn post(path: &Toolpath, spec: &ProgramSpec, profile: &Profile) -> String {
@@ -1033,6 +1036,60 @@ fn rotary_positioning_reads_back_and_its_faults_are_caught() {
         &spec,
         "in the middle of the path",
     );
+}
+
+/// An engraving wrapped round A reads back for every profile with a safe
+/// retract and either way of feeding it, into the bar unrolled; and what it
+/// does wrong is caught: a move fed a minute where it is fed in inverse
+/// time, a move without its own F, an F that takes it at another feed, the
+/// tool off the rotary's axis, and an arc.
+#[test]
+fn a_wrapped_program_reads_back_and_its_faults_are_caught() {
+    let path = wrapped();
+    for (what, mut p) in profiles() {
+        if p.safe_retract.is_empty() || p.dialect == Dialect::Heidenhain {
+            continue;
+        }
+        for feed in ["inverse-time", "degrees"] {
+            let wrap = wrapping(&mut p, &format!("axes = [\"A\"]\nfeed = \"{feed}\"\n"));
+            let spec = ProgramSpec {
+                units: p.units,
+                wrap: Some(wrap),
+                ..spec()
+            };
+            reads_back(&path, &spec, &p, &format!("{what}, fed in {feed}"));
+        }
+    }
+
+    let mut p = Profile::builtin("linuxcnc").unwrap().unwrap();
+    let spec = ProgramSpec {
+        wrap: Some(wrapping(&mut p, "axes = [\"A\"]\n")),
+        ..spec()
+    };
+    let text = post(&path, &spec, &p);
+    check(&text, &path, &spec, &p).unwrap();
+    let fault = |from: &str, to: &str, what: &str| {
+        assert_eq!(text.matches(from).count(), 1, "{from:?} in\n{text}");
+        let broken = text.replace(from, to);
+        let e = check(&broken, &path, &spec, &p).unwrap_err();
+        assert!(e.what.contains(what), "{from:?} -> {to:?}: {e}");
+    };
+    fault("G93\n", "", "fed a minute");
+    let cut = text
+        .lines()
+        .find(|l| l.starts_with('A') && l.contains(" F"))
+        .unwrap()
+        .to_string();
+    let f = cut.split(" F").nth(1).unwrap();
+    fault(&cut, &cut.replace(&format!(" F{f}"), ""), "its own F");
+    fault(&cut, &cut.replace(&format!(" F{f}"), " F99"), "feeds at");
+    fault(
+        "G0 X5 Y0 A-28.648\n",
+        "G0 X5 Y1 A-28.648\n",
+        "off the rotary's axis",
+    );
+    let arc = format!("{cut}\nG2 X5 Y0 Z19.5 I1 J0 F100");
+    fault(&cut, &arc, "not G0 or G1");
 }
 
 /// A profile with rotaries and no way to send the tool clear is refused,

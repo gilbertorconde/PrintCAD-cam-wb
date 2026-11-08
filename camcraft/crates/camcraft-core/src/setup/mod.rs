@@ -23,6 +23,7 @@
 
 pub mod features;
 pub mod frame;
+mod round;
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
@@ -65,6 +66,9 @@ pub enum PrepareError {
     /// The setup it carries on from left no material.
     #[error("the setup it carries on from left no material")]
     NothingCarried,
+    /// It is on a rotary, and cannot be laid out as it is.
+    #[error("on a rotary: {0}")]
+    Wrap(String),
 }
 
 /// The material an earlier setup left, for a setup that carries on from it.
@@ -404,7 +408,11 @@ pub fn prepare_from(
         bounds_of(&setup.models, bodies, Some(&o))?
     };
     let origin = work_zero(job, setup, bodies, &o, &turned_blocks, turned_model)?;
-    let frame = Frame { turn: o, origin };
+    let mut frame = Frame {
+        turn: o,
+        origin,
+        wrap: None,
+    };
 
     let merged;
     let part_in_model = if let [one] = parts.as_slice() {
@@ -418,7 +426,32 @@ pub fn prepare_from(
         .iter()
         .map(|m| Piece { model: m.clone() })
         .collect();
-    let part = part_in_model.mapped(|p| frame.to_setup(p))?;
+    let (part, stocks) = match &setup.wrap {
+        Some(wrap) => {
+            if carried.is_some() {
+                return Err(PrepareError::Wrap(
+                    "its stock cannot carry on from an earlier setup".into(),
+                ));
+            }
+            let (unrolled, part, stock) = round::unrolled(
+                wrap,
+                &mut frame,
+                &turned_blocks,
+                part_in_model,
+                job.tolerance,
+            )?;
+            frame.wrap = Some(unrolled);
+            (part, vec![stock])
+        }
+        None => (
+            part_in_model.mapped(|p| frame.to_setup(p))?,
+            turned_blocks
+                .iter()
+                .map(|b| b.translated(-origin))
+                .collect(),
+        ),
+    };
+    let origin = frame.origin;
     let model_bounds = part
         .bounds()
         .ok_or_else(|| PrepareError::EmptyModel(setup.name.clone()))?;
@@ -426,10 +459,7 @@ pub fn prepare_from(
         part,
         pieces,
         model_bounds,
-        stocks: turned_blocks
-            .iter()
-            .map(|b| b.translated(-origin))
-            .collect(),
+        stocks,
         frame,
         carried: carried.zip(carry).map(|(c, carry)| {
             let carry = Carry {

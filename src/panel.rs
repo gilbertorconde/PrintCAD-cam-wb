@@ -758,6 +758,9 @@ pub fn setup_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
                     id,
                 ));
             }
+            if setup.cylinder_axis != CylinderAxis::Tool {
+                stock.extend(rotary_rows(id, &setup));
+            }
         }
     }
     stock.push(Widget::TextField {
@@ -926,6 +929,42 @@ pub fn setup_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
     panel
 }
 
+/// Whether a setup's lying cylinder is turned on a rotary, and the diameter
+/// its flat paths are wrapped round at.
+fn rotary_rows(id: &str, setup: &SetupData) -> Vec<Widget> {
+    let mut rows = vec![Widget::Toggle {
+        id: "wrap".into(),
+        label: "On a rotary (4th axis)".into(),
+        on: setup.wrap,
+    }];
+    if !setup.wrap {
+        return rows;
+    }
+    let (along, word) = if setup.cylinder_axis == CylinderAxis::Y {
+        ("Y", "B")
+    } else {
+        ("X", "A")
+    };
+    rows.push(number(
+        "wrap_diameter",
+        "Wrap diameter",
+        setup.wrap_diameter,
+        Dim::Length,
+        2,
+        id,
+    ));
+    rows.push(Widget::Text {
+        text: format!(
+            "Turned by {word} about {along}. Sketches are wrapped round it as drawn, flat over \
+             its top: across {along} is the distance round at the wrap diameter (0: the \
+             stock's). Parallel finishing goes along it (angle 0) or round it in a helix \
+             (90). The work zero is on the axis."
+        ),
+        mono: false,
+    });
+    rows
+}
+
 /// Whether a setup's cut depths are corrected to probe results, and from
 /// which.
 fn probe_rows(id: &str, setup: &SetupData) -> Vec<Widget> {
@@ -1091,6 +1130,7 @@ pub fn setup_event(cam: &mut Cam, id: &str, event: PanelEvent) {
                 "program_number" => &mut setup.program_number,
                 "tolerance" => &mut setup.tolerance,
                 "probe_segment" => &mut setup.probe_segment,
+                "wrap_diameter" => &mut setup.wrap_diameter,
                 _ => return,
             };
             *slot = value;
@@ -1253,6 +1293,10 @@ pub fn setup_event(cam: &mut Cam, id: &str, event: PanelEvent) {
         }
         PanelEvent::Toggle { id: t, on } if t == "wcs_known" => {
             setup.wcs_known = on;
+            cam.write_setup(id, &setup);
+        }
+        PanelEvent::Toggle { id: t, on } if t == "wrap" => {
+            setup.wrap = on;
             cam.write_setup(id, &setup);
         }
         PanelEvent::Toggle { id: t, on } if t == "probe_correct" => {

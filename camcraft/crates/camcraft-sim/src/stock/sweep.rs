@@ -201,7 +201,11 @@ impl Stock {
     pub fn sweep<T: SweptTool>(&mut self, moves: &[SimMove], tool: &T) -> Swept {
         let mut report = Swept::default();
         let pitch = self.field.pitch();
-        let step = (pitch * 0.5).max(1.0e-6);
+        let step = match self.round {
+            Some(round) => Self::round_step(pitch, tool.max_radius(), &round),
+            None => pitch * 0.5,
+        }
+        .max(1.0e-6);
 
         let mut at: Option<DVec3> = None;
         let mut first = true;
@@ -252,6 +256,10 @@ impl Stock {
         step: f64,
         first: bool,
     ) -> (f64, Option<CellRect>) {
+        // On a rotary every move is sampled: a level one goes round a helix.
+        if self.round.is_some() {
+            return self.stamp_along(from, to, tool, step, first);
+        }
         let rise = (to.z - from.z).abs();
         let run = (to - from).truncate().length();
         if rise <= STRAIGHT {
@@ -360,6 +368,9 @@ impl Stock {
     /// Lower the field to the underside of a tool at `tip`, returning how far the
     /// deepest cell was cut and which cells were lowered.
     pub(super) fn stamp<T: SweptTool>(&mut self, tip: DVec3, tool: &T) -> (f64, Option<CellRect>) {
+        if let Some(round) = self.round {
+            return self.stamp_round(tip, tool, round);
+        }
         let r = tool.max_radius();
         if !tip.is_finite() || !r.is_finite() || r <= 0.0 {
             return (0.0, None);

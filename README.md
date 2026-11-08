@@ -72,6 +72,56 @@ panels, the drawing and the helper that runs camcraft.
   controller's tilted-plane feature where it has one. A tilt the rotaries
   cannot reach, or only past their limits, is a failed check that says
   so.
+- **On a rotary (4th axis),** as Fusion's Wrap toolpath and rotary
+  operations: a setup whose stock is a cylinder lying along its X or Y can
+  be turned on a rotary about the cylinder's axis, A about X or B about Y,
+  the tool pointing at the axis. Everything is then planned on the
+  cylinder unrolled: along it, round it (millimetres round at the wrap
+  diameter, the stock's unless given, so the angle is that over half of
+  it) and out from its axis. A sketch is wrapped round it as drawn, flat
+  over its top, its Y (or X) the distance round, so engraving, slots, 2D
+  profiles and pockets and V-carving cut it round the bar, a line longer
+  than the bar is round going on round it. Parallel finishing is rotary
+  finishing there, the tool on its radius: passes along the bar, a
+  stepover apart round it at the wrap diameter, the rotary indexing
+  between them (an angle within 45° of 0), or one helix round it, a
+  stepover along it each turn (within 45° of 90), from end to end of the
+  part; given a stepdown, it roughs down from the stock's top a level at a
+  time first. Each point is as near the axis as the tool comes without
+  meeting the part as the simulation holds it, its side as well as its
+  tip, so what it plans it verifies. The work zero is on the axis,
+  across it: Y0 Z0 (or X0 Z0), Z out from the axis. Its program moves X,
+  Z and the rotary at once, each move fed in inverse time (`G93`, its own
+  `F` one over its minutes along the material at the tool's tip) or,
+  where the profile says `feed = "degrees"`, in units a minute counting
+  the degrees as lengths, so it takes as long as cutting at its feed; arcs
+  are written as straight moves. A profile names the rotary as for 3+2,
+  with `continuous = true` for one that turns on without end (its limits
+  are otherwise checked, as the travel), and `unwind = true` to start each
+  operation within half a turn of zero rather than of where the last
+  ended:
+
+  ```toml
+  [rotary]
+  axes = ["A"]
+  feed = "inverse-time"   # or "degrees"
+  unwind = false
+  [rotary.A]
+  continuous = true
+  ```
+
+  GRBL has no rotary (a fork such as grblHAL may add an A axis, in a
+  profile of your own); a setup on one posted for it, or for a machine
+  without a rotary about the bar's axis, is a failed check that says so,
+  and Klartext is not written turning a rotary. The material is simulated
+  round the bar, each column how far out it reaches from the axis, the
+  tool on its radius cutting each column it reaches round it, and checked
+  against the part unrolled; a column the tool's side leaves before its
+  top, beside a wall, keeps its material, so less is taken there than
+  was, never more. The shank and holder are not checked on a rotary, and a
+  note says so. Faces and edges picked on the part, and the operations
+  planned flat on it (clearing, facing, holes, the other 3D finishes),
+  are refused there.
 - **Operations**, after Fusion's: adaptive and pocket clearing; parallel,
   scallop, contour, flat, spiral, radial and morphed spiral finishing; 2D
   profiles and pockets; facing; drilling: at once, in pecks backing out,
@@ -511,6 +561,8 @@ local side = cam.setup{bodies = {"<body id>"}, tool_axis = "-y", machine_x = "+x
 local placed = cam.setup{bodies = {"<body id>"}, post = "linuxcnc", wcs = "G59.1",
                         work_offset = {x = 250, y = -180, z = -95}}  -- in machine coordinates
 local tilted = cam.setup{bodies = {"<body id>"}, tilt = {x = 30, y = 0}}
+local rotary = cam.setup{bodies = {"<body id>"}, stock = "cylinder", axis = "x",
+                         post = "my-4-axis", wrap = {diameter = 40}}  -- or wrap = true
                                         -- or tool_axis = {x = 0, y = -0.5, z = 0.866}
 local rough = cam.operation{setup = setup.feature, strategy = "adaptive", tool = "1/4 upcut",
                            heights = {bottom_from = "model-top", bottom = -6}}
@@ -572,9 +624,12 @@ useful there.
 
 ## What it does not do yet
 
-- Rotary axes only position the part, before each program cuts: nothing
-  moves on more than three axes at once, and no tilted-plane code (`G68.2`
-  and the like) is written.
+- Rotary axes position a tilted part before each program cuts, or turn a
+  setup on a rotary as it cuts, one rotary and two linear axes at once:
+  nothing moves on five, and no tilted-plane code (`G68.2` and the like)
+  is written. On a rotary, machining times take the moves unrolled, the
+  rotary as fast as the other axes, and the travel is checked from the
+  moves as posted on their own.
 - A setup's run is not kept in the document. The helper keeps the newest 64
   runs in the user's cache folder (`printcad-cam`; `CAM_HELPER_CACHE` names
   another, or `off`), so a document opened again on the same machine shows

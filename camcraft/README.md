@@ -560,6 +560,83 @@ taken, picked or not (`hole_targets`), and none that wide is
 `HoleError::NoneAsWide`. `HolePicking` is no longer `Eq`, as it holds a
 number.
 
+And a setup can be turned on a rotary as it cuts (4-axis), as Fusion's
+Wrap toolpath. In `camcraft-core`, `Setup::wrap` (`job::Wrap`, with an
+optional `diameter`) puts it on one: its stock must be one cylinder lying
+along the setup's X or Y, and it may not carry on from an earlier setup,
+be corrected to a probed surface, pick faces or edges of the part, or have
+operations other than engraving, slots, 2D profiles and pockets, V-carving
+and Custom G-code (`JobError::Wrap`, `PrepareError::Wrap`). A `Frame` has
+`wrap`, a `frame::Unrolled` (the axis the bar lies along and the radius it
+is unrolled at, the wrap diameter's half or the bar's): the work zero is
+moved onto the bar's axis across it (`setup::round`), the part is unrolled
+about it (along, round at the radius, out from the axis), each triangle
+split until no piece goes further round than keeps the straight line
+between its corners within half the tolerance of the curve, the pieces
+across the turn's seam put in on both sides of it; and the stock is the
+bar unrolled, a box once round, from the axis out to its radius.
+`Frame::shown` and `unshown` take a point of the paths to the model and
+back, rolled round. Sketch curves are not unrolled: they are the flat
+design, wrapped as drawn. The paths on a rotary are straight moves
+(`Toolpath::straightened`, the strategy's arcs before linking, the
+linker's after); `Toolpath::shifted` moves one. In `camcraft-sim`, a
+`Stock` can be `rounded` (`stock::Round`: which of its grid's axes goes
+round, and the radius), its grid a whole number of cells a turn
+(`round_pitch`), and the run's pitch made so: a tool's tip at a point of
+the unrolled frame stands on a radius, and each column round it, a ray
+out from the axis at an angle to it, is cut down to where the tool's
+underside first meets the ray (`stamp_round`), every move sampled as a
+straight line in the unrolled frame, the seam no edge; a column the
+tool's side leaves before its top keeps its material. Its volume is the
+wedges'. `PackedStock` keeps the round, in its bytes too (after
+everything else, so a stock kept before reads as it did). On a rotary
+`sweep_watching` only sweeps: the shank and holder are not watched. In
+`camcraft-post`, `[rotary]` has `feed` (`rotary::RotaryFeed`: inverse
+time, the default, or degrees) and `unwind`, and a rotary
+`continuous`; `wrap::Wrapping` is how a setup's unrolled path goes round
+the profile's rotary about the bar's axis (`Wrapping::of`, refused as
+`LowerError::NoRotaryFor` for a machine without one): A is the angle
+round, by its sign, B minus that, the across axis at zero. `ProgramSpec`
+has `wrap`; lowering then writes the moves as `Op::Turning` (X, Y, Z and
+the rotary at once, its `F` worked out for the move: one over its minutes
+along the material at the tool's tip, or units a minute with the degrees
+counted as lengths), between `Op::InverseTime(true)` (`G93`) and `(false)`
+(`G94`) when fed in inverse time, and the header says where the work
+zero is (`tilt_notes`). Every block in inverse time says its `F`, to four
+more places than a feed. `wrap::wound` moves a path round by whole turns
+to start near a distance round. `readback::read_wrapped` reads a program
+round a rotary back into the bar unrolled: the rotary with X, Y and Z in
+`G0` and `G1` blocks, the across axis kept at zero, `G93`, and feeds
+worked back to mm/min along the material, a move in inverse time without
+its own `F` refused; `check` and `check_setup` read it so for a
+`ProgramSpec` with `wrap`. In `camcraft-session`, `program_spec` gives a
+setup's spec its wrap (Klartext refused, `LowerError::WrapNotWritten`),
+leaving the rotary that turns it out of those positioned; `posted_path`
+and `setup_paths` wind each operation's path to start within half a turn
+of where the one before ended, or of zero with `unwind`, as it is posted;
+and `travel_check` takes the frame, checks the linear axes along and out
+from the bar, and the rotary's angles, as posted alone, against its
+limits unless it is continuous. Golden programs: `linuxcnc-wrap-a.nc` and
+`mach-wrap-a-degrees.nc`.
+
+And on a rotary, parallel finishing is rotary finishing
+(`strategy::rotary`): `StrategySpec::Parallel` on a wrapped setup goes
+along the bar in passes a stepover apart round it, back and forth, for an
+angle within 45 degrees of along it, else in one helix a stepover along
+it a turn (`RotaryPattern`), from end to end of the part, at levels a
+stepdown apart from the stock's top when one is given, the last on the
+part: the first level on the part everywhere ends it. Each point's tip
+is as near the axis as the tool comes without meeting the part on the simulator's grid (`rotary::Unrolled::tip`): each
+column round from the tool is a ray out from the axis, met by the tool's
+side `ρ sin dθ` across, so its tip may come no nearer than `ρ cos dθ` less
+the tool's height there, the column taken no higher than where the ray
+leaves the tool's side, rows round from the tool's taken while they could
+still be met higher than the best yet. Points are sampled a quarter of
+the tool's radius apart, again between two where the tip strays from
+the line between them, in parallel, and simplified. `JobError::Wrap`
+lets parallel finishing through, and `StrategyError::RotaryGrid` refuses a
+part on a grid that does not go round in whole cells.
+
 And one test: ogeom is 0.11.1 here, which printCAD's shapes need, and it
 meshes `round_edge_loose_fit.step`'s seam that 0.11.0 drew off the torus, so
 `a_loose_fit_is_refused_for_ogeoms_seam` became

@@ -16,6 +16,7 @@ use glam::{DVec2, DVec3};
 use crate::op::{CycleKind, Op};
 use crate::placeholder::{Values, fill};
 use crate::profile::{ArcStyle, Dialect, Profile, ProgramUnits, ToolChangeStyle};
+use crate::rotary::RotaryAt;
 
 /// Arcs shorter than this across their chord, in millimetres, are written as
 /// straight moves, as Fusion's posts write them (`minimumChordLength`): an arc
@@ -194,6 +195,10 @@ struct Writer<'a> {
     offset: Option<u32>,
     // What the placeholders in the profile's lines stand for.
     values: Values,
+    // The rotary's word as last written to it, on a setup wrapped round it.
+    angle: Option<String>,
+    // Whether feeds are in inverse time (`G93`).
+    inverse: bool,
 }
 
 impl<'a> Writer<'a> {
@@ -211,6 +216,8 @@ impl<'a> Writer<'a> {
             inches: false,
             offset: None,
             values: Values::default(),
+            angle: None,
+            inverse: false,
         }
     }
 
@@ -248,6 +255,7 @@ impl<'a> Writer<'a> {
         self.at = None;
         self.feed = None;
         self.raised = false;
+        self.angle = None;
     }
 
     /// The profile's lines for a step, after which where the machine is is
@@ -356,6 +364,18 @@ impl<'a> Writer<'a> {
                 Coolant::Off => "M9",
             }),
             Op::CoolantOff => self.raw("M9"),
+            Op::Turning {
+                to, angle, feed, ..
+            } => {
+                let g = if feed.is_some() { "G1" } else { "G0" };
+                self.turn_block(g, *to, angle, *feed);
+            }
+            Op::InverseTime(on) => {
+                self.raw(if *on { "G93" } else { "G94" });
+                self.inverse = *on;
+                // An F means something else now: the next is written.
+                self.feed = None;
+            }
             Op::Rapid { to } => self.motion_block("G0", *to, None),
             Op::Feed { to, feed, .. } => {
                 let f = self.p.feed_in(*feed, self.inches);
@@ -452,6 +472,7 @@ impl<'a> Writer<'a> {
                 // Where the tool is in the turned work is not known; it is
                 // still as high as it goes.
                 self.at = None;
+                self.angle = None;
             }
             Op::ProgramEnd => {}
         }
@@ -604,6 +625,103 @@ impl<'a> Writer<'a> {
         self.report.motion_blocks += 1;
         self.motion = Some(g);
         self.at = Some(to);
+    }
+
+    /// One block moving the linear axes and a rotary at once, a setup
+    /// wrapped round it, written as [`Writer::motion_block`] writes one: a
+    /// rapid from nowhere known across and round first when the tool is
+    /// raised, else down (or up) first. In inverse time every feed move
+    /// says its `F`.
+    fn turn_block(&mut self, g: &'static str, to: DVec3, angle: &RotaryAt, feed: Option<f64>) {
+        let (x, y, z) = (
+            self.p.length(to.x, self.inches),
+            self.p.length(to.y, self.inches),
+            self.p.length(to.z, self.inches),
+        );
+        let a = self.p.axis(angle.degrees);
+        if g == "G0" && self.at.is_none() {
+            let z = self.z_word(&z);
+            let again = if self.p.modal.suppress_motion {
+                ""
+            } else {
+                "G0 "
+            };
+            let across = format!("X{x} Y{y} {}{a}", angle.axis);
+            let (first, second) = if self.raised {
+                (format!("G0 {across}"), format!("{again}{z}"))
+            } else {
+                (format!("G0 {z}"), format!("{again}{across}"))
+            };
+            self.raw(&first);
+            self.raw(&second);
+            self.report.motion_blocks += 2;
+            self.motion = Some(g);
+            self.at = Some(to);
+            self.angle = Some(a);
+            self.raised = false;
+            return;
+        }
+        self.raised = false;
+        let prev = self.at.map(|p| {
+            (
+                self.p.length(p.x, self.inches),
+                self.p.length(p.y, self.inches),
+                self.p.length(p.z, self.inches),
+            )
+        });
+        let suppress = self.p.modal.suppress_axes;
+        let mut words: Vec<String> = Vec::new();
+        if self.motion != Some(g) || !self.p.modal.suppress_motion {
+            words.push(g.to_string());
+        }
+        let z_same = prev.as_ref().is_some_and(|p| p.2 == z);
+        let offset = if z_same && suppress {
+            None
+        } else {
+            self.offset.take()
+        };
+        if offset.is_some() {
+            words.push("G43".into());
+        }
+        for (letter, v, before) in [
+            ('X', &x, prev.as_ref().map(|p| &p.0)),
+            ('Y', &y, prev.as_ref().map(|p| &p.1)),
+            ('Z', &z, prev.as_ref().map(|p| &p.2)),
+        ] {
+            if !(suppress && before == Some(v)) {
+                words.push(format!("{letter}{v}"));
+            }
+        }
+        if !(suppress && self.angle.as_deref() == Some(a.as_str())) {
+            words.push(format!("{}{a}", angle.axis));
+        }
+        if let Some(h) = offset {
+            words.push(format!("H{h}"));
+        }
+        if let Some(f) = feed {
+            // Worked out for the move, so to more places than a feed: a
+            // time's four, a rate's two.
+            let more = if self.inverse { 4 } else { 2 };
+            let f = self
+                .p
+                .number(f, self.p.format.feed_decimals.saturating_add(more));
+            let unchanged = self.feed.as_deref() == Some(f.as_str());
+            if self.inverse || !unchanged || !self.p.modal.suppress_feed {
+                words.push(format!("F{f}"));
+            }
+            self.feed = Some(f);
+        }
+        let moved = words
+            .iter()
+            .any(|w| !w.starts_with('G') && !w.starts_with('F'));
+        self.at = Some(to);
+        self.angle = Some(a);
+        if !moved {
+            return;
+        }
+        self.raw(&words.join(" "));
+        self.report.motion_blocks += 1;
+        self.motion = Some(g);
     }
 
     /// A Z word, taking up the tool's length offset with it when one is

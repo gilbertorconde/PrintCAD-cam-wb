@@ -90,7 +90,7 @@ fn off_line(p: DVec3, a: DVec3, b: DVec3) -> f64 {
 
 /// `points`, ends kept, with as many left out as leaves the line through the
 /// rest within `tolerance` of every one: Douglas and Peucker's.
-fn simplified(points: &[DVec3], tolerance: f64) -> Vec<DVec3> {
+pub(crate) fn simplified(points: &[DVec3], tolerance: f64) -> Vec<DVec3> {
     let n = points.len();
     let (Some(&first), Some(&last)) = (points.first(), points.last()) else {
         return Vec::new();

@@ -9,6 +9,7 @@ use glam::{DVec2, DVec3, dvec2};
 
 mod holes;
 mod probe;
+mod wrap;
 
 /// A small stock is simulated finely, a large one fine enough for its
 /// narrowest tool, and nothing beyond the memory cap.

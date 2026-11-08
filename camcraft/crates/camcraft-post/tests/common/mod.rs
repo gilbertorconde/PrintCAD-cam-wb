@@ -89,6 +89,7 @@ pub fn spec() -> ProgramSpec {
         probe: None,
         before: Vec::new(),
         after: Vec::new(),
+        wrap: None,
     }
 }
 
@@ -452,4 +453,33 @@ pub fn dogboned() -> Toolpath {
     let (relieved, count) = relieve(&t, &found).unwrap();
     assert_eq!(count, 8);
     linked(&relieved)
+}
+
+/// An engraving unrolled off a bar 40 across on a rotary about X: down half
+/// a millimetre at X 5, round it 50 mm (143 degrees), along it 10, back round
+/// and along at once, deeper, and up. Round is Y; out from the axis is Z.
+pub fn wrapped() -> Toolpath {
+    let mut t = Toolpath::new();
+    t.rapid_to(dvec3(5.0, -10.0, 25.0)).unwrap();
+    t.feed_to(dvec3(5.0, -10.0, 19.5), MoveRole::Plunge, 250.0)
+        .unwrap();
+    t.feed_to(dvec3(5.0, 40.0, 19.5), MoveRole::Cut, 900.0)
+        .unwrap();
+    t.feed_to(dvec3(15.0, 40.0, 19.5), MoveRole::Cut, 900.0)
+        .unwrap();
+    t.feed_to(dvec3(20.0, -20.0, 19.0), MoveRole::Cut, 600.0)
+        .unwrap();
+    t.feed_to(dvec3(20.0, -20.0, 25.0), MoveRole::Retract, 900.0)
+        .unwrap();
+    t
+}
+
+/// How [`wrapped`] goes round `profile`'s A, with `rotary` as its
+/// `[rotary]` table.
+pub fn wrapping(
+    profile: &mut camcraft_post::profile::Profile,
+    rotary: &str,
+) -> camcraft_post::wrap::Wrapping {
+    profile.rotary = Some(toml::from_str(rotary).unwrap());
+    camcraft_post::wrap::Wrapping::of(profile, camcraft_post::rotary::About::X, 20.0).unwrap()
 }

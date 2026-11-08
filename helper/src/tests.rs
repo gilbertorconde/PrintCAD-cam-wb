@@ -1982,3 +1982,115 @@ fn probing_rough(file: &str) -> Request {
            tool = \"flat-6\"\npasses = { stepdown = 3.0, stepover = 3.0 }\n";
     request
 }
+
+/// The part in a bar along X on a rotary, engraved along a line round the
+/// bar at its top's radius, half way along, posted for `post` (a profile's
+/// text, or a built-in's name with `None`).
+fn wrapped_request(post: Option<String>, name: &str) -> Request {
+    let job = JOB
+        .replace(
+            "kind = \"around-models\"\nmargin = [2.0, 2.0, 2.0]",
+            "kind = \"cylinder-around-models\"\naxis = \"x\"\nmargin = 1.0\nends = 1.0",
+        )
+        .replace("post = \"grbl\"", &format!("post = \"{name}\"\nwrap = {{}}"))
+        .replace(
+            "strategy = \"pocket-clearing\"\ntool = \"flat-6\"\npasses = { stepdown = 3.0, stepover = 3.0 }",
+            "strategy = \"engrave\"\ntool = \"flat-6\"\ndepth = 0.3\npasses = { feed = 600.0 }\n\
+             selection = { curves = [{ start = [0.0, -60.0, 0.0], segments = [{ to = [0.0, 60.0, 0.0] }] }] }",
+        );
+    Request {
+        version: VERSION,
+        job,
+        shapes: BTreeMap::from([(
+            "part".to_string(),
+            Shape {
+                text: native("hinge_jig.step"),
+                placement: IDENTITY,
+            },
+        )]),
+        max_points: 5000,
+        post,
+        ..Request::default()
+    }
+}
+
+/// A setup on a rotary: engraved round the bar, the program turning A as
+/// it cuts in inverse time, the stock drawn as the bar, the toolpath and
+/// the material round it; and on GRBL, which has no rotary, a failed check
+/// that says so.
+#[test]
+fn a_setup_on_a_rotary_is_wrapped_round_it() {
+    // A curve at the bar's top, round it: first find where that is.
+    let probe = answer(&wrapped_request(None, "grbl")).unwrap();
+    let c = probe.cylinder.expect("the bar");
+    let fail = probe
+        .findings
+        .iter()
+        .find(|f| f.level == Level::Fail && f.code == "post")
+        .expect("GRBL cannot");
+    assert!(fail.text.contains("no rotary"), "{}", fail.text);
+    let [a, b] = c.ends;
+    assert!(
+        (a[1] - b[1]).abs() < 1e-9 && (a[2] - b[2]).abs() < 1e-9,
+        "along X"
+    );
+    let (y, z) = (a[1], a[2] + c.radius);
+    let x = 0.5 * (a[0] + b[0]);
+    let profile = format!(
+        "{}\n[rotary]\naxes = [\"A\"]\n[rotary.A]\ncontinuous = true\n",
+        include_str!("../../camcraft/crates/camcraft-post/profiles/linuxcnc.toml")
+    );
+    let mut request = wrapped_request(Some(profile), "linuxcnc");
+    request.job = request
+        .job
+        .replace("[0.0, -60.0, 0.0]", &format!("[{x}, {}, {z}]", y - 60.0))
+        .replace("[0.0, 60.0, 0.0]", &format!("[{x}, {}, {z}]", y + 60.0));
+    let run = answer(&request).unwrap();
+    for f in run.findings.iter().filter(|f| f.level == Level::Fail) {
+        panic!("{f:?}");
+    }
+    assert!(
+        run.notes.iter().any(|n| n.contains("on a rotary")),
+        "{:?}",
+        run.notes
+    );
+    let op = &run.operations[0];
+    let program = &op.program.as_ref().unwrap().text;
+    assert!(
+        program.contains("G93") && program.contains("G94"),
+        "{program}"
+    );
+    assert!(program.contains("wrapped round A about X"), "{program}");
+    let turning = program
+        .lines()
+        .filter(|l| {
+            !l.starts_with("G0")
+                && l.split_whitespace().any(|w| w.starts_with('A'))
+                && l.contains(" F")
+        })
+        .count();
+    assert!(turning > 0, "{program}");
+    // Drawn round the bar: every point of the toolpath and of the material
+    // no further from its axis than its radius, and some on the far side.
+    let off = |p: [f32; 3]| {
+        let (dy, dz) = (f64::from(p[1]) - y, f64::from(p[2]) - a[2]);
+        (dy * dy + dz * dz).sqrt()
+    };
+    let points: Vec<[f32; 3]> = op.strokes.iter().flat_map(|s| s.points.clone()).collect();
+    assert!(
+        points.iter().any(|p| f64::from(p[2]) < a[2]),
+        "under the axis"
+    );
+    for p in points.iter().filter(|_| true) {
+        assert!(off(*p) < c.radius + 30.0, "{p:?}");
+    }
+    let material = run.material.as_ref().unwrap();
+    for p in &material.positions {
+        assert!(off(*p) <= c.radius + 1e-3, "{p:?} {}", off(*p));
+    }
+    let play = run.playback.as_ref().unwrap();
+    assert_eq!(play.axes.len(), play.base.len());
+    assert!(play.about.is_some());
+    // No height planes across a bar.
+    assert!(op.heights.is_empty());
+}

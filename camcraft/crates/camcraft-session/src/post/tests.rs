@@ -343,6 +343,7 @@ fn a_tilted_setup_is_posted_with_its_rotary() {
     let frame = Frame {
         turn,
         origin: glam::DVec3::ZERO,
+        wrap: None,
     };
     let mut profile = load_profile("linuxcnc", None).unwrap();
     let (by_hand, _) = program(op, 54, &frame, &profile, "01-tilted").unwrap();
@@ -363,6 +364,68 @@ fn a_tilted_setup_is_posted_with_its_rotary() {
     profile.rotary = Some(toml::from_str("axes = [\"A\"]\n[A]\nlimits = [-20, 20]\n").unwrap());
     let e = program(op, 54, &frame, &profile, "01-tilted").unwrap_err();
     assert!(e.to_string().contains("past the machine's limits"), "{e}");
+}
+
+/// A setup on a rotary is posted round the A that turns its bar, and read
+/// back; for GRBL, which has none, and for Klartext, it is refused, saying
+/// why; and a path that winds past the A's limits is past its travel,
+/// unless the A turns on without end.
+#[test]
+fn a_setup_on_a_rotary_is_posted_round_its_a() {
+    use camcraft_core::path::toolpath::{MoveRole, Toolpath};
+    use camcraft_core::setup::frame::{Frame, Unrolled};
+    use camcraft_sim::stock::Axis;
+    let ran = run_small();
+    let mut op = ran.result.operations.first().unwrap().clone();
+    // Down onto the bar 20 out, once round and a half, and up.
+    let mut path = Toolpath::new();
+    let period = std::f64::consts::TAU * 20.0;
+    path.rapid_to(glam::dvec3(5.0, 0.0, 25.0)).unwrap();
+    path.feed_to(glam::dvec3(5.0, 0.0, 19.5), MoveRole::Plunge, 300.0)
+        .unwrap();
+    path.feed_to(glam::dvec3(5.0, 1.5 * period, 19.5), MoveRole::Cut, 900.0)
+        .unwrap();
+    path.feed_to(
+        glam::dvec3(5.0, 1.5 * period, 25.0),
+        MoveRole::Retract,
+        900.0,
+    )
+    .unwrap();
+    op.path = path;
+    let frame = Frame {
+        wrap: Some(Unrolled {
+            along: Axis::X,
+            radius: 20.0,
+        }),
+        ..Frame::default()
+    };
+    let grbl = load_profile("grbl", None).unwrap();
+    let e = program(&op, 54, &frame, &grbl, "01-wrapped").unwrap_err();
+    assert!(e.to_string().contains("no rotary about X"), "{e}");
+    let klartext = load_profile("heidenhain", None).unwrap();
+    let e = program(&op, 54, &frame, &klartext, "01-wrapped").unwrap_err();
+    assert!(
+        e.to_string().contains("not written turning a rotary"),
+        "{e}"
+    );
+
+    let mut profile = load_profile("linuxcnc", None).unwrap();
+    profile.rotary = Some(toml::from_str("axes = [\"A\"]\n").unwrap());
+    let (text, _) = program(&op, 54, &frame, &profile, "01-wrapped").unwrap();
+    assert!(text.contains("G93") && text.contains("A540"), "{text}");
+    let spec = program_spec(&op, 54, &frame, &profile).unwrap();
+    if let Err(p) = camcraft_post::readback::check(&text, &op.path, &spec, &profile) {
+        panic!("does not read back: {p}\n{text}");
+    }
+    let setup = camcraft_core::job::Setup::new("rotary");
+    let past = travel_check(&op, &setup, &frame, &profile).past;
+    assert!(
+        past.iter()
+            .any(|p| p.contains("A goes from 0.000° to 540.000°")),
+        "{past:?}"
+    );
+    profile.rotary = Some(toml::from_str("axes = [\"A\"]\n[A]\ncontinuous = true\n").unwrap());
+    assert!(travel_check(&op, &setup, &frame, &profile).past.is_empty());
 }
 
 /// Every operation of setup `index` of `job`, as run, posted for every

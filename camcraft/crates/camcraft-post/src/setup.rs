@@ -19,9 +19,7 @@
 use camcraft_core::job::Coolant;
 use camcraft_core::path::toolpath::Toolpath;
 
-use crate::op::{
-    LowerError, Op, ProgramSpec, cycles, moves, probes, refuse, rigid_taps, tilt_notes,
-};
+use crate::op::{LowerError, Op, ProgramSpec, cycles, probes, refuse, rigid_taps, tilt_notes};
 use crate::profile::{Profile, TapStyle};
 
 /// One operation of a setup's program: its path, and everything else a
@@ -249,7 +247,7 @@ impl Stream {
             Some(d) => cycles(d, s.spec.rpm, s.path, &mut ops, &mut made),
             None => match &s.spec.probe {
                 Some(p) => probes(p, s.path, &mut ops, &mut made),
-                None => moves(s.path, &mut ops, &mut made),
+                None => crate::op::moves_for(s.spec, s.path, &mut ops, &mut made),
             },
         }
         for (op, n) in ops.into_iter().zip(made) {

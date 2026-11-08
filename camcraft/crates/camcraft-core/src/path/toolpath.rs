@@ -290,6 +290,42 @@ impl Toolpath {
         self.moves.last().map(|m| m.to)
     }
 
+    /// It with every arc made straight moves within `tolerance` of it, each
+    /// with the arc's role and feed: for a machine that cannot cut the arc
+    /// as one, as a rotary cannot an arc unrolled round it.
+    pub fn straightened(&self, tolerance: f64) -> Self {
+        let mut out = Self::new();
+        let mut at: Option<DVec3> = None;
+        for m in &self.moves {
+            match (m.kind, at) {
+                (MoveKind::Arc(_), Some(from)) => {
+                    for p in m.chords(from, tolerance) {
+                        out.moves.push(Move {
+                            to: p,
+                            kind: MoveKind::Linear,
+                            ..*m
+                        });
+                    }
+                }
+                _ => out.moves.push(*m),
+            }
+            at = Some(m.to);
+        }
+        out
+    }
+
+    /// It moved by `by`, every move and arc alike.
+    pub fn shifted(&self, by: DVec3) -> Self {
+        let mut out = self.clone();
+        for m in &mut out.moves {
+            m.to += by;
+            if let MoveKind::Arc(a) = &mut m.kind {
+                a.centre += by;
+            }
+        }
+        out
+    }
+
     /// Append a move, validating it.
     ///
     /// Rapids must carry no feed and everything else must carry one, so an

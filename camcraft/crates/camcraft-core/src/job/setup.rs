@@ -50,6 +50,11 @@ pub struct Setup {
     /// a warped board's, or a single point's, for the work zero.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub z_correction: Option<ZCorrection>,
+    /// Machined on a rotary that turns its round stock about its axis, when
+    /// it is given: everything is planned on the stock's cylinder unrolled,
+    /// and the program turns the rotary as it cuts ([`Wrap`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrap: Option<Wrap>,
     /// Operations, in the order they run.
     #[serde(default, rename = "operation")]
     pub operations: Vec<Operation>,
@@ -123,6 +128,23 @@ fn is_default_segment(v: &f64) -> bool {
     (*v - DEFAULT_SEGMENT).abs() < f64::EPSILON
 }
 
+/// A setup machined on a rotary, as Fusion's Wrap toolpath and rotary
+/// operations: its stock a round bar lying along its X (turned by an A axis)
+/// or its Y (by a B axis), the tool pointing at the bar's axis. Its work
+/// zero is on the axis, across it. Its operations are planned on the bar
+/// unrolled ([`crate::setup::frame::Unrolled`]): a sketch is laid flat on it
+/// as drawn, its Y (or X) a distance round the bar at the wrap diameter, and
+/// Z is how far out from the axis.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Wrap {
+    /// The diameter a flat path is wrapped round at, in millimetres: a
+    /// millimetre round there is a millimetre of the flat. The stock's when
+    /// not given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diameter: Option<f64>,
+}
+
 /// How a setup's operations are posted.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -154,6 +176,7 @@ impl Setup {
             programs: Programs::default(),
             number: DEFAULT_NUMBER,
             z_correction: None,
+            wrap: None,
             operations: Vec::new(),
         }
     }

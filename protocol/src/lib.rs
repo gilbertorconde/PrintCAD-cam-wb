@@ -264,6 +264,15 @@ pub struct Playback {
     pub base: Vec<[f32; 3]>,
     /// One unit up the tool's axis, in the model's coordinates.
     pub axis: [f32; 3],
+    /// For a setup on a rotary, one unit out from its axis at each point
+    /// of the grid, which then stands on the axis; empty for `axis` at
+    /// every point.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub axes: Vec<[f32; 3]>,
+    /// For a setup on a rotary, a point on its axis and the axis's
+    /// direction, in the model's coordinates: the tool stands out from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub about: Option<[[f32; 3]; 2]>,
     /// The grid's triangles.
     pub indices: Vec<u32>,
     /// A height is `low + step * h`, for an `h` of a moment's.
@@ -537,6 +546,27 @@ pub enum SessionOut {
     Stock(Box<StockPatch>),
 }
 
+/// How a playback session's grid goes round a rotary's axis.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct GridRound {
+    /// Out from the axis a quarter turn on from `up`.
+    pub side: [f32; 3],
+    /// The angle at the grid's first point, and on for each column and
+    /// row, in radians.
+    pub first: f32,
+    pub per_col: f32,
+    pub per_row: f32,
+}
+
+impl GridRound {
+    /// One unit out from the axis at point `(c, r)`, `up` being the way out
+    /// at angle zero.
+    pub fn out(&self, up: [f32; 3], c: f32, r: f32) -> [f32; 3] {
+        let (sin, cos) = (self.first + c * self.per_col + r * self.per_row).sin_cos();
+        std::array::from_fn(|i| up[i] * cos + self.side[i] * sin)
+    }
+}
+
 /// A playback session's material grid and timing.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SessionReady {
@@ -544,11 +574,17 @@ pub struct SessionReady {
     pub cols: u32,
     pub rows: u32,
     /// Point `(c, r)` at height `h` sits at `origin + c * across + r *
-    /// along + h * up`, in the model's coordinates.
+    /// along + h * up`, in the model's coordinates; on a rotary, with
+    /// `round`, `up` turned round it.
     pub origin: [f32; 3],
     pub across: [f32; 3],
     pub along: [f32; 3],
     pub up: [f32; 3],
+    /// For a setup on a rotary: `up` turned about its axis, towards
+    /// `side`, by `first + c * per_col + r * per_row` radians. The grid
+    /// then stands on the axis.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub round: Option<GridRound>,
     /// A height is `low + step * h` for a packed `h`.
     pub low: f32,
     pub step: f32,

@@ -27,6 +27,74 @@ pub(super) fn parallel_paths(
     Ok((path, report.passes, StrategyDetail::Parallel(report)))
 }
 
+/// Parallel finishing on a rotary: along the bar, indexing round it
+/// between passes, for an angle under 45 degrees from along it; else round
+/// it in one helix. Down a stepdown at a time from the stock's top when one
+/// is given, then on the part.
+pub(super) fn rotary_paths(
+    work: &Work<'_>,
+    angle: f64,
+    warnings: &mut Vec<String>,
+) -> Result<Paths, RunError> {
+    use crate::strategy::rotary::{RotaryParams, RotaryPattern, Unrolled, rotary_finish};
+    let (job, op) = (work.job, work.op);
+    let Some(wrap) = work.prepared.frame.wrap else {
+        return parallel_paths(work, angle, None, warnings);
+    };
+    let round = wrap.round();
+    let first = DVec2::new(work.bounds.0.x, work.bounds.0.y);
+    let part = Unrolled::new(work.part.field(), round, first)
+        .ok_or_else(|| in_op(op)(StrategyError::RotaryGrid))?;
+    // Along the part, from end to end.
+    let b = work.prepared.model_bounds;
+    let along = if wrap.along == camcraft_sim::stock::Axis::Y {
+        (b.min.y, b.max.y)
+    } else {
+        (b.min.x, b.max.x)
+    };
+    let turned = angle.rem_euclid(180.0);
+    let pattern = if (45.0..135.0).contains(&turned) {
+        RotaryPattern::Helical
+    } else {
+        RotaryPattern::Along
+    };
+    // A level a stepdown apart from the stock's top down, the last on the
+    // part, no nearer the axis than the bottom.
+    let bottom = op
+        .heights
+        .bottom
+        .map_or(0.0, |b| b.resolve(work.heights))
+        .max(0.0);
+    let top = work.heights.stock_top;
+    let mut levels = Vec::new();
+    if let Some(step) = op.passes.stepdown.filter(|s| *s > 0.0) {
+        let mut z = top - step;
+        while z > bottom + 1e-9 && levels.len() < 1000 {
+            levels.push(z);
+            z -= step;
+        }
+    }
+    levels.push(bottom);
+    let params = RotaryParams {
+        round,
+        along,
+        stepover: op.passes.stepover,
+        pattern,
+        levels,
+        tolerance: job.tolerance,
+        feed: op.passes.feed,
+    };
+    let (path, report) = rotary_finish(&part, work.tool, &params).map_err(in_op(op))?;
+    Ok((
+        path,
+        report.passes,
+        StrategyDetail::Parallel(ParallelReport {
+            passes: report.passes,
+            ..ParallelReport::default()
+        }),
+    ))
+}
+
 /// What sampling passes on the part found that the path should say.
 pub(super) fn sampling_warnings(report: &ParallelReport, warnings: &mut Vec<String>) {
     if !report.is_clean() {
