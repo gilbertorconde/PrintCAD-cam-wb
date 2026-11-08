@@ -211,6 +211,7 @@ impl Stock {
             field,
             floor,
             under: Some(under.into()),
+            round: None,
         })
     }
 

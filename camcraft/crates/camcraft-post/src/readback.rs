@@ -52,6 +52,7 @@ use crate::op::{DrillCycles, ProgramSpec};
 use crate::profile::{Dialect, Profile, ProgramUnits, TapStyle};
 use crate::render::{custom_end, custom_mark};
 use crate::setup::Section;
+use crate::wrap::Wrapping;
 
 /// Millimetres in an inch.
 const MM_PER_INCH: f64 = 25.4;
@@ -281,8 +282,21 @@ pub fn read_dwelling(
     blocks: &[(usize, usize)],
     dwell: f64,
 ) -> Result<Vec<Step>, Problem> {
+    read_wrapped(text, blocks, dwell, None)
+}
+
+/// [`read_dwelling`], for a program going round a rotary as `wrap` says,
+/// when it does: its moves, the rotary turning with X, Y and Z, are read
+/// back into the bar unrolled, their feeds in mm/min along the material.
+pub fn read_wrapped(
+    text: &str,
+    blocks: &[(usize, usize)],
+    dwell: f64,
+    wrap: Option<Wrapping>,
+) -> Result<Vec<Step>, Problem> {
     let mut r = Reader {
         dwell,
+        wrap,
         ..Reader::default()
     };
     for (i, line) in text.lines().enumerate() {
@@ -302,6 +316,7 @@ pub fn read_dwelling(
             r.speed = None;
             r.motion = None;
             r.spin = None;
+            r.angle = None;
         }
     }
     Ok(r.steps)
@@ -533,6 +548,16 @@ struct Reader {
     armed: bool,
     /// Seconds in a unit of a pause's `P` word.
     dwell: f64,
+    /// How the program goes round a rotary, for a setup wrapped round one:
+    /// its moves are then in the bar unrolled.
+    wrap: Option<Wrapping>,
+    /// Where that rotary is, in degrees, once known.
+    angle: Option<f64>,
+    /// `G93` (true) or `G94`.
+    inverse: bool,
+    /// The last `F` as written, on a setup wrapped round a rotary, and the
+    /// block it was in.
+    f_word: Option<(f64, usize)>,
 }
 
 impl Default for Reader {
@@ -556,6 +581,10 @@ impl Default for Reader {
             rigid: false,
             armed: false,
             dwell: 1.0,
+            wrap: None,
+            angle: None,
+            inverse: false,
+            f_word: None,
         }
     }
 }
@@ -603,7 +632,10 @@ impl Reader {
                 91 => self.absolute = Some(false),
                 98 => self.to_initial = true,
                 99 => self.to_initial = false,
-                4 | 28 | 40 | 43 | 49 | 53 | 94 => {}
+                4 | 28 | 40 | 43 | 49 | 53 => {}
+                94 => self.inverse = false,
+                // Inverse time, as a program round a rotary feeds.
+                93 if self.wrap.is_some() => self.inverse = true,
                 // Haas's look-ahead limit and smoothing: how closely the
                 // path is followed, not where it goes.
                 103 | 187 => {}
@@ -620,6 +652,7 @@ impl Reader {
         }
         if let Some(f) = b.f {
             self.feed = Some(f * self.scale()?);
+            self.f_word = Some((f, self.line));
         }
         if let Some(s) = b.s {
             self.speed = Some(s);
@@ -712,12 +745,48 @@ impl Reader {
             let n = u8::try_from(g).map_err(|_| "a work offset out of range")?;
             if self.wcs != Some(n) {
                 self.at = [None; 3];
+                self.angle = None;
             }
             self.wcs = Some(n);
             self.push(Action::WorkOffset(n));
         }
 
         let has_axes = b.axes.iter().any(Option::is_some);
+        // The rotary a program round it turns as it cuts is read with X, Y
+        // and Z; any other is positioned.
+        let wrapped = self.wrap.and_then(|w| {
+            let i = match w.axis {
+                'A' => 0,
+                'B' => 1,
+                _ => 2,
+            };
+            b.rotary.get(i).copied().flatten()
+        });
+        let mut b = b;
+        if let (Some(w), Some(_)) = (self.wrap, wrapped) {
+            let i = match w.axis {
+                'A' => 0,
+                'B' => 1,
+                _ => 2,
+            };
+            if let Some(slot) = b.rotary.get_mut(i) {
+                *slot = None;
+            }
+        }
+        let mut turned = false;
+        if wrapped.is_some() || (self.wrap.is_some() && has_axes) {
+            if b.rotary.iter().any(Option::is_some) {
+                return Err("a rotary positioned in the same block as a move round the bar".into());
+            }
+            if b.has_g(28) || b.has_g(53) {
+                if wrapped.is_some() {
+                    return Err("a move round the bar in machine coordinates".into());
+                }
+            } else {
+                self.turn_to(&b, wrapped)?;
+                turned = true;
+            }
+        }
         if b.rotary.iter().any(Option::is_some) {
             // Positioning only: a rotary turned at rapid, alone.
             if has_axes || b.has_g(28) || b.has_g(53) {
@@ -751,7 +820,9 @@ impl Reader {
         if taps && moves {
             self.armed = false;
         }
-        if b.has_g(28) {
+        if turned {
+            // Read above.
+        } else if b.has_g(28) {
             self.home(&b)?;
         } else if b.has_g(53) {
             self.machine(&b)?;
@@ -854,6 +925,98 @@ impl Reader {
                 *at = None;
             }
         }
+        Ok(())
+    }
+
+    /// A move of a program round a rotary: X, Y and Z, and the rotary to
+    /// `degrees` when the block turns it, at rapid or fed, straight in the
+    /// bar unrolled. The axis across the bar must stay on it, at zero. Fed
+    /// in inverse time, each block says its own `F`.
+    fn turn_to(&mut self, b: &Block, degrees: Option<f64>) -> Result<(), String> {
+        let w = self
+            .wrap
+            .ok_or("a move round a rotary the program has not")?;
+        let to = self.target(&b.axes)?;
+        let angle = match degrees {
+            Some(d) if self.absolute != Some(true) => {
+                return Err(format!("{} turned in incremental mode ({d})", w.axis));
+            }
+            Some(d) => Some(d),
+            None => self.angle,
+        };
+        let across = match w.about {
+            crate::rotary::About::X => 1,
+            crate::rotary::About::Y => 0,
+        };
+        if let Some(Some(v)) = to.get(across)
+            && v.abs() > 1e-6
+        {
+            return Err(format!(
+                "{} {v:.4} off the rotary's axis, which the tool must stay over",
+                if across == 1 { 'Y' } else { 'X' }
+            ));
+        }
+        let units = if self.inches == Some(true) {
+            ProgramUnits::Inch
+        } else {
+            ProgramUnits::Mm
+        };
+        let unrolled = |at: &Position, angle: Option<f64>| -> Position {
+            let along = match w.about {
+                crate::rotary::About::X => at[0],
+                crate::rotary::About::Y => at[1],
+            };
+            let round = angle.map(|a| {
+                let q = w.unrolled(DVec3::ZERO, a);
+                match w.about {
+                    crate::rotary::About::X => q.y,
+                    crate::rotary::About::Y => q.x,
+                }
+            });
+            match w.about {
+                crate::rotary::About::X => [along, round, at[2]],
+                crate::rotary::About::Y => [round, along, at[2]],
+            }
+        };
+        let (from_u, to_u) = (unrolled(&self.at, self.angle), unrolled(&to, angle));
+        let feed = match self.motion {
+            Some(0) => None,
+            Some(1) => {
+                let (f, line) = self.f_word.ok_or("a feed move with no feed")?;
+                if self.inverse && line != self.line {
+                    return Err("a move in inverse time (G93) without its own F".into());
+                }
+                let (Some(a), Some(z)) = (known(&from_u), known(&to_u)) else {
+                    return Err("a feed move round the bar from where is not known".into());
+                };
+                if !self.inverse && w.feed == crate::rotary::RotaryFeed::InverseTime {
+                    return Err(format!(
+                        "a move round the bar fed a minute, where {} is fed in inverse time (G93)",
+                        w.axis
+                    ));
+                }
+                match w.feed_of(a, z, f, units) {
+                    Some(feed) => Some(feed),
+                    // Nowhere to go: nothing moves.
+                    None => {
+                        self.at = to;
+                        self.angle = angle;
+                        return Ok(());
+                    }
+                }
+            }
+            Some(_) => return Err("a move round the bar that is not G0 or G1".into()),
+            None => return Err("axis words with no motion in force".into()),
+        };
+        self.push(Action::Move(Motion {
+            from: from_u,
+            to: to_u,
+            feed,
+            arc: None,
+            probe: false,
+        }));
+        self.at = to;
+        self.angle = angle;
         Ok(())
     }
 
@@ -1152,7 +1315,12 @@ pub fn check(
     spec: &ProgramSpec,
     profile: &Profile,
 ) -> Result<(), Problem> {
-    let steps = steps_of(text, profile, spec.before.len() + spec.after.len())?;
+    let steps = steps_of(
+        text,
+        profile,
+        spec.before.len() + spec.after.len(),
+        spec.wrap,
+    )?;
     let mut c = Checker::new(&steps, spec, Tolerance::of(profile, spec.units));
     c.wcs_word = word_of(profile, spec.wcs);
     c.section(path)?;
@@ -1162,7 +1330,12 @@ pub fn check(
 
 /// What `text` does, read in `profile`'s dialect, its custom G-code (of
 /// which it must have `wanted` blocks) left unread.
-fn steps_of(text: &str, profile: &Profile, wanted: usize) -> Result<Vec<Step>, Problem> {
+fn steps_of(
+    text: &str,
+    profile: &Profile,
+    wanted: usize,
+    wrap: Option<Wrapping>,
+) -> Result<Vec<Step>, Problem> {
     let blocks = match profile.dialect {
         Dialect::Iso => custom_blocks(text, profile),
         Dialect::Heidenhain => crate::heidenhain::custom_blocks(text, profile),
@@ -1174,7 +1347,7 @@ fn steps_of(text: &str, profile: &Profile, wanted: usize) -> Result<Vec<Step>, P
         )));
     }
     match profile.dialect {
-        Dialect::Iso => read_dwelling(
+        Dialect::Iso => read_wrapped(
             text,
             &blocks,
             if profile.dwell_milliseconds {
@@ -1182,6 +1355,7 @@ fn steps_of(text: &str, profile: &Profile, wanted: usize) -> Result<Vec<Step>, P
             } else {
                 1.0
             },
+            wrap,
         ),
         Dialect::Heidenhain => crate::heidenhain::read_around(text, &blocks),
     }
@@ -1207,7 +1381,7 @@ pub fn check_setup(text: &str, sections: &[Section], profile: &Profile) -> Resul
         .iter()
         .map(|s| s.spec.before.len() + s.spec.after.len())
         .sum();
-    let steps = steps_of(text, profile, wanted)?;
+    let steps = steps_of(text, profile, wanted, first.spec.wrap)?;
     let mut c = Checker::new(&steps, first.spec, Tolerance::of(profile, first.spec.units));
     for (i, s) in sections.iter().enumerate() {
         if i > 0 {
@@ -1750,7 +1924,14 @@ impl<'a> Checker<'a> {
                 (Some(_), None) => return Err(Problem::at(line, "a feed where the path rapids")),
                 (Some(a), Some(b)) => {
                     self.cutting(line)?;
-                    if (a - b).abs() > self.tol.feed {
+                    // Round a rotary the feed is worked out again from an
+                    // `F` rounded as a time or a rate: near, not to the place.
+                    let slack = if self.spec.wrap.is_some() {
+                        1e-3 * b
+                    } else {
+                        0.0
+                    };
+                    if (a - b).abs() > self.tol.feed + slack {
                         return Err(Problem::at(
                             line,
                             format!("feeds at {a:.3} mm/min where the path feeds at {b:.3}"),

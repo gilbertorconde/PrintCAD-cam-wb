@@ -9,9 +9,11 @@
 
 use std::io::{BufRead, Write};
 
-use cam_protocol::{SessionIn, SessionOut, SessionReady, StockPatch, base64, class, pack_bare};
+use cam_protocol::{
+    GridRound, SessionIn, SessionOut, SessionReady, StockPatch, base64, class, pack_bare,
+};
 use camcraft_core::replay::{Changed, Live, Position, Replay};
-use camcraft_sim::stock::Block;
+use camcraft_sim::stock::{Axis, Block};
 use glam::{DVec2, DVec3};
 
 use crate::{Executed, execute, to_f32};
@@ -110,9 +112,34 @@ fn open(request: &cam_protocol::Request) -> Result<(Kept, SessionReady), String>
     let every = nx.max(ny).div_ceil(MOST_POINTS).max(1);
     let (cols, rows) = ((nx - 1) / every + 1, (ny - 1) / every + 1);
     let corner = field.origin().extend(0.0);
-    let at = |p: DVec3| r.frame.to_model(p);
+    let at = |p: DVec3| r.frame.shown(p);
     let origin = at(corner);
     let step = f64::from(every) * pitch;
+    // On a rotary the grid stands on the axis, the way round it turned.
+    let round = r.frame.wrap.map(|w| {
+        let zero = r.frame.to_model(DVec3::ZERO);
+        let turn = (step / w.radius) as f32;
+        let (side, up) = if w.along == Axis::Y {
+            (DVec3::X, DVec3::Z)
+        } else {
+            (DVec3::Y, DVec3::Z)
+        };
+        let first = w.angle(corner) as f32;
+        let (per_col, per_row) = if w.along == Axis::Y {
+            (turn, 0.0)
+        } else {
+            (0.0, turn)
+        };
+        (
+            GridRound {
+                side: to_f32(r.frame.to_model(side) - zero),
+                first,
+                per_col,
+                per_row,
+            },
+            to_f32(r.frame.to_model(up) - zero),
+        )
+    });
     let low = r
         .stocks
         .iter()
@@ -161,7 +188,8 @@ fn open(request: &cam_protocol::Request) -> Result<(Kept, SessionReady), String>
         origin: to_f32(origin),
         across: to_f32(at(corner + DVec3::X * step) - origin),
         along: to_f32(at(corner + DVec3::Y * step) - origin),
-        up: to_f32(at(corner + DVec3::Z) - origin),
+        up: round.map_or_else(|| to_f32(at(corner + DVec3::Z) - origin), |(_, up)| up),
+        round: round.map(|(g, _)| g),
         low: low as f32,
         step: quantum as f32,
         times,
@@ -238,7 +266,7 @@ impl Kept {
             op,
             moves: made,
             of: drawn.ends.len(),
-            tool: to_f32(self.done.ran.result.frame.to_model(tip)),
+            tool: to_f32(self.done.ran.result.frame.shown(tip)),
             drawn: drawn.drawn_after(made),
             ..StockPatch::default()
         };

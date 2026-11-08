@@ -32,8 +32,9 @@ use camcraft_post::profile::{ProbeStyle, Profile, Rapid};
 use camcraft_post::render::{Title, render_program};
 use camcraft_session::checks::Level as CheckLevel;
 use camcraft_session::{
-    Model, Models, Ran, custom_gcode, load_profile, next_tools, parse_job, program_spec,
-    read_probe_results, run_setup_from, setup_program, setup_program_name, travel_check,
+    Model, Models, Ran, custom_gcode, load_profile, next_tools, parse_job, posted_path,
+    program_spec, read_probe_results, run_setup_from, setup_program, setup_program_name,
+    travel_check,
 };
 use camcraft_sim::stock::{Axis, Block};
 use glam::{DAffine3, DMat4, DVec2, DVec3};
@@ -209,7 +210,12 @@ pub(crate) fn execute(
                             .flatten()
                     });
                 }
-                planes(spec, &ctx, stock, &frame)
+                // Round a rotary a height is a cylinder, not a plane.
+                if frame.wrap.is_some() {
+                    Vec::new()
+                } else {
+                    planes(spec, &ctx, stock, &frame)
+                }
             }
             _ => Vec::new(),
         };
@@ -237,7 +243,7 @@ pub(crate) fn execute(
                 }
                 spec.next_tool = next.get(k).copied().flatten();
                 spec.stock = stock_box.map(|b| (b.min, b.max));
-                lower_counted(&op.path, &spec)
+                lower_counted(&posted_path(op, &spec, 0.0), &spec)
             });
             match posted {
                 Ok((ops, made)) => {
@@ -278,7 +284,7 @@ pub(crate) fn execute(
         // simulator's are, which Save anyway still gets past. What could
         // not be checked is said, not passed.
         if op.made.has_paths() {
-            let travel = travel_check(op, setup, &profile);
+            let travel = travel_check(op, setup, &frame, &profile);
             refused.extend(travel.past.into_iter().map(|why| Finding {
                 level: Level::Fail,
                 code: "travel".into(),
@@ -409,6 +415,11 @@ pub(crate) fn execute(
         rapid_given: profile.rapid.is_some(),
     };
     let tools = tool_uses(&job, setup, &ran.result.operations, &draws);
+    // On a rotary the stock's box is the bar's, not the bar unrolled.
+    let stock_box = stock_box.map(|b| match frame.wrap {
+        Some(w) => bar_box(&w, b),
+        None => b,
+    });
     let layout = stock_box.map(|b| Layout {
         stock: [to_array(b.min), to_array(b.max)],
         part: part_box(&loaded, &setup.models, &frame).unwrap_or([[0.0; 3]; 2]),
@@ -436,6 +447,7 @@ pub(crate) fn execute(
             .iter()
             .flat_map(|(_, m)| m.notes.iter().cloned())
             .chain(ran.notes.iter().cloned())
+            .chain(frame.wrap.map(|_| ROTARY_NOTE.to_string()))
             .collect(),
         warnings: ran.warnings.clone(),
         stock,
@@ -1042,6 +1054,19 @@ fn planes(op: &Operation, ctx: &HeightContext, stock: Aabb, frame: &Frame) -> Ve
 
 /// The stock as a round bar, in the model's coordinates, when it is one.
 fn cylinder(frame: &Frame, blocks: &[Block]) -> Option<Cylinder> {
+    // On a rotary the bar is its box unrolled: along it, and out to its top.
+    if let (Some(w), [b]) = (frame.wrap, blocks) {
+        let b = b.bounds();
+        let (lo, hi) = if w.along == Axis::Y {
+            (DVec3::new(0.0, b.min.y, 0.0), DVec3::new(0.0, b.max.y, 0.0))
+        } else {
+            (DVec3::new(b.min.x, 0.0, 0.0), DVec3::new(b.max.x, 0.0, 0.0))
+        };
+        return Some(Cylinder {
+            ends: [to_array(frame.shown(lo)), to_array(frame.shown(hi))],
+            radius: b.max.z,
+        });
+    }
     let [Block::Bar(bar)] = blocks else {
         return None;
     };
@@ -1098,6 +1123,29 @@ pub(crate) fn grid_indices(
         }
     }
     indices
+}
+
+/// What a setup on a rotary is not checked for.
+const ROTARY_NOTE: &str = "on a rotary: the material is simulated round the bar, each column \
+                           from its axis out, and checked against the part; the shank and holder \
+                           are not checked against it, and machining times take the moves \
+                           unrolled, the rotary as fast as the other axes";
+
+/// The box round a setup's bar on a rotary, in its frame, from `b`, its
+/// stock's box unrolled: along it, and as far out as its top every way.
+fn bar_box(w: &camcraft_core::setup::frame::Unrolled, b: Aabb) -> Aabb {
+    let r = b.max.z;
+    if w.along == Axis::Y {
+        Aabb {
+            min: DVec3::new(-r, b.min.y, -r),
+            max: DVec3::new(r, b.max.y, r),
+        }
+    } else {
+        Aabb {
+            min: DVec3::new(b.min.x, -r, -r),
+            max: DVec3::new(b.max.x, r, r),
+        }
+    }
 }
 
 /// A box in the setup's frame as its eight corners in the model's, as
@@ -1215,7 +1263,7 @@ pub(crate) fn strokes(
             at = Some(m.to);
             out.push(Stroke {
                 rapid: fast,
-                points: vec![to_f32(frame.to_model(m.to))],
+                points: vec![to_f32(frame.shown(m.to))],
             });
             raw += 1;
             after_move.push(raw);
@@ -1232,16 +1280,16 @@ pub(crate) fn strokes(
         if out.last().is_none_or(|s| s.rapid != fast) {
             out.push(Stroke {
                 rapid: fast,
-                points: vec![to_f32(frame.to_model(from))],
+                points: vec![to_f32(frame.shown(from))],
             });
             raw += 1;
         }
         if let Some(stroke) = out.last_mut() {
-            let chords = m.chords(from, tolerance);
+            let chords = rolled(frame, from, m.chords(from, tolerance));
             raw += chords.len();
             stroke
                 .points
-                .extend(chords.into_iter().map(|p| to_f32(frame.to_model(p))));
+                .extend(chords.into_iter().map(|p| to_f32(frame.shown(p))));
         }
         after_move.push(raw);
         at = Some(m.to);
@@ -1284,6 +1332,29 @@ pub(crate) fn strokes(
     drawn
 }
 
+/// How far round a rotary a drawn straight piece may go, in radians: a
+/// straight move there is a helix, drawn as pieces this short.
+const DRAWN_TURN: f64 = 0.035;
+
+/// `points`, the ends of a move's pieces from `from`, with points between
+/// so that rolled round a rotary they follow it, where `frame` is unrolled.
+pub(crate) fn rolled(frame: &Frame, from: DVec3, points: Vec<DVec3>) -> Vec<DVec3> {
+    let Some(w) = frame.wrap else {
+        return points;
+    };
+    let mut out = Vec::with_capacity(points.len());
+    let mut a = from;
+    for b in points {
+        let turn = (w.angle(b) - w.angle(a)).abs();
+        let n = ((turn / DRAWN_TURN).ceil() as usize).clamp(1, 4096);
+        for k in 1..=n {
+            out.push(a.lerp(b, k as f64 / n as f64));
+        }
+        a = b;
+    }
+    out
+}
+
 /// The finished material's top over the stock, as triangles in the model's
 /// coordinates.
 fn material(ran: &Ran) -> Option<Material> {
@@ -1304,7 +1375,7 @@ fn material(ran: &Ran) -> Option<Material> {
         for i in 0..nx {
             let p = lo + step * DVec2::new(i as f64, j as f64);
             let z = stock.height_at(p.x, p.y).unwrap_or(floor);
-            positions.push(to_f32(r.frame.to_model(p.extend(z))));
+            positions.push(to_f32(r.frame.shown(p.extend(z))));
         }
     }
     let indices = grid_indices(nx, ny, lo, step, &r.stocks);

@@ -355,7 +355,8 @@ impl Stock {
     /// stands: `seen` is told, of each move that meets some, its place in
     /// `moves` and the most each ring meets.
     ///
-    /// The first move is where the tool already is, as in a sweep.
+    /// The first move is where the tool already is, as in a sweep. A stock
+    /// on a rotary is only swept.
     pub fn sweep_watching<T: SweptTool>(
         &mut self,
         moves: &[SimMove],
@@ -363,7 +364,9 @@ impl Stock {
         watch: &mut Watch<'_>,
         seen: &mut dyn FnMut(usize, &[Option<Contact>]),
     ) -> Swept {
-        if watch.reach.is_empty() {
+        // On a rotary the body stands out along a radius, not up the grid's
+        // columns: it is not watched there.
+        if watch.reach.is_empty() || self.round.is_some() {
             return self.sweep(moves, tool);
         }
         let mut report = Swept::default();

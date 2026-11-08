@@ -37,6 +37,7 @@ mod carry;
 mod packed;
 mod part;
 mod reach;
+mod round;
 mod sweep;
 
 #[cfg(test)]
@@ -55,6 +56,7 @@ pub use carry::Carry;
 pub use packed::PackedStock;
 pub use part::PartSurface;
 pub use reach::{Body, Contact, Reach, Ring, Tops, Watch};
+pub use round::{Round, round_pitch};
 
 /// The minimum a simulator needs to know about a cutter.
 pub trait SweptTool: Sync {
@@ -132,6 +134,10 @@ pub struct Stock {
     /// Each column's bottom, cell for cell, when it is not the floor. It
     /// never changes as material is cut, so copies of the stock share it.
     under: Option<Shared<[f32]>>,
+    /// How the grid goes round a rotary's axis, when the stock is turned on
+    /// one ([`Stock::rounded`]): each column's height is then how far out
+    /// from the axis it reaches.
+    round: Option<Round>,
 }
 
 /// Stock that could not be created.
@@ -363,6 +369,7 @@ impl Stock {
             field: HeightMap::covering(min, max, pitch, top)?,
             floor,
             under: None,
+            round: None,
         })
     }
 
@@ -385,6 +392,7 @@ impl Stock {
             field,
             floor,
             under: None,
+            round: None,
         })
     }
 
@@ -429,6 +437,7 @@ impl Stock {
             field,
             floor,
             under: None,
+            round: None,
         })
     }
 
@@ -527,6 +536,9 @@ impl Stock {
     /// Added up in parts of a fixed size in parallel, then the parts in order, so
     /// it comes out the same to the bit on any number of threads.
     pub fn volume(&self) -> f64 {
+        if let Some(round) = self.round {
+            return self.round_volume(round);
+        }
         let cell = self.field.pitch() * self.field.pitch();
         let floor = self.floor;
         let column = |v: f32, bottom: f64| {

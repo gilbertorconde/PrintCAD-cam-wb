@@ -34,6 +34,18 @@ pub(crate) struct Ground<'a> {
 }
 
 impl Ground<'_> {
+    /// A line through `points`, in the setup's paths' frame, in the
+    /// model's: round a rotary, following it between them.
+    fn drawn(&self, points: &[DVec3]) -> Vec<[f32; 3]> {
+        let Some((&first, rest)) = points.split_first() else {
+            return Vec::new();
+        };
+        std::iter::once(first)
+            .chain(crate::rolled(self.frame, first, rest.to_vec()))
+            .map(|p| to_f32(self.frame.shown(p)))
+            .collect()
+    }
+
     fn rings(&self, region: &Region, z: f64) -> Vec<Vec<[f32; 3]>> {
         region
             .rings()
@@ -43,14 +55,11 @@ impl Ground<'_> {
     }
 
     fn ring(&self, points: &[DVec2], z: f64) -> Vec<[f32; 3]> {
-        let mut out: Vec<[f32; 3]> = points
-            .iter()
-            .map(|p| to_f32(self.frame.to_model(p.extend(z))))
-            .collect();
-        if let Some(first) = out.first().copied() {
-            out.push(first);
+        let mut ends: Vec<DVec3> = points.iter().map(|p| p.extend(z)).collect();
+        if let Some(first) = ends.first().copied() {
+            ends.push(first);
         }
-        out
+        self.drawn(&ends)
     }
 
     /// `region`'s pieces at height `z`, each with its holes.
@@ -96,7 +105,7 @@ impl Ground<'_> {
                 r.iter()
                     .map(|p| {
                         let q = DVec3::new(f64::from(p[0]), f64::from(p[1]), f64::from(p[2]));
-                        to_f32(self.frame.to_model(c.point(self.frame.to_setup(q))))
+                        to_f32(self.frame.shown(c.point(self.frame.unshown(q))))
                     })
                     .collect()
             };
@@ -135,12 +144,8 @@ impl Ground<'_> {
         let mut lines = Vec::new();
         for t in &traces {
             let points: Vec<DVec2> = t.points(tolerance).iter().map(|p| p.truncate()).collect();
-            out.boundary.push(
-                points
-                    .iter()
-                    .map(|p| to_f32(self.frame.to_model(p.extend(z(t)))))
-                    .collect(),
-            );
+            let ends: Vec<DVec3> = points.iter().map(|p| p.extend(z(t))).collect();
+            out.boundary.push(self.drawn(&ends));
             lines.push(points);
         }
         if let Some((centres, place)) = &chamfer {

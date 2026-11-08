@@ -39,7 +39,7 @@ mod holder_tests;
 use std::cell::OnceCell;
 use std::sync::Arc;
 
-use camcraft_sim::stock::{PackedStock, PartSurface, Stock};
+use camcraft_sim::stock::{PackedStock, PartSurface, Stock, round_pitch};
 
 use crate::cutter::allowance::{Allowance, EffectiveTool};
 use crate::cutter::dropcutter::DropCutter;
@@ -109,12 +109,18 @@ pub fn run_prepared_planned(
         .map(|t| t.diameter)
         .fold(None, |n: Option<f64>, d| Some(n.map_or(d, |n| n.min(d))));
     let sim_pitch = sim_pitch(job.tolerance, hi - lo, narrowest);
+    // On a rotary, a whole number of cells make a turn.
+    let round = prepared.frame.wrap.map(|w| w.round());
+    let sim_pitch = round.map_or(sim_pitch, |r| round_pitch(&r, sim_pitch));
     let blocks = &prepared.stocks;
     // What an earlier setup left, carried into this frame, when it carries on
-    // from one; else its blocks, fresh.
-    let fresh = || match &prepared.carried {
-        Some((left, carry)) => left.carried(carry, all, ctx.stock_bottom - 1.0, sim_pitch),
-        None => Stock::from_blocks(blocks, ctx.stock_bottom - 1.0, sim_pitch),
+    // from one; else its blocks, fresh, on the rotary when it is on one.
+    let fresh = || match (&prepared.carried, round) {
+        (Some((left, carry)), _) => left.carried(carry, all, ctx.stock_bottom - 1.0, sim_pitch),
+        (None, Some(round)) => {
+            Stock::from_blocks(blocks, ctx.stock_bottom - 1.0, sim_pitch)?.rounded(round)
+        }
+        (None, None) => Stock::from_blocks(blocks, ctx.stock_bottom - 1.0, sim_pitch),
     };
     let mut stock = fresh()?;
     // The part's top on the simulator's grid: what the tool above its flutes

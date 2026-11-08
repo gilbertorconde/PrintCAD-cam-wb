@@ -320,6 +320,9 @@ impl<'a> Writer<'a> {
             // Never asked of Klartext: a Heidenhain profile cannot probe
             // (`Profile::validate`), so a probe operation is refused first.
             Op::Probe { .. } | Op::ProbeOpen(_) | Op::ProbeClose => {}
+            // Never asked of Klartext: a setup wrapped round a rotary is
+            // refused for it first (`LowerError::WrapNotWritten`).
+            Op::Turning { .. } | Op::InverseTime(_) => {}
             Op::CycleEnd => {
                 // Each cycle returns to the clearance height; where across is
                 // where the last hole was.

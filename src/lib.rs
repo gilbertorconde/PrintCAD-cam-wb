@@ -1453,6 +1453,15 @@ impl Bench for Cam {
                              probed surface. A LinuxCNC probe log (x y z ...) or a CSV of x, y, \
                              z, in the post's units and the setup's work coordinates",
                         ),
+                        param(
+                            "wrap",
+                            ParamKind::Any,
+                            false,
+                            "true, or {diameter = mm}: on a rotary turning its cylinder, \
+                             lying along x or y (stock = \"cylinder\", axis = \"x\"), about \
+                             its axis; sketches wrapped round it at the diameter (the stock's \
+                             unless given)",
+                        ),
                         param("name", ParamKind::String, false, "the setup's name"),
                     ],
                     returns: "{feature}".into(),
@@ -1991,6 +2000,7 @@ impl Bench for Cam {
                 "wcs_y",
                 "wcs_z",
                 "tolerance",
+                "wrap_diameter",
                 "stepover",
                 "stepdown",
                 "radial",
@@ -2062,6 +2072,7 @@ impl Bench for Cam {
                 p("wcs_y", "Work offset, machine Y", Dim::Length),
                 p("wcs_z", "Work offset, machine Z", Dim::Length),
                 p("tolerance", "Tolerance", Dim::Length),
+                p("wrap_diameter", "Wrap diameter", Dim::Length),
             ];
         }
         // Custom G-code has no numbers to bind.
@@ -2251,6 +2262,17 @@ impl Bench for Cam {
                         return Err(format!("no programs '{other}': setup or operation"));
                     }
                 };
+                let wrap: Option<f64> = match args.get("wrap") {
+                    None | Some(Value::Bool(false)) => None,
+                    Some(Value::Bool(true)) => Some(0.0),
+                    Some(Value::Object(o)) => Some(
+                        o.get("diameter")
+                            .map(|d| d.as_f64().ok_or("wrap's diameter is a number of mm"))
+                            .transpose()?
+                            .unwrap_or(0.0),
+                    ),
+                    Some(_) => return Err("wrap is true, or {diameter = mm}".into()),
+                };
                 let probe: Option<ProbeMapArgs> = match args.get("probe_map") {
                     Some(v) => Some(serde_json::from_value(v.clone()).map_err(
                         |_| "probe_map is {path = a file} or {text = its contents}, with segment",
@@ -2312,6 +2334,10 @@ impl Bench for Cam {
                         (data.size_x, data.size_y, data.size_z) = (x, y, z);
                     }
                     data.cylinder_axis = axis;
+                    if let Some(d) = wrap {
+                        data.wrap = true;
+                        data.wrap_diameter = d;
+                    }
                     if let Some(d) = number("diameter") {
                         data.diameter = d;
                         data.cylinder_fixed = true;

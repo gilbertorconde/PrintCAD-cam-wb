@@ -608,13 +608,12 @@ pub fn material_at(play: &Playback, m: &Moment) -> Mesh {
         .base
         .iter()
         .zip(&m.heights)
-        .map(|(b, h)| {
+        .enumerate()
+        .map(|(i, (b, h))| {
             let z = play.low + play.step * f32::from(*h);
-            [
-                b[0] + play.axis[0] * z,
-                b[1] + play.axis[1] * z,
-                b[2] + play.axis[2] * z,
-            ]
+            // On a rotary each point stands out from the axis its own way.
+            let up = play.axes.get(i).unwrap_or(&play.axis);
+            [b[0] + up[0] * z, b[1] + up[1] * z, b[2] + up[2] * z]
         })
         .collect();
     Mesh {
@@ -626,6 +625,24 @@ pub fn material_at(play: &Playback, m: &Moment) -> Mesh {
     }
 }
 
+/// The way the tool's shank goes up from its tip at `tip`: the tool's axis,
+/// or on a rotary straight out from the rotary's axis.
+fn shank(play: &Playback, tip: [f32; 3]) -> [f32; 3] {
+    let Some([at, along]) = play.about else {
+        return play.axis;
+    };
+    let off: [f32; 3] = std::array::from_fn(|i| tip[i] - at[i]);
+    let len2: f32 = along.iter().map(|v| v * v).sum();
+    let t = off.iter().zip(&along).map(|(o, a)| o * a).sum::<f32>() / len2.max(1e-12);
+    let out: [f32; 3] = std::array::from_fn(|i| off[i] - along[i] * t);
+    let len = out.iter().map(|v| v * v).sum::<f32>().sqrt();
+    if len < 1e-6 {
+        play.axis
+    } else {
+        out.map(|v| v / len)
+    }
+}
+
 /// The tool at `m`: its tip, and its shank up the tool's axis.
 pub fn tool_at(frame: &mut Frame, play: &Playback, m: &Moment, color: Rgb) {
     tool_tip(frame, play, m.tool, color);
@@ -633,10 +650,11 @@ pub fn tool_at(frame: &mut Frame, play: &Playback, m: &Moment, color: Rgb) {
 
 /// The tool with its tip at `tip`, and its shank up the tool's axis.
 pub fn tool_tip(frame: &mut Frame, play: &Playback, tip: [f32; 3], color: Rgb) {
+    let up = shank(play, tip);
     let top = [
-        tip[0] + play.axis[0] * 25.0,
-        tip[1] + play.axis[1] * 25.0,
-        tip[2] + play.axis[2] * 25.0,
+        tip[0] + up[0] * 25.0,
+        tip[1] + up[1] * 25.0,
+        tip[2] + up[2] * 25.0,
     ];
     frame.lines.push(Polyline {
         points: vec![tip, top],
@@ -682,6 +700,8 @@ mod tests {
             playback: Some(Playback {
                 base: vec![[0.0; 3]],
                 axis: [0.0, 0.0, 1.0],
+                axes: Vec::new(),
+                about: None,
                 indices: Vec::new(),
                 low: -10.0,
                 step: 0.5,

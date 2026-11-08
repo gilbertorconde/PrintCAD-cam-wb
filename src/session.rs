@@ -175,7 +175,9 @@ fn agrees(ready: &SessionReady, timing: u64) -> Result<(), String> {
 fn point(r: &SessionReady, col: u32, row: u32, h: u16) -> [f32; 3] {
     let z = r.low + r.step * f32::from(h);
     let (c, w) = (col as f32, row as f32);
-    std::array::from_fn(|i| r.origin[i] + c * r.across[i] + w * r.along[i] + z * r.up[i])
+    // On a rotary the grid stands on its axis, each point out its own way.
+    let up = r.round.map_or(r.up, |g| g.out(r.up, c, w));
+    std::array::from_fn(|i| r.origin[i] + c * r.across[i] + w * r.along[i] + z * up[i])
 }
 
 /// The material's mesh for `ready`'s grid, flat at the stock's foot until

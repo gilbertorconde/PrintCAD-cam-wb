@@ -537,9 +537,95 @@ pub struct Frame {
     pub turn: Turn,
     /// The work zero, in turned model coordinates.
     pub origin: DVec3,
+    /// How the setup is unrolled, when it is machined on a rotary: its
+    /// paths, part and stock are then in the unrolled frame ([`Unrolled`]).
+    pub wrap: Option<Unrolled>,
+}
+
+/// A setup machined on a rotary that turns its round stock about its axis,
+/// the tool pointing at the axis: its paths, part and stock are in the
+/// cylinder unrolled. Along the axis is along it; round it is the
+/// millimetres round at [`Unrolled::radius`], so the rotary's angle is
+/// that over the radius; and Z is how far out from the axis.
+///
+/// The setup's work zero is on the axis, across it; along it, where the
+/// setup puts it. Round is from the top, the side the tool comes down on,
+/// towards the setup's Y (for a bar along X) or X (along Y).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Unrolled {
+    /// The setup axis the bar lies along: X, turned by an A axis, or Y, by
+    /// a B axis.
+    pub along: camcraft_sim::stock::Axis,
+    /// The radius a flat path is wrapped at: a millimetre round at it is a
+    /// millimetre of the flat path.
+    pub radius: f64,
+}
+
+impl Unrolled {
+    /// A whole turn, in millimetres round.
+    pub fn period(&self) -> f64 {
+        std::f64::consts::TAU * self.radius
+    }
+
+    /// How the simulator's grid goes round.
+    pub fn round(&self) -> camcraft_sim::stock::Round {
+        use camcraft_sim::stock::Axis;
+        camcraft_sim::stock::Round {
+            round: if self.along == Axis::Y {
+                Axis::X
+            } else {
+                Axis::Y
+            },
+            radius: self.radius,
+        }
+    }
+
+    /// How far round an unrolled point is, in radians from the top.
+    pub fn angle(&self, q: DVec3) -> f64 {
+        let (_, round, _) = self.round().split(q);
+        round / self.radius
+    }
+
+    /// A point of the setup, measured from its work zero on the axis, as
+    /// unrolled.
+    pub fn unroll(&self, p: DVec3) -> DVec3 {
+        let r = if self.along == camcraft_sim::stock::Axis::Y {
+            p.x.hypot(p.z)
+        } else {
+            p.y.hypot(p.z)
+        };
+        if self.along == camcraft_sim::stock::Axis::Y {
+            DVec3::new(self.radius * p.x.atan2(p.z), p.y, r)
+        } else {
+            DVec3::new(p.x, self.radius * p.y.atan2(p.z), r)
+        }
+    }
+
+    /// An unrolled point rolled back round the axis, in the setup's frame.
+    pub fn roll(&self, q: DVec3) -> DVec3 {
+        let (sin, cos) = self.angle(q).sin_cos();
+        if self.along == camcraft_sim::stock::Axis::Y {
+            DVec3::new(q.z * sin, q.y, q.z * cos)
+        } else {
+            DVec3::new(q.x, q.z * sin, q.z * cos)
+        }
+    }
 }
 
 impl Frame {
+    /// A point of the setup's paths, part or stock in model coordinates:
+    /// as [`Frame::to_model`], rolled back round the axis first when the
+    /// setup is unrolled.
+    pub fn shown(&self, q: DVec3) -> DVec3 {
+        self.to_model(self.wrap.map_or(q, |w| w.roll(q)))
+    }
+
+    /// A model point in the setup's paths' frame: [`Frame::shown`] undone.
+    pub fn unshown(&self, p: DVec3) -> DVec3 {
+        let q = self.to_setup(p);
+        self.wrap.map_or(q, |w| w.unroll(q))
+    }
+
     /// A model point in the setup frame.
     pub fn to_setup(&self, p: DVec3) -> DVec3 {
         self.turn.apply(p) - self.origin
@@ -596,6 +682,7 @@ mod tests {
             let m = Frame {
                 turn: t,
                 origin: DVec3::ZERO,
+                wrap: None,
             }
             .matrix();
             assert_eq!(m.determinant(), 1.0, "{o:?} is not a rotation");
@@ -609,6 +696,7 @@ mod tests {
             let f = Frame {
                 turn: turn(&o),
                 origin: dvec3(0.5, -2.0, 4.0),
+                wrap: None,
             };
             let q = f.to_setup(p);
             assert_eq!(f.matrix().transform_point3(p), q, "{o:?}");
@@ -726,6 +814,7 @@ mod tests {
         let f = Frame {
             turn: t,
             origin: dvec3(3.0, -1.0, 2.0),
+            wrap: None,
         };
         assert!((f.matrix().determinant() - 1.0).abs() < 1e-12);
         let p = dvec3(1.25, -7.5, 3.0625);
@@ -763,5 +852,34 @@ mod tests {
                 assert!((t.inverse(t.apply(p)) - p).length() < 1e-12);
             }
         }
+    }
+
+    /// Unrolled and rolled back, a point is where it was; round from the
+    /// top towards Y is the angle an A axis turns it up by.
+    #[test]
+    fn a_point_unrolls_and_rolls_back() {
+        use camcraft_sim::stock::Axis as Bar;
+        for along in [Bar::X, Bar::Y] {
+            let w = Unrolled {
+                along,
+                radius: 20.0,
+            };
+            for p in [
+                dvec3(3.0, 4.0, 15.0),
+                dvec3(-7.0, -12.0, -5.0),
+                dvec3(1.0, 2.0, 0.5),
+            ] {
+                let q = w.unroll(p);
+                assert!((w.roll(q) - p).length() < 1e-12, "{along:?} {p}");
+            }
+        }
+        let w = Unrolled {
+            along: Bar::X,
+            radius: 20.0,
+        };
+        // A quarter turn round, at the radius, is a quarter of the turn.
+        let q = w.unroll(dvec3(5.0, 20.0, 0.0));
+        assert!((q - dvec3(5.0, w.period() / 4.0, 20.0)).length() < 1e-12);
+        assert!((w.angle(q) - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
     }
 }

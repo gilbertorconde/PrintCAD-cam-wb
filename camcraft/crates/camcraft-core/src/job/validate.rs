@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
     Depths, FixedBox, FixedCylinder, JOB_VERSION, Job, JobError, LAST_WCS, Operation, Origin,
-    Retraction, StockSpec, StockToLeave, StrategySpec, ToolSpec,
+    Retraction, Setup, StockSpec, StockToLeave, StrategySpec, ToolSpec,
 };
 use crate::is_positive;
 
@@ -210,6 +210,9 @@ impl Job {
                 }
             }
         }
+        if let Some(wrap) = &setup.wrap {
+            self.check_wrap(setup, wrap, &mut running())?;
+        }
         if setup.models.is_empty() {
             return Err(JobError::NoModels(name.clone()));
         }
@@ -268,6 +271,74 @@ impl Job {
         }
 
         running().try_for_each(|op| op.check(name, &self.tools))
+    }
+}
+
+impl Job {
+    /// What a setup machined on a rotary cannot have: a stock that is not a
+    /// round bar, depths corrected to a probed surface, an operation that
+    /// is not planned on the bar unrolled, or picks on the part, which are
+    /// found where the part is, not where it is unrolled to.
+    fn check_wrap(
+        &self,
+        setup: &Setup,
+        wrap: &super::Wrap,
+        running: &mut dyn Iterator<Item = &super::Operation>,
+    ) -> Result<(), JobError> {
+        let refuse = |why: String| JobError::Wrap {
+            setup: setup.name.clone(),
+            why,
+        };
+        if let Some(d) = wrap.diameter {
+            positive(&format!("{}.wrap.diameter", setup.name), d)?;
+        }
+        if setup.z_correction.is_some() {
+            return Err(refuse(
+                "its depths cannot be corrected to a probed surface".into(),
+            ));
+        }
+        for s in &setup.stocks {
+            let round = self.stock(s).is_none_or(|def| {
+                matches!(
+                    def.spec,
+                    StockSpec::CylinderAroundModels { .. } | StockSpec::FixedCylinder(_)
+                )
+            });
+            if !round || setup.stocks.len() > 1 {
+                return Err(refuse(
+                    "its stock must be one cylinder, lying across the tool".into(),
+                ));
+            }
+        }
+        for op in running {
+            let wraps = matches!(
+                op.strategy,
+                StrategySpec::Engrave { .. }
+                    | StrategySpec::Slot { .. }
+                    | StrategySpec::Profile { .. }
+                    | StrategySpec::Pocket { .. }
+                    | StrategySpec::VCarve { .. }
+                    | StrategySpec::CustomGcode {}
+            );
+            if !wraps {
+                return Err(refuse(format!(
+                    "operation '{}' is {}, which is not planned on a rotary: engraving, slots, \
+                     2D profiles and pockets and V-carving are wrapped round it",
+                    op.name,
+                    op.strategy.name()
+                )));
+            }
+            if (op.cuts_selection() || op.heights.measured_from_selection())
+                && !(op.selection.faces.is_empty() && op.selection.edges.is_empty())
+            {
+                return Err(refuse(format!(
+                    "operation '{}' picks faces or edges of the part, which are not found on it \
+                     unrolled: give it a sketch, drawn flat as the bar unrolled",
+                    op.name
+                )));
+            }
+        }
+        Ok(())
     }
 }
 

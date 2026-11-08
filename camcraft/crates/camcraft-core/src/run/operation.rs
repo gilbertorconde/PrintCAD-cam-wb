@@ -382,6 +382,15 @@ pub(super) fn run_operation(
         raw
     };
 
+    // A rotary cannot cut an arc unrolled round it as one: it is cut as the
+    // straight moves the program writes.
+    let wrapped = work.prepared.frame.wrap.is_some();
+    let raw = if wrapped {
+        raw.straightened(work.job.tolerance)
+    } else {
+        raw
+    };
+
     // Ordering is a Toolpath -> Toolpath transform, applied before linking so the
     // retracts it needs are planned around the order actually used. Holes are
     // already in order, and a hole reversed would be drilled from the bottom up.
@@ -455,6 +464,12 @@ pub(super) fn run_operation(
         &link_params(work, clearance_z),
     )
     .map_err(in_op(op))?;
+    // The linker's own helixes too.
+    let path = if wrapped {
+        path.straightened(work.job.tolerance)
+    } else {
+        path
+    };
     // Adaptive clearing makes its own links at the level, and its own helixes:
     // they are the operation's as much as the linker's are.
     if let StrategyDetail::Adaptive(r) = &detail {

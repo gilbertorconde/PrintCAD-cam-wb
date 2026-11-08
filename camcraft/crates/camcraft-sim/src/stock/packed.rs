@@ -5,7 +5,7 @@ use std::sync::Arc;
 use camcraft_geom::heightmap::HeightMap;
 use glam::DVec2;
 
-use super::{CellRect, Stock, StockError};
+use super::{Axis, CellRect, Round, Stock, StockError};
 
 /// A stock kept small: its heights run-length encoded, since machined material
 /// is mostly flat (the untouched top, cleared floors, terraces), or kept as they
@@ -20,6 +20,8 @@ pub struct PackedStock {
     cells: Packed,
     /// The stock's underside, shared with it: it never changes as it is cut.
     under: Option<Arc<[f32]>>,
+    /// How its grid goes round a rotary, when it is on one.
+    round: Option<Round>,
 }
 
 /// A stock's heights, packed.
@@ -43,6 +45,7 @@ impl PackedStock {
             floor: stock.floor,
             cells: Packed::of(f.data()),
             under: stock.under.clone(),
+            round: stock.round,
         }
     }
 
@@ -64,6 +67,7 @@ impl PackedStock {
             field,
             floor: self.floor,
             under: self.under.clone(),
+            round: self.round,
         })
     }
 
@@ -84,6 +88,14 @@ impl PackedStock {
                 out.push(1);
                 Packed::of(under).write(&mut out);
             }
+        }
+        // Last, so a stock kept before rotaries were is read as it was.
+        if let Some(round) = self.round {
+            out.push(match round.round {
+                Axis::X => 1,
+                _ => 2,
+            });
+            out.extend_from_slice(&round.radius.to_le_bytes());
         }
         out
     }
@@ -116,6 +128,18 @@ impl PackedStock {
                 ));
             }
         };
+        let round = match r.0 {
+            [] => None,
+            [axis @ (1 | 2), ..] => {
+                let round = if *axis == 1 { Axis::X } else { Axis::Y };
+                r.take(1)?;
+                Some(Round {
+                    round,
+                    radius: r.f64()?,
+                })
+            }
+            _ => return Err(StockError::Unreadable("it goes on past its end")),
+        };
         if !r.0.is_empty() {
             return Err(StockError::Unreadable("it goes on past its end"));
         }
@@ -127,6 +151,7 @@ impl PackedStock {
             floor,
             cells,
             under,
+            round,
         })
     }
 

@@ -33,7 +33,8 @@ use camcraft_post::readback;
 use camcraft_post::render::{Title, render, render_dated, render_program};
 use camcraft_post::setup::{Joining, Section, lower_setup};
 use common::{
-    chip_breaking, dogboned, drilling, engraving, fixture, milled_holes, setup, slot, spec, tapping,
+    chip_breaking, dogboned, drilling, engraving, fixture, milled_holes, setup, slot, spec,
+    tapping, wrapped, wrapping,
 };
 use glam::dvec3;
 
@@ -479,6 +480,35 @@ fn an_a_axis_positions_a_tilted_setup() {
         ..spec()
     };
     check_against(&p, &fixture(), &spec, "masso-rotary-a");
+}
+
+/// An engraving wrapped round a bar on LinuxCNC's A: X, Z and A at once,
+/// fed in inverse time between `G93` and `G94`, each move with its own F;
+/// the header says the work zero is on the axis.
+#[test]
+fn a_wrapped_engraving_turns_a_as_it_cuts() {
+    let mut p = Profile::builtin("linuxcnc").unwrap().unwrap();
+    let wrap = wrapping(&mut p, "axes = [\"A\"]\n[A]\ncontinuous = true\n");
+    let spec = ProgramSpec {
+        strategy: "engrave".into(),
+        wrap: Some(wrap),
+        ..spec()
+    };
+    check_against(&p, &wrapped(), &spec, "linuxcnc-wrap-a");
+}
+
+/// The same for a controller without inverse time: the degrees counted
+/// with the millimetres in each move's F.
+#[test]
+fn a_wrapped_engraving_is_fed_in_degrees_where_asked() {
+    let mut p = Profile::builtin("mach").unwrap().unwrap();
+    let wrap = wrapping(&mut p, "axes = [\"A\"]\nfeed = \"degrees\"\n");
+    let spec = ProgramSpec {
+        strategy: "engrave".into(),
+        wrap: Some(wrap),
+        ..spec()
+    };
+    check_against(&p, &wrapped(), &spec, "mach-wrap-a-degrees");
 }
 
 /// An A and B table stands any tool axis up, both turning, the setup's X

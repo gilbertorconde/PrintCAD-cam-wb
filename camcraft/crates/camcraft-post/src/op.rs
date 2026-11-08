@@ -25,6 +25,7 @@ use glam::{DVec2, DVec3, dvec3};
 
 use crate::profile::{ProgramUnits, TapStyle};
 use crate::rotary::{RotaryAt, RotaryError, angles, short};
+use crate::wrap::Wrapping;
 
 /// A canned drilling cycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -186,6 +187,21 @@ pub enum Op {
     /// Turn the rotaries to where they stand the setup's tool axis up the
     /// spindle, with the tool clear: positioning only, before it cuts.
     Rotary(Vec<RotaryAt>),
+    /// A move on the linear axes and a rotary at once, a setup wrapped round
+    /// it ([`crate::wrap`]): at rapid, or with `feed` its `F`, already in the
+    /// program's terms (inverse time, or units a minute).
+    Turning {
+        /// Where the linear axes go, in the program's coordinates.
+        to: DVec3,
+        /// Where the rotary goes.
+        angle: RotaryAt,
+        /// Its `F`; `None` at rapid.
+        feed: Option<f64>,
+        /// Why this move exists.
+        role: MoveRole,
+    },
+    /// Feeds from here in inverse time (`G93`), or a minute again (`G94`).
+    InverseTime(bool),
     /// Take the tool straight up clear of everything, as the profile does it.
     SafeRetract,
     /// Stop if the operator has asked for it (`M1`), between two operations
@@ -275,6 +291,9 @@ pub struct ProgramSpec {
     /// Custom G-code written after the operation ends, before the footer:
     /// the Custom G-code operations after the last operation of its setup.
     pub after: Vec<CustomGcode>,
+    /// How its path, unrolled, goes round the rotary, for a setup wrapped
+    /// round one: its moves turn it as they cut.
+    pub wrap: Option<Wrapping>,
 }
 
 /// How a probe operation's touches are written.
@@ -337,6 +356,7 @@ impl Default for ProgramSpec {
             probe: None,
             before: Vec::new(),
             after: Vec::new(),
+            wrap: None,
         }
     }
 }
@@ -399,6 +419,23 @@ pub enum LowerError {
     /// A tap whose spindle turns against its thread.
     #[error("a {0:?}-hand tap goes in with the spindle turning the other way")]
     TapTurnsAgainstThread(ThreadHand),
+    /// A setup wrapped round a rotary, for a machine without one about the
+    /// axis its bar lies along.
+    #[error(
+        "{machine} has no rotary about {about:?} to turn the bar round: post it for a profile \
+         whose [rotary] has one (GRBL has none; a fork such as grblHAL may add an A axis, as \
+         a profile of your own)"
+    )]
+    NoRotaryFor {
+        /// The machine's name.
+        machine: String,
+        /// The machine axis the bar lies along.
+        about: crate::rotary::About,
+    },
+    /// A setup wrapped round a rotary, for a dialect that does not write
+    /// one turning as it cuts.
+    #[error("{0} programs are not written turning a rotary as they cut")]
+    WrapNotWritten(String),
     /// The machine's rotaries cannot stand the setup's tool axis up the
     /// spindle.
     #[error(transparent)]
@@ -483,7 +520,7 @@ pub fn lower_counted(
     } else if let Some(p) = &spec.probe {
         probes(p, path, &mut out, &mut made);
     } else {
-        moves(path, &mut out, &mut made);
+        moves_for(spec, path, &mut out, &mut made);
     }
 
     if coolant {
@@ -541,6 +578,21 @@ pub(crate) fn refuse(path: &Toolpath, spec: &ProgramSpec) -> Result<(), LowerErr
 /// axis is, how it is stood up the spindle, and that the coordinates are in
 /// the tilted frame. Nothing for one up the model's Z.
 pub fn tilt_notes(spec: &ProgramSpec) -> Vec<String> {
+    if let Some(w) = &spec.wrap {
+        let (along, across) = match w.about {
+            crate::rotary::About::X => ("X", "Y"),
+            crate::rotary::About::Y => ("Y", "X"),
+        };
+        return vec![
+            format!(
+                "wrapped round {} about {along} at diameter {}",
+                w.axis,
+                short(w.radius * 2.0)
+            ),
+            format!("{across}0 Z0 are on the rotary's axis: set the work offset there"),
+            format!("{along} along the axis from the setup's work zero; Z out from the axis"),
+        ];
+    }
     let Some(axis) = spec.tilt else {
         return Vec::new();
     };
@@ -720,6 +772,20 @@ pub(crate) fn probes(p: &Probing, path: &Toolpath, out: &mut Vec<Op>, made: &mut
 
 pub(crate) fn moves(path: &Toolpath, out: &mut Vec<Op>, made: &mut Vec<usize>) {
     moves_of(path.moves(), 0, out, made);
+}
+
+/// `path`'s moves as `spec` writes them: round the rotary when it wraps the
+/// setup round one, else as they are. `made` as for [`lower_counted`].
+pub(crate) fn moves_for(
+    spec: &ProgramSpec,
+    path: &Toolpath,
+    out: &mut Vec<Op>,
+    made: &mut Vec<usize>,
+) {
+    match &spec.wrap {
+        Some(w) => crate::wrap::moves(path, w, spec.units, out, made),
+        None => moves(path, out, made),
+    }
 }
 
 /// `moves`, the `first`-th of a path on, as instructions; `made` as for

@@ -136,6 +136,14 @@ pub enum JobError {
         /// What is wrong with them.
         why: String,
     },
+    /// A setup machined on a rotary that cannot be, as it is.
+    #[error("setup '{setup}' on a rotary: {why}")]
+    Wrap {
+        /// Which setup.
+        setup: String,
+        /// Why not.
+        why: String,
+    },
     /// A work offset's position that is not a number.
     #[error("setup '{0}': where its work offset is must be numbers")]
     BadWorkOffsetPosition(String),

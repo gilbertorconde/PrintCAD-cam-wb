@@ -12,7 +12,7 @@ use camcraft_core::path::simadapt::sim_moves;
 use camcraft_core::run::cutting_tool;
 use camcraft_core::setup::bounds_all;
 use camcraft_session::Ran;
-use camcraft_sim::stock::{Block, Carry, Stock};
+use camcraft_sim::stock::{Axis, Block, Carry, Stock, round_pitch};
 use glam::{DAffine3, DVec2, DVec3};
 
 use crate::{Drawn, to_f32};
@@ -53,10 +53,27 @@ pub(crate) fn playback(job: &Job, ran: &Ran, draws: &[Drawn]) -> Option<Playback
         .collect();
     let base = grid
         .iter()
-        .map(|p| to_f32(r.frame.to_model(p.extend(0.0))))
+        .map(|p| to_f32(r.frame.shown(p.extend(0.0))))
         .collect();
     let zero = r.frame.to_model(DVec3::ZERO);
     let axis = to_f32(r.frame.to_model(DVec3::Z) - zero);
+    // On a rotary each point stands out from the axis its own way.
+    let (axes, about) = match r.frame.wrap {
+        Some(w) => {
+            let axes = grid
+                .iter()
+                .map(|p| to_f32(r.frame.shown(p.extend(1.0)) - r.frame.shown(p.extend(0.0))))
+                .collect();
+            let along = if w.along == Axis::Y {
+                DVec3::Y
+            } else {
+                DVec3::X
+            };
+            let dir = r.frame.to_model(along) - zero;
+            (axes, Some([to_f32(zero), to_f32(dir)]))
+        }
+        None => (Vec::new(), None),
+    };
     let indices = crate::grid_indices(nx, ny, lo, step, &r.stocks);
     let low = r
         .stocks
@@ -78,6 +95,8 @@ pub(crate) fn playback(job: &Job, ran: &Ran, draws: &[Drawn]) -> Option<Playback
     // what an earlier setup left, as the run started from it.
     let coarse = span.x.max(span.y) / SWEPT as f64;
     let first = r.keyframes.first()?.unpack().ok()?;
+    let round = r.frame.wrap.map(|w| w.round());
+    let coarse = round.map_or(coarse, |round| round_pitch(&round, coarse));
     let mut stock = if first.under().is_some() {
         let all = bounds_all(&r.stocks)?;
         let same = Carry {
@@ -86,7 +105,11 @@ pub(crate) fn playback(job: &Job, ran: &Ran, draws: &[Drawn]) -> Option<Playback
         };
         first.carried(&same, all, low - 1.0, coarse).ok()?
     } else {
-        Stock::from_blocks(&r.stocks, low, coarse).ok()?
+        let fresh = Stock::from_blocks(&r.stocks, low, coarse).ok()?;
+        match round {
+            Some(round) => fresh.rounded(round).ok()?,
+            None => fresh,
+        }
     };
     let floor = stock.floor();
 
@@ -142,7 +165,7 @@ pub(crate) fn playback(job: &Job, ran: &Ran, draws: &[Drawn]) -> Option<Playback
                 0 => drawn.ends.first(),
                 _ => drawn.ends.get(i - 1),
             }
-            .map_or([0.0; 3], |p| to_f32(r.frame.to_model(*p)));
+            .map_or([0.0; 3], |p| to_f32(r.frame.shown(*p)));
             moments.push(Moment {
                 op: k,
                 moves: i,
@@ -163,6 +186,8 @@ pub(crate) fn playback(job: &Job, ran: &Ran, draws: &[Drawn]) -> Option<Playback
     Some(Playback {
         base,
         axis,
+        axes,
+        about,
         indices,
         low: low as f32,
         step: quantum as f32,

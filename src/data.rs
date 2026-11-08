@@ -346,6 +346,14 @@ pub struct SetupData {
     /// The longest piece a corrected move is split into, millimetres.
     #[serde(default = "one")]
     pub probe_segment: f64,
+    /// Whether it is machined on a rotary turning its cylinder, lying
+    /// along X or Y, about its axis: everything planned on it unrolled.
+    #[serde(default)]
+    pub wrap: bool,
+    /// The diameter a flat path is wrapped round at, millimetres; the
+    /// stock's when not above zero.
+    #[serde(default)]
+    pub wrap_diameter: f64,
 }
 
 impl SetupData {
@@ -399,7 +407,14 @@ impl SetupData {
             probe_points: Vec::new(),
             probe_file: String::new(),
             probe_segment: one(),
+            wrap: false,
+            wrap_diameter: 0.0,
         }
+    }
+
+    /// Whether it is on a rotary, its cylinder lying along X or Y.
+    pub fn wraps(&self) -> bool {
+        self.wrap && self.stock == StockKind::Cylinder && self.cylinder_axis != CylinderAxis::Tool
     }
 
     /// The probe results in `text`, from the file `name`, as its points:
@@ -695,6 +710,15 @@ impl SetupData {
         }
         if self.zero == Zero::Picked && self.zero_point.is_none() {
             return Some("Pick the work zero on the part: a corner or a hole's centre.".into());
+        }
+        if self.wrap && !self.wraps() {
+            return Some(
+                "On a rotary the stock is a cylinder lying along X or Y, which it turns about."
+                    .into(),
+            );
+        }
+        if self.wraps() && self.probe_correct {
+            return Some("On a rotary the depths are not corrected to probe results.".into());
         }
         if self.stock == StockKind::Fixed
             && ![self.size_x, self.size_y, self.size_z]
@@ -1407,6 +1431,9 @@ pub fn job(
     camcraft.number = setup.program_number.round().clamp(1.0, 99_999.0) as u32;
     camcraft.post = setup.post.clone();
     camcraft.z_correction = setup.z_correction();
+    camcraft.wrap = setup.wraps().then(|| camcraft_core::job::Wrap {
+        diameter: (setup.wrap_diameter > 0.0).then_some(setup.wrap_diameter),
+    });
     camcraft.orientation = setup.orientation(model_of);
     let offset = [setup.offset_x, setup.offset_y, setup.offset_z];
     camcraft.origin = match (&setup.zero, &setup.zero_point) {

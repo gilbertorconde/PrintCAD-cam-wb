@@ -50,6 +50,10 @@ pub struct RotaryAxis {
     /// either way when not said.
     #[serde(default = "full_turn")]
     pub limits: [f64; 2],
+    /// Whether it turns on without end, as a rotary that wraps round does:
+    /// its limits are then not kept to.
+    #[serde(default)]
+    pub continuous: bool,
 }
 
 fn plus() -> i8 {
@@ -66,6 +70,7 @@ impl Default for RotaryAxis {
             about: None,
             sign: plus(),
             limits: full_turn(),
+            continuous: false,
         }
     }
 }
@@ -87,6 +92,32 @@ pub struct Rotary {
     /// C's.
     #[serde(rename = "C", default)]
     pub c: Option<RotaryAxis>,
+    /// How a move that turns a rotary as it cuts, on a setup wrapped round
+    /// it, is fed.
+    #[serde(default)]
+    pub feed: RotaryFeed,
+    /// Whether each operation of a setup wrapped round a rotary starts
+    /// within half a turn of zero, the turns the one before wound taken
+    /// back as the tool goes across clear: else within half a turn of
+    /// where the one before ended.
+    #[serde(default)]
+    pub unwind: bool,
+}
+
+/// How a move that turns a rotary as it cuts is fed, as the controller
+/// reads its `F`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RotaryFeed {
+    /// Inverse time (`G93`): each move's `F` is one over the minutes it
+    /// takes, as LinuxCNC, Fanuc and Haas read it. `G94` again after.
+    #[default]
+    InverseTime,
+    /// Units a minute, the degrees counted as lengths along with the
+    /// millimetres (or inches), as a controller without `G93` reads a
+    /// move's `F`: each move's worked out so it takes as long as cutting
+    /// it at its feed.
+    Degrees,
 }
 
 /// Where one rotary goes: its word and its angle, in degrees.
@@ -178,7 +209,7 @@ impl Rotary {
     }
 
     /// The machine axis a rotary turns about.
-    fn about(&self, name: char) -> Option<About> {
+    pub fn about(&self, name: char) -> Option<About> {
         self.axis(name)?.about.or(match name {
             'A' => Some(About::X),
             'B' => Some(About::Y),
@@ -392,9 +423,12 @@ mod tests {
                 about: None,
                 sign,
                 limits,
+                continuous: false,
             }),
             b: None,
             c: None,
+            feed: RotaryFeed::default(),
+            unwind: false,
         }
     }
 
@@ -404,6 +438,8 @@ mod tests {
             a: None,
             b: None,
             c: None,
+            feed: RotaryFeed::default(),
+            unwind: false,
         }
     }
 

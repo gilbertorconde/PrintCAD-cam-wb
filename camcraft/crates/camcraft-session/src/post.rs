@@ -11,18 +11,22 @@
 //! trap on the machine. The command line's `--out` and the app's Post both come
 //! through here, so they write the same files under the same names.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use camcraft_core::job::{Coolant, Programs, Setup};
+use camcraft_core::path::toolpath::Toolpath;
 use camcraft_core::run::{Made, OperationResult, SetupResult, StrategyDetail};
 use camcraft_core::setup::bounds_all;
-use camcraft_core::setup::frame::Frame;
+use camcraft_core::setup::frame::{Frame, Unrolled};
 use camcraft_post::op::{
     CustomGcode, DrillCycles, LowerError, Probing, ProgramSpec, extents, lower,
 };
-use camcraft_post::profile::{Placement, ProbeStyle, Profile, TapStyle, TravelCheck};
+use camcraft_post::profile::{Dialect, Placement, ProbeStyle, Profile, TapStyle, TravelCheck};
 use camcraft_post::render::{RenderReport, Title, render, render_program};
+use camcraft_post::rotary::About;
 use camcraft_post::setup::{Joining, Section, lower_setup};
+use camcraft_post::wrap::{Wrapping, wound};
 use glam::DVec3;
 
 use crate::{Ran, SessionError, fs};
@@ -131,10 +135,22 @@ pub fn program_spec(
         }),
         _ => None,
     };
-    let rotary = match &profile.rotary {
+    // Round a rotary the setup is wrapped round, the rotary that turns it
+    // goes with the path; any other stays at zero.
+    let wrap = match frame.wrap {
+        Some(_) if profile.dialect == Dialect::Heidenhain => {
+            return Err(LowerError::WrapNotWritten(profile.name.clone()));
+        }
+        Some(u) => Some(Wrapping::of(profile, about(&u), u.radius)?),
+        None => None,
+    };
+    let rotary: Vec<_> = match &profile.rotary {
         Some(r) => r.position(z, x)?,
         None => Vec::new(),
-    };
+    }
+    .into_iter()
+    .filter(|at| wrap.is_none_or(|w| w.axis != at.axis))
+    .collect();
     Ok(ProgramSpec {
         op_name: op.name.clone(),
         strategy: op.strategy.to_string(),
@@ -179,7 +195,71 @@ pub fn program_spec(
         probe,
         before: Vec::new(),
         after: Vec::new(),
+        wrap,
     })
+}
+
+/// The machine axis a setup's bar lies along, unrolled as `u` says.
+fn about(u: &Unrolled) -> About {
+    if u.along == camcraft_sim::stock::Axis::Y {
+        About::Y
+    } else {
+        About::X
+    }
+}
+
+/// `op`'s path as `spec` posts it: on a setup wrapped round a rotary, moved
+/// round by whole turns to start within half a turn of `near`, a distance
+/// round the bar; else as it is.
+pub fn posted_path<'a>(
+    op: &'a OperationResult,
+    spec: &ProgramSpec,
+    near: f64,
+) -> Cow<'a, Toolpath> {
+    match &spec.wrap {
+        Some(w) => Cow::Owned(wound(
+            &op.path,
+            w.about,
+            std::f64::consts::TAU * w.radius,
+            near,
+        )),
+        None => Cow::Borrowed(&op.path),
+    }
+}
+
+/// Where a path posted round a rotary ends, as a distance round the bar:
+/// where the next of a setup's starts near, unless the rotary unwinds
+/// (`[rotary] unwind`), when each starts near zero.
+fn next_near(path: &Toolpath, spec: &ProgramSpec, profile: &Profile) -> f64 {
+    let unwinds = profile.rotary.as_ref().is_some_and(|r| r.unwind);
+    match (&spec.wrap, path.end()) {
+        (Some(w), Some(end)) if !unwinds => match w.about {
+            About::X => end.y,
+            About::Y => end.x,
+        },
+        _ => 0.0,
+    }
+}
+
+/// Each of a setup's operations with a program, `specs` (from
+/// [`setup_specs`]), its path as posted in the setup's one program: round a
+/// rotary, each starting near where the one before ended, or near zero
+/// where the rotary unwinds.
+pub fn setup_paths<'a>(
+    result: &'a SetupResult,
+    specs: &[(usize, ProgramSpec)],
+    profile: &Profile,
+) -> Vec<Cow<'a, Toolpath>> {
+    let mut near = 0.0;
+    specs
+        .iter()
+        .filter_map(|(k, spec)| {
+            let op = result.operations.get(*k)?;
+            let path = posted_path(op, spec, near);
+            near = next_near(&path, spec, profile);
+            Some(path)
+        })
+        .collect()
 }
 
 /// The file a controller that logs what it probes writes a probe
@@ -259,15 +339,44 @@ pub fn custom_gcode(
 /// offsets. The moves are checked along the setup's own axes: tilted, as the
 /// machine moves once its rotaries have stood the part up (the setup's X on
 /// the machine's, as positioning them requires), or as it is fixtured tilted.
-pub fn travel_check(op: &OperationResult, setup: &Setup, profile: &Profile) -> TravelCheck {
+pub fn travel_check(
+    op: &OperationResult,
+    setup: &Setup,
+    frame: &Frame,
+    profile: &Profile,
+) -> TravelCheck {
     let place = Placement {
         zero: setup.work_offset.map(DVec3::from_array),
         tool_length: op.tool_length,
     };
-    match extents(&op.path) {
-        Some((low, high)) => profile.travel_check(low, high, &place),
-        None => TravelCheck::default(),
+    let Some((low, high)) = extents(&op.path) else {
+        return TravelCheck::default();
+    };
+    // Round a rotary, the linear axes go along the bar and out from it,
+    // and the rotary as far round as the path, posted on its own, goes.
+    let Some(u) = frame.wrap else {
+        return profile.travel_check(low, high, &place);
+    };
+    let Ok(w) = Wrapping::of(profile, about(&u), u.radius) else {
+        // Not posted at all: the post says why.
+        return TravelCheck::default();
+    };
+    let (a, b) = (w.machine(low), w.machine(high));
+    let mut out = profile.travel_check(a.0.min(b.0), a.0.max(b.0), &place);
+    let wound = wound(&op.path, w.about, u.period(), 0.0);
+    if let (Some([lo, hi]), Some((low, high))) = (w.limits, extents(&wound)) {
+        let (d0, d1) = (w.machine(low).1, w.machine(high).1);
+        let (d0, d1) = (d0.min(d1), d0.max(d1));
+        let slack = 1e-6;
+        if d0 < lo - slack || d1 > hi + slack {
+            out.past.push(format!(
+                "{} goes from {d0:.3}° to {d1:.3}°, past its limits ({lo}° to {hi}°): give \
+                 [rotary.{}] wider limits, or continuous = true for one that turns on",
+                w.axis, w.axis
+            ));
+        }
     }
+    out
 }
 
 /// Render one operation, of a setup whose frame is `frame`, as a program for
@@ -290,7 +399,7 @@ pub fn program_with(
     profile: &Profile,
     name: &str,
 ) -> Result<(String, RenderReport), SessionError> {
-    let ops = lower(&op.path, spec)?;
+    let ops = lower(&posted_path(op, spec, 0.0), spec)?;
     Ok(render(&ops, profile, name))
 }
 
@@ -351,11 +460,13 @@ pub fn setup_program(
     title: &Title,
 ) -> Result<SetupProgram, (usize, LowerError)> {
     let specs = setup_specs(setup, result, profile)?;
+    let paths = setup_paths(result, &specs, profile);
     let sections: Vec<Section> = specs
         .iter()
-        .filter_map(|(k, spec)| {
-            let path = &result.operations.get(*k)?.path;
-            Some(Section { path, spec })
+        .zip(&paths)
+        .map(|((_, spec), path)| Section {
+            path: path.as_ref(),
+            spec,
         })
         .collect();
     let (ops, made) = lower_setup(&sections, Joining::of(profile)).map_err(|e| {
@@ -451,7 +562,7 @@ pub fn plan_posting(
             .iter()
             .filter(|op| op.made.has_paths())
             .flat_map(|op| {
-                travel_check(op, setup, &loaded)
+                travel_check(op, setup, &ran.result.frame, &loaded)
                     .past
                     .into_iter()
                     .map(|why| format!("travel {}: {why}", op.name))
@@ -504,7 +615,7 @@ pub fn plan_posting(
                     .saturating_add(u32::try_from(programs.len()).unwrap_or(u32::MAX)),
                 date: None,
             };
-            let ops = lower(&op.path, &spec).map_err(|e| in_setup(e.into()))?;
+            let ops = lower(&posted_path(op, &spec, 0.0), &spec).map_err(|e| in_setup(e.into()))?;
             let (text, report) = render_program(&ops, &loaded, &title);
             let whose = format!("setup '{}' operation '{}'", setup.name, op.name);
             programs.push((name, whose, op.name.clone(), text, report));
