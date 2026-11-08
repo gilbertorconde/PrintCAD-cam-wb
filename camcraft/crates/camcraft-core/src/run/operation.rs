@@ -469,9 +469,14 @@ pub(super) fn run_operation(
     let clearance =
         ClearanceField::new(stock.field().clone(), op.linking.safe_distance, clearance_z)
             .map_err(in_op(op))?;
+    // Rotary finishing lifts to the retract height between passes, whatever
+    // is asked: over the bar unrolled, the material under a traverse is
+    // measured across the tool's width as if flat, which near the axis is
+    // less of the bar than the tool, on a radius, spans.
+    let rotary = wrapped && matches!(op.strategy, StrategySpec::Parallel { .. });
     let clearance = match op.linking.retraction {
-        Retraction::Minimum => clearance,
-        Retraction::Full => clearance.at_least(retract_z),
+        Retraction::Minimum if !rotary => clearance,
+        _ => clearance.at_least(retract_z),
     };
 
     // Linked over the material as each pass leaves it, and cut into it as linked.

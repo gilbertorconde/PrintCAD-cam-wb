@@ -27,7 +27,15 @@ pub(super) fn link_params(work: &Work<'_>, clearance_z: f64) -> LinkParams {
             ..
         }
     );
+    // Rotary finishing follows the part round the bar, which the linker
+    // would measure a link against as a flat tool over the part unrolled,
+    // not as the tool on a radius meets it: a link staying down, a lead or a
+    // helix in could cut the part. So each of its links lifts clear and
+    // comes straight down onto the next pass.
+    let rotary =
+        work.prepared.frame.wrap.is_some() && matches!(op.strategy, StrategySpec::Parallel { .. });
     let (stay_down, lead_radius, ramp) = match uses.links {
+        _ if rotary => (StayDown::Never, 0.0, None),
         // Adaptive clearing stays down itself, at the level, only where it has
         // cleared the way, and goes down its own helixes: a link it leaves is
         // one to lift for, into what it has cleared, straight down.
@@ -60,6 +68,7 @@ pub(super) fn link_params(work: &Work<'_>, clearance_z: f64) -> LinkParams {
     // (`planar_paths`): the linker only brings the tool onto its lead.
     let profile = matches!(op.strategy, StrategySpec::Profile { .. });
     let entry = match op.entry() {
+        _ if rotary => EntryKind::Plunge,
         Some(Entry::Helix) => EntryKind::Helix,
         Some(Entry::Plunge) => EntryKind::Plunge,
         Some(Entry::Ramp) if profile => EntryKind::Plunge,
@@ -106,7 +115,39 @@ impl Material for Cutting<'_> {
     fn highest(&self, from: DVec2, to: DVec2, radius: f64) -> Option<f64> {
         // The simulator's own disc, down to its margin, so a rapid stopped above
         // this is one the simulator agrees touches nothing.
-        highest_under(self.stock.field(), from, to, radius * (1.0 + 1e-9)).top
+        let field = self.stock.field();
+        let Some(round) = self.stock.round() else {
+            return highest_under(field, from, to, radius * (1.0 + 1e-9)).top;
+        };
+        // On a rotary the grid is one turn round, and a path goes round and
+        // round: the line is measured where it is on the grid, a turn either
+        // side too, as it may cross where the grid starts again.
+        let unit = match round.round {
+            camcraft_sim::stock::Axis::X => DVec2::X,
+            _ => DVec2::Y,
+        };
+        let period = round.period();
+        let start = field.origin().dot(unit);
+        let mid = 0.5 * (from + to).dot(unit);
+        let turns = ((mid - start) / period).floor();
+        let under = |reach: f64| {
+            [-1.0, 0.0, 1.0]
+                .into_iter()
+                .filter_map(|k| {
+                    let shift = unit * ((k - turns) * period);
+                    highest_under(field, from + shift, to + shift, reach * (1.0 + 1e-9)).top
+                })
+                .reduce(f64::max)
+        };
+        let top = under(radius);
+        // The tool spans more of the bar unrolled the nearer the axis it is:
+        // `atan(r / ρ)` round, at the radius it is unrolled at. So the
+        // material is measured again that wide, for the tool as near the axis
+        // as it can be, on what was found (on the axis, where nothing was):
+        // never less than it spans.
+        let near = top.unwrap_or(0.0).max(1e-3);
+        let wide = round.radius * (radius / near).atan();
+        if wide > radius { under(wide) } else { top }
     }
 
     fn cut(&mut self, moves: &[Move]) {

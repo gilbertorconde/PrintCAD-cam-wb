@@ -26,6 +26,7 @@ use rayon::prelude::*;
 use crate::cutter::tool::ToolProfile;
 use crate::path::toolpath::{MoveRole, Toolpath};
 use crate::strategy::StrategyError;
+use crate::strategy::parallel::{ParallelReport, break_steep};
 
 /// How a rotary finish goes round the bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +56,9 @@ pub struct RotaryParams {
     pub tolerance: f64,
     /// Cutting feed, mm/min.
     pub feed: f64,
+    /// The most a pass may fall down a steep stretch at the cutting feed:
+    /// further, it is broken there, to be plunged into at the plunge feed.
+    pub max_cut_step: f64,
 }
 
 /// What it made.
@@ -64,6 +68,8 @@ pub struct RotaryReport {
     pub passes: u64,
     /// Points sampled on the part.
     pub samples: u64,
+    /// Passes broken down a steep stretch, as parallel finishing breaks them.
+    pub wall_breaks: u64,
 }
 
 /// The part as the simulator holds it: its distance out from the axis in
@@ -259,7 +265,7 @@ pub fn rotary_finish<T: ToolProfile + Sync>(
         };
         // Every pass at once, each sampled and refined in parallel too: the
         // helix is one long pass, and along the bar each is short.
-        let passes: Vec<(Vec<DVec3>, u64)> = runs
+        let passes: Vec<(Vec<Vec<DVec3>>, u64, u64)> = runs
             .par_iter()
             .map(|&(a, b)| {
                 let at = |t: f64| (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t);
@@ -291,22 +297,27 @@ pub fn rotary_finish<T: ToolProfile + Sync>(
                     points.push(last);
                 }
                 let samples = points.len() as u64;
-                (
-                    crate::strategy::vcarve::simplified(&points, p.tolerance * 0.25),
-                    samples,
-                )
+                let kept = crate::strategy::vcarve::simplified(&points, p.tolerance * 0.25);
+                // Down a wall, as off the part's end or into a hole, the pass
+                // would plunge at the cutting feed: it is broken there.
+                let mut walls = ParallelReport::default();
+                let pieces = break_steep(kept, p.max_cut_step, &mut walls);
+                (pieces, samples, walls.wall_breaks)
             })
             .collect();
-        for (kept, samples) in passes {
+        for (pieces, samples, walls) in passes {
             report.samples += samples;
-            let Some((&start, rest)) = kept.split_first() else {
-                continue;
-            };
-            path.feed_to(start, MoveRole::Link, p.feed)?;
-            for &q in rest {
-                path.feed_to(q, MoveRole::Cut, p.feed)?;
+            report.wall_breaks += walls;
+            for piece in pieces {
+                let (Some((&start, rest)), true) = (piece.split_first(), piece.len() > 1) else {
+                    continue;
+                };
+                path.feed_to(start, MoveRole::Link, p.feed)?;
+                for &q in rest {
+                    path.feed_to(q, MoveRole::Cut, p.feed)?;
+                }
+                report.passes += 1;
             }
-            report.passes += 1;
         }
         if !held.load(std::sync::atomic::Ordering::Relaxed) {
             break;

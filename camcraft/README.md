@@ -638,7 +638,23 @@ leaves the tool's side, rows round from the tool's taken while they could
 still be met higher than the best yet. Points are sampled a quarter of
 the tool's radius apart, again between two where the tip strays from
 the line between them, and simplified: every pass of a level at once,
-each sampled and refined in parallel. `JobError::Wrap`
+each sampled and refined in parallel. Each pass is broken where it falls
+further than `max_cut_step` down a steep stretch, as parallel finishing's
+are (`parallel::break_steep`, shared; `RotaryReport::wall_breaks`), and
+linked lifting clear: rotary finishing never stays down, has no leads or
+helix in, plunges straight down onto each pass and lifts to the retract
+height between them, whatever its retraction (`link_params`,
+`run_operation`), as the linker would measure a link against the part
+unrolled as a flat tool meets a flat part. And on a rotary the linker
+measures the material (`Cutting::highest`) on the grid's turn wherever
+the path is round the bar, a turn either side too, and as wide round as
+the tool spans there, `atan(r / ρ)` at the wrap radius, `ρ` the top it
+found or the axis: it used to look past the grid's edge, finding
+nothing, and over a disc as wide as the tool, narrower than the tool
+spans near the axis, so a rapid could come down into material.
+A whole run on a bar along Y, finished and engraved round a B and posted
+for LinuxCNC as one program, is the golden `linuxcnc-wrap-b.nc`, written
+by `camcraft-session`'s test. `JobError::Wrap`
 lets parallel finishing through, and `StrategyError::RotaryGrid` refuses a
 part on a grid that does not go round in whole cells.
 

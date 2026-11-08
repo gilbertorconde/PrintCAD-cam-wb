@@ -38,7 +38,18 @@ pub(super) fn on_a_rotary(
     curves: Vec<Curve>,
     edit: impl FnOnce(&mut Job),
 ) -> (Job, Result<SetupResult, RunError>) {
-    let body = Body::derived(rod(rod_radius, 60.0, 96));
+    on_a_rotary_body(rod(rod_radius, 60.0, 96), strategy, tool, curves, edit)
+}
+
+/// [`on_a_rotary`] with a part of its own, along X.
+fn on_a_rotary_body(
+    part: TriMesh,
+    strategy: StrategySpec,
+    tool: crate::job::ToolSpec,
+    curves: Vec<Curve>,
+    edit: impl FnOnce(&mut Job),
+) -> (Job, Result<SetupResult, RunError>) {
+    let body = Body::derived(part);
     let mut job: Job = toml::from_str(crate::fixture::JOB).unwrap();
     job.setups[0].operations.retain(|op| op.name == "rough");
     job.stocks[0].spec = StockSpec::CylinderAroundModels {
@@ -297,4 +308,44 @@ fn a_tapered_ball_finishes_on_a_rotary_and_a_slot_cutter_does_not() {
     });
     let e = r.unwrap_err().to_string();
     assert!(e.contains("lollipop or slot cutter"), "{e}");
+}
+
+/// A square bar 20 across in a round one, finished along it on a rotary:
+/// near the axis, over a flat, the tool spans more of the bar unrolled than
+/// its width, and passes go round past where the grid starts again; every
+/// link lifts clear of the material, measured so, and comes straight down,
+/// so nothing is cut at rapid and the part is not gouged.
+#[test]
+fn a_rotary_finish_links_clear_of_a_square_bar() {
+    let square = synthetic::cuboid(DVec3::new(0.0, -10.0, -10.0), DVec3::new(40.0, 10.0, 10.0));
+    let (_, result) = on_a_rotary_body(
+        square,
+        StrategySpec::Parallel { angle: 0.0 },
+        super::flat(6.0),
+        vec![],
+        |job| {
+            let op = &mut job.setups[0].operations[0];
+            op.passes.stepover = 3.0;
+            op.passes.feed = 1000.0;
+        },
+    );
+    let result = result.unwrap();
+    let op = &result.operations[0];
+    assert_eq!(op.sim.rapid_contacts, 0, "{:?}", op.sim);
+    assert_eq!(result.verify.gouged, 0, "{:?}", result.verify);
+    assert!(result.is_clean(), "{:?}", result.warnings());
+    // Round the bar, past half a turn, where the grid has started again.
+    let w = result.frame.wrap.unwrap();
+    let far = op
+        .path
+        .moves()
+        .iter()
+        .map(|m| m.to.y)
+        .fold(f64::MIN, f64::max);
+    assert!(far > 0.6 * w.period(), "{far}");
+    // Every link comes straight down: no stay-down, lead or helix.
+    assert!(op.path.moves().iter().all(|m| !matches!(
+        m.role,
+        MoveRole::Transition | MoveRole::Ramp | MoveRole::Lead
+    )));
 }
