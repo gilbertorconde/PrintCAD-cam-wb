@@ -869,6 +869,11 @@ pub struct OperationData {
     /// kept, since the sketches are.
     #[serde(skip)]
     pub curves: Vec<Curve>,
+    /// What it waits to be given, made from a template whose picks were on
+    /// another part: "the faces, edges or sketches it machines". Until
+    /// something is picked it does not run, and says so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs_pick: Option<String>,
 }
 
 impl OperationData {
@@ -898,6 +903,7 @@ impl OperationData {
             edges: Vec::new(),
             sketches: Vec::new(),
             curves: Vec::new(),
+            needs_pick: None,
         };
         data.read_numbers();
         data
@@ -1038,6 +1044,14 @@ impl OperationData {
         op
     }
 
+    /// What it still waits to be given, from a template: nothing once
+    /// something is picked, or once its holes are found by their diameter.
+    pub fn waits_for_pick(&self) -> Option<&str> {
+        let picked = !(self.faces.is_empty() && self.edges.is_empty() && self.sketches.is_empty());
+        let rule = self.strategy().uses().holes && self.operation.holes.diameter.is_some();
+        self.needs_pick.as_deref().filter(|_| !picked && !rule)
+    }
+
     /// Take sketches `ids`, as a script gives them: what their loops enclose
     /// is what it cuts. A 2D cut's outline is then its picks, as ticking
     /// them in its panel with the picks as its outline does; a 3D cut's
@@ -1136,6 +1150,9 @@ impl OperationData {
         // Its lines are checked with the run, which says which and why.
         if self.is_custom() {
             return None;
+        }
+        if let Some(what) = self.waits_for_pick() {
+            return Some(format!("Needs a pick: {what}."));
         }
         let Some(name) = &self.operation.tool else {
             return Some("Pick the tool it cuts with.".into());

@@ -600,6 +600,11 @@ pub fn setup_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
             "Turned off: none of its operations is run, simulated, checked or posted.",
         ));
     }
+    let ops = operations_of(id);
+    // Made to apply a template to: its group first, open.
+    if cam.template_ui.first {
+        panel.push(crate::templates::group(cam, &node.name, ops.len()));
+    }
     panel.push(group(
         "Bodies",
         vec![
@@ -837,7 +842,6 @@ pub fn setup_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
     ));
     panel.push(group("Work offset", work_offset_rows(id, &setup)));
     panel.push(group("Probed surface", probe_rows(id, &setup)));
-    let ops = operations_of(id);
     let run = cam.runs.get(id).and_then(|c| c.shown());
     let items = ops
         .iter()
@@ -879,6 +883,9 @@ pub fn setup_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
             ),
         ],
     ));
+    if !cam.template_ui.first {
+        panel.push(crate::templates::group(cam, &node.name, ops.len()));
+    }
     if !setup.tools.is_empty() {
         panel.push(Widget::Group {
             title: "Its tools".into(),
@@ -1051,9 +1058,12 @@ fn work_offset_rows(id: &str, setup: &SetupData) -> Vec<Widget> {
 }
 
 pub fn setup_event(cam: &mut Cam, id: &str, event: PanelEvent) {
-    let Some((_, mut setup)) = setup_node(id) else {
+    let Some((node, mut setup)) = setup_node(id) else {
         return;
     };
+    if crate::templates::event(cam, id, &node.name, &event) {
+        return;
+    }
     match event {
         PanelEvent::Number { id: field, value } => {
             let slot = match field.as_str() {
@@ -1963,6 +1973,19 @@ pub fn operation_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
                     .position(|(x, _)| *x == holes.order)
                     .unwrap_or(0),
             ));
+            if let Some(d) = holes.diameter {
+                geometry.push(Widget::Value {
+                    label: "Every hole".into(),
+                    value: format!("Ø{} along the tool, picked or not", crate::sheet::num(d)),
+                    mono: false,
+                });
+                geometry.push(button(
+                    "pick_holes",
+                    "Take only the holes picked",
+                    ButtonStyle::Small,
+                    true,
+                ));
+            }
             geometry.push(note(
                 NoteKind::Info,
                 "Pick a hole's wall, or its rim. With the same diameter, every hole of the \
@@ -2341,6 +2364,12 @@ pub fn operation_event(cam: &mut Cam, id: &str, event: PanelEvent) {
             data.faces.clear();
             data.edges.clear();
             data.sketches.clear();
+        }
+        // Its holes by a template's diameter no longer: those picked, which
+        // it waits for.
+        PanelEvent::Button { id: b } if b == "pick_holes" => {
+            data.operation.holes.diameter = None;
+            data.needs_pick = Some(crate::templates::what_it_picks(&data).into());
         }
         PanelEvent::Button { id: b } if b == "generate" => {
             if let Some((s, _)) = setup {

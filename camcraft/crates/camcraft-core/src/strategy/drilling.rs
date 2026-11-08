@@ -103,6 +103,12 @@ pub enum HoleError {
     /// Nothing was picked.
     #[error("pick the round edge at the top of each hole to drill")]
     NothingPicked,
+    /// No hole of the models is as wide as asked.
+    #[error("no hole of the setup's models is {diameter:.3} mm across along the tool")]
+    NoneAsWide {
+        /// The diameter asked for, in millimetres.
+        diameter: f64,
+    },
     /// A picked edge is not round.
     #[error("edge {edge} of '{model}' is not round, so it is not a hole's rim")]
     NotRound {
