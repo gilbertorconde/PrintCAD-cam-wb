@@ -760,6 +760,16 @@ fn a_setup_of_two_vises_posts_each_part_in_its_offset() {
         camcraft_post::readback::check_setup(&p.text, &sections, &profile)
             .unwrap_or_else(|e| panic!("{e:?}\n{}", p.text));
         assert_eq!(p.tool_changes, changes, "{}", p.text);
+        // Each instruction says which part it is at, in the order cut.
+        let mut parts = p.parts.clone();
+        parts.dedup();
+        let mut want: Vec<usize> = cut_order(setup, &ran.result.operations, true)
+            .into_iter()
+            .map(|(_, p)| p)
+            .collect();
+        want.dedup();
+        assert_eq!(parts, want);
+        assert_eq!(p.parts.len(), p.made.len());
         let heads: Vec<String> = p
             .text
             .lines()
@@ -792,6 +802,10 @@ fn a_setup_of_two_vises_posts_each_part_in_its_offset() {
     )
     .unwrap();
     assert_eq!(ops.len(), made.len());
+    // Each part's moves counted as its own.
+    let n = ran.result.operations[0].path.len();
+    assert!(made.contains(&(0, n)) && made.contains(&(1, n)));
+    assert_eq!(made.last(), Some(&(1, n)));
     let (text, _) = render_program(&ops, &profile, &title);
     assert!(
         text.contains("\nG54\n") && text.contains("\nG55\n"),
@@ -997,5 +1011,43 @@ fn golden(got: &str, file: &str) {
         want.lines().count(),
         got.lines().count(),
         "{file}.nc length"
+    );
+}
+
+/// Each operation at each part, in the order a program cuts them: by tool
+/// the roughing at both parts and then the finish, by part each part's
+/// operations together, one program an operation each at both in turn. An
+/// operation turned off stays in the run it stands in.
+#[test]
+fn operations_are_cut_at_each_part_in_the_order_asked() {
+    use camcraft_core::job::{Placement, PlacementOrder};
+    use camcraft_core::run::Made;
+    let (mut job, _, ran) = example();
+    let setup = &mut job.setups[0];
+    let ops = &ran.result.operations;
+    assert_eq!(cut_order(setup, ops, true), [(0, 0), (1, 0)], "one part");
+    setup.placements = [54, 55]
+        .map(|wcs| Placement {
+            wcs,
+            at: [0.0; 3],
+            work_offset: None,
+        })
+        .to_vec();
+    let by_tool = [(0, 0), (0, 1), (1, 0), (1, 1)];
+    assert_eq!(cut_order(setup, ops, true), by_tool);
+    assert_eq!(cut_order(setup, ops, false), by_tool, "one an operation");
+    setup.placement_order = PlacementOrder::ByPart;
+    assert_eq!(
+        cut_order(setup, ops, true),
+        [(0, 0), (1, 0), (0, 1), (1, 1)]
+    );
+    assert_eq!(cut_order(setup, ops, false), by_tool);
+    setup.placement_order = PlacementOrder::ByTool;
+    let mut off = ops[1].clone();
+    off.made = Made::Disabled;
+    let three = [ops[0].clone(), off, ops[1].clone()];
+    assert_eq!(
+        cut_order(setup, &three, true),
+        [(0, 0), (1, 0), (0, 1), (1, 1), (2, 0), (2, 1)]
     );
 }

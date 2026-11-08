@@ -767,7 +767,11 @@ placement in the order asked (by tool, each run of operations with one tool
 at every placement), `placed_specs` and `placed_program` post one operation
 at each, `travel_check` checks each placement where its offset is, saying
 which, and a run warns of placements whose stocks overlap. A golden program
-of two vises by tool (`linuxcnc-setup-vises.nc`).
+of two vises by tool (`linuxcnc-setup-vises.nc`). `cut_order` gives that order for
+every operation, by its index and its placement's, the one an operation
+programs' too, so playback can follow it; `SetupProgram::parts` says which
+placement each instruction is at, and `placed_program` counts each
+placement's moves as its own.
 
 And a post for Siemens Sinumerik controls. In `camcraft-post`, profiles
 for the 840D sl and 828D (`sinumerik.toml`, `sinumerik-inch.toml`), with

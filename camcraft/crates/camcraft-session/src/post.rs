@@ -438,22 +438,53 @@ pub fn placed_specs(spec: &ProgramSpec, setup: &Setup) -> Vec<ProgramSpec> {
 }
 
 /// One operation's program for a setup of several placements: `path` at
-/// each, as `specs` ([`placed_specs`]) say, and for each instruction how
-/// many of the path's moves are made once it has run, the first part's
-/// counted and the others' taken as after it, so a line is found from a
-/// move on the first.
+/// each, as `specs` ([`placed_specs`]) say, and for each instruction the
+/// part it is at, by its index among the specs, and how many of the path's
+/// moves are made there once it has run, so a line is found from a move at
+/// any part.
 pub fn placed_program(
     path: &Toolpath,
     specs: &[ProgramSpec],
     profile: &Profile,
-) -> Result<(Vec<camcraft_post::op::Op>, Vec<usize>), LowerError> {
+) -> Result<(Vec<camcraft_post::op::Op>, camcraft_post::setup::Made), LowerError> {
     let sections: Vec<Section> = specs.iter().map(|spec| Section { path, spec }).collect();
-    let (ops, made) = lower_setup(&sections, Joining::of(profile)).map_err(|e| e.error)?;
-    let made = made
-        .into_iter()
-        .map(|(section, n)| if section == 0 { n } else { path.len() })
-        .collect();
-    Ok((ops, made))
+    lower_setup(&sections, Joining::of(profile)).map_err(|e| e.error)
+}
+
+/// The order `setup`'s operations (as run, `ops`) are cut at its parts: each
+/// operation, by its index, at each part, by its index among
+/// [`Setup::placed`]. One part: every operation in turn. Several, in one
+/// program (`one_program`): by tool, each run of operations with one tool at
+/// every part before the next tool, or by part, every operation at one part
+/// before the next; one program an operation, each at every part in turn.
+/// An operation with no toolpath (turned off, custom G-code) stays in the
+/// run it stands in, as its G-code goes with its neighbours'.
+pub fn cut_order(setup: &Setup, ops: &[OperationResult], one_program: bool) -> Vec<(usize, usize)> {
+    let parts = setup.placed().len();
+    if parts <= 1 {
+        return (0..ops.len()).map(|k| (k, 0)).collect();
+    }
+    // Each run of operations, with its tool once one has one.
+    let mut runs: Vec<(Vec<usize>, Option<u32>)> = Vec::new();
+    for (k, op) in ops.iter().enumerate() {
+        let tool = op.made.has_paths().then_some(op.tool_number);
+        let joins = |run: &(Vec<usize>, Option<u32>)| {
+            one_program
+                && (setup.placement_order == PlacementOrder::ByPart
+                    || tool.is_none()
+                    || run.1.is_none_or(|t| Some(t) == tool))
+        };
+        match runs.last_mut() {
+            Some(run) if joins(run) => {
+                run.0.push(k);
+                run.1 = run.1.or(tool);
+            }
+            _ => runs.push((vec![k], tool)),
+        }
+    }
+    runs.iter()
+        .flat_map(|(run, _)| (0..parts).flat_map(move |p| run.iter().map(move |k| (*k, p))))
+        .collect()
 }
 
 /// Render one operation, of a setup whose frame is `frame`, as a program for
@@ -492,9 +523,10 @@ pub fn setup_specs(
 ) -> Result<Vec<(usize, ProgramSpec)>, (usize, LowerError)> {
     let custom = custom_gcode(setup, &result.operations);
     let stock = stock_box(result);
-    let mut out = Vec::new();
+    let mut specs: Vec<Option<ProgramSpec>> = Vec::with_capacity(result.operations.len());
     for (k, op) in result.operations.iter().enumerate() {
         if !op.made.has_paths() {
+            specs.push(None);
             continue;
         }
         let mut spec = program_spec(op, setup.wcs, &result.frame, profile).map_err(|e| (k, e))?;
@@ -505,40 +537,23 @@ pub fn setup_specs(
         // The next tool is the joined program's to call up; the stock is
         // the setup's.
         spec.stock = stock;
-        out.push((k, spec));
+        specs.push(Some(spec));
     }
-    if setup.placements.is_empty() {
-        return Ok(out);
-    }
-    // Each operation at every part: by tool, each run of operations with
-    // one tool in turn; by part, all of them.
-    let mut runs: Vec<Vec<(usize, ProgramSpec)>> = Vec::new();
-    for (k, spec) in out {
-        match runs.last_mut() {
-            Some(run)
-                if setup.placement_order == PlacementOrder::ByPart
-                    || run.last().is_some_and(|(_, s)| s.tool == spec.tool) =>
-            {
-                run.push((k, spec));
-            }
-            _ => runs.push(vec![(k, spec)]),
-        }
-    }
-    let mut placed = Vec::new();
-    for run in runs {
-        for p in setup.placed() {
-            for (k, spec) in &run {
-                placed.push((
-                    *k,
-                    ProgramSpec {
-                        wcs: p.wcs,
-                        ..spec.clone()
-                    },
-                ));
-            }
-        }
-    }
-    Ok(placed)
+    // Each operation at every part, in the order asked.
+    let placed = setup.placed();
+    Ok(cut_order(setup, &result.operations, true)
+        .into_iter()
+        .filter_map(|(k, p)| {
+            let spec = specs.get(k)?.as_ref()?;
+            Some((
+                k,
+                ProgramSpec {
+                    wcs: placed.get(p).map_or(spec.wcs, |p| p.wcs),
+                    ..spec.clone()
+                },
+            ))
+        })
+        .collect())
 }
 
 /// A setup posted as one program.
@@ -553,6 +568,9 @@ pub struct SetupProgram {
     /// it has run: with `report.op_lines`, which operation and move each
     /// line is of.
     pub made: Vec<(usize, usize)>,
+    /// For each instruction, the part it is at, by its index among
+    /// [`Setup::placed`]: with `made`, which of [`cut_order`]'s each is of.
+    pub parts: Vec<usize>,
     /// How many times it changes the tool, the first included: for its
     /// machining time.
     pub tool_changes: usize,
@@ -586,14 +604,31 @@ pub fn setup_program(
         .iter()
         .filter(|op| matches!(op, camcraft_post::op::Op::ToolChange { .. }))
         .count();
-    let made = made
+    // Which part each section is at: the order setup_specs gave them in.
+    let parts: Vec<usize> = cut_order(setup, &result.operations, true)
         .into_iter()
-        .map(|(section, n)| (specs.get(section).map_or(0, |(k, _)| *k), n))
+        .filter(|(k, _)| {
+            result
+                .operations
+                .get(*k)
+                .is_some_and(|o| o.made.has_paths())
+        })
+        .map(|(_, p)| p)
         .collect();
+    let (made, parts) = made
+        .into_iter()
+        .map(|(section, n)| {
+            (
+                (specs.get(section).map_or(0, |(k, _)| *k), n),
+                parts.get(section).copied().unwrap_or(0),
+            )
+        })
+        .unzip();
     Ok(SetupProgram {
         text,
         report,
         made,
+        parts,
         tool_changes,
     })
 }
