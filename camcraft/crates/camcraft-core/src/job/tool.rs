@@ -480,6 +480,8 @@ impl ToolSpec {
             let field = match e {
                 ToolError::BadRadius(_) => "diameter",
                 ToolError::BadAngle(_) => "angle",
+                ToolError::BadTaper(_) => "taper_angle",
+                ToolError::BadNeck { .. } => "neck_diameter",
                 ToolError::BadTip { .. } => "tip_diameter",
                 ToolError::BadCorner { .. } | ToolError::ConeStock => "corner",
             };

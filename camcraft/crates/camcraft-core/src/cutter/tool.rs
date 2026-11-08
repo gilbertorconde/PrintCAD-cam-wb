@@ -258,6 +258,220 @@ impl ToolProfile for Cone {
     }
 }
 
+/// A tapered end: a flat tip of radius `flat`, a round corner of radius
+/// `corner` about it, and a straight flank tangent to the corner, `α` out
+/// from the axis, widening to the full radius `R`; then a shank of radius
+/// `R`. A tapered or tapered ball end mill (no flat), a V-bit with a round
+/// tip, and a face mill whose inserts have a lead angle are each one.
+///
+/// ```text
+/// h(d) = 0                                for d <= a
+///        c - sqrt(c^2 - (d - a)^2)        for a < d <= a + c cos α
+///        c (1 - sin α) + (d - a - c cos α) / tan α     up to R
+/// ```
+///
+/// The corner ends where its slope is the flank's, so `h` is convex, as
+/// the cone's and the bullnose's are, and its drop-cutter contacts are the
+/// same bounded solves. Grown by stock to leave it stays one: its corner
+/// grows by the stock, its flat by the radial stock past that, and its
+/// flank moves out with them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Tapered {
+    radius: f64,
+    flat: f64,
+    corner: f64,
+    /// `sin α`, `cos α` and `tan α`, `α` the flank's angle from the axis.
+    sin: f64,
+    cos: f64,
+    tan: f64,
+}
+
+impl Tapered {
+    /// A tapered end of overall radius `radius`, flat tip radius `flat`,
+    /// corner `corner`, its flank `half_angle` radians from the axis.
+    pub fn new(radius: f64, flat: f64, corner: f64, half_angle: f64) -> Result<Self, ToolError> {
+        let radius = check_radius(radius)?;
+        if !(half_angle.is_finite() && half_angle > 0.0 && half_angle < std::f64::consts::FRAC_PI_2)
+        {
+            return Err(ToolError::BadTaper(half_angle.to_degrees()));
+        }
+        if !(corner.is_finite() && corner >= 0.0) {
+            return Err(ToolError::BadCorner { corner, radius });
+        }
+        let (sin, cos) = half_angle.sin_cos();
+        if !(flat.is_finite() && flat >= 0.0 && flat + corner * cos <= radius + 1e-9) {
+            return Err(ToolError::BadTip {
+                tip: flat + corner * cos,
+                radius,
+            });
+        }
+        Ok(Self {
+            radius,
+            flat,
+            corner,
+            sin,
+            cos,
+            tan: half_angle.tan(),
+        })
+    }
+
+    /// The flat tip's radius.
+    pub fn flat(&self) -> f64 {
+        self.flat
+    }
+
+    /// The corner's radius.
+    pub fn corner(&self) -> f64 {
+        self.corner
+    }
+
+    /// The flank's angle from the axis, in radians.
+    pub fn half_angle(&self) -> f64 {
+        self.tan.atan()
+    }
+
+    /// Where the corner meets the flank: its radius and height.
+    fn shoulder(&self) -> (f64, f64) {
+        (
+            self.flat + self.corner * self.cos,
+            self.corner * (1.0 - self.sin),
+        )
+    }
+
+    /// Height above the tip where the flank reaches full radius.
+    pub fn flank_top(&self) -> f64 {
+        let (rt, zt) = self.shoulder();
+        zt + (self.radius - rt) / self.tan
+    }
+
+    /// The radius at which a plane rising at slope `s` along its steepest
+    /// line touches it first: on the corner where its slope is the plane's,
+    /// or past the flank, at the full radius, for a plane steeper than it.
+    pub(crate) fn touches_slope(&self, s: f64) -> f64 {
+        if s * self.tan >= 1.0 {
+            self.radius
+        } else {
+            self.flat + self.corner * s / (1.0 + s * s).sqrt()
+        }
+    }
+
+    /// The same end grown by stock to leave: `radial` beside, `least` the
+    /// lesser of the two, all round the corner. `None` where shrunk it is
+    /// no longer a cutter.
+    fn grown(&self, radial: f64, least: f64) -> Option<Self> {
+        let corner = (self.corner + least).max(0.0);
+        let flat = (self.flat + radial - least).max(0.0);
+        Self::new(self.radius + radial, flat, corner, self.half_angle()).ok()
+    }
+}
+
+impl ToolProfile for Tapered {
+    fn radius_at(&self, z: f64) -> f64 {
+        let (rt, zt) = self.shoulder();
+        if z < 0.0 {
+            0.0
+        } else if z <= zt {
+            self.flat + (z * (2.0 * self.corner - z)).max(0.0).sqrt()
+        } else {
+            (rt + (z - zt) * self.tan).min(self.radius)
+        }
+    }
+
+    fn max_radius(&self) -> f64 {
+        self.radius
+    }
+
+    fn height_at(&self, d: f64) -> Option<f64> {
+        if d > self.radius {
+            return None;
+        }
+        let (rt, zt) = self.shoulder();
+        let c = self.corner;
+        Some(if d <= self.flat {
+            0.0
+        } else if d <= rt {
+            let k = d - self.flat;
+            c - (c * c - k * k).max(0.0).sqrt()
+        } else {
+            zt + (d - rt) / self.tan
+        })
+    }
+}
+
+/// An undercutting head on a narrower neck: a slot (key) cutter, a disc
+/// `height` thick, or a lollipop, a ball. From below it is its head, a
+/// flat or ball end of the head's radius, which is what a drop and an
+/// offset see. Above the head it narrows to its neck, so the head reaches
+/// in under what overhangs it: its radius is not monotonic, and
+/// [`ToolProfile::height_at`] gives only its underside.
+///
+/// A height field cannot hold an undercut, so what the material loses to it
+/// is taken as only what its neck's width takes from above
+/// ([`Cutter::swept_height_at`]); the neck and shank above the head are
+/// checked against the material as a holder is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Undercut {
+    head: Bullnose,
+    neck: f64,
+    height: f64,
+}
+
+impl Undercut {
+    /// A head `head`, `height` tall, on a neck of radius `neck`.
+    pub fn new(head: Bullnose, neck: f64, height: f64) -> Result<Self, ToolError> {
+        let radius = head.max_radius();
+        if !(neck.is_finite() && neck > 0.0 && neck < radius) {
+            return Err(ToolError::BadNeck { neck, radius });
+        }
+        if !is_positive(height) {
+            return Err(ToolError::BadRadius(height));
+        }
+        Ok(Self { head, neck, height })
+    }
+
+    /// The head, as its underside cuts.
+    pub fn head(&self) -> &Bullnose {
+        &self.head
+    }
+
+    /// The neck's radius.
+    pub fn neck(&self) -> f64 {
+        self.neck
+    }
+
+    /// How tall the head is, from the tip to where the neck starts.
+    pub fn height(&self) -> f64 {
+        self.height
+    }
+}
+
+impl ToolProfile for Undercut {
+    fn radius_at(&self, z: f64) -> f64 {
+        if z > self.height {
+            self.neck
+        } else if self.head.corner() > 0.0 && z > self.head.corner() {
+            // A ball's upper half, narrowing back in to the neck.
+            let r = self.head.max_radius();
+            let up = z - self.head.corner();
+            (r * r - up * up).max(0.0).sqrt().max(self.neck)
+        } else {
+            self.head.radius_at(z)
+        }
+    }
+
+    fn max_radius(&self) -> f64 {
+        self.head.max_radius()
+    }
+
+    fn height_at(&self, d: f64) -> Option<f64> {
+        self.head.height_at(d)
+    }
+
+    fn is_monotonic(&self) -> bool {
+        false
+    }
+}
+
 /// Any cutter the engine cuts with.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Cutter {
@@ -265,6 +479,10 @@ pub enum Cutter {
     Bullnose(Bullnose),
     /// V-bits, chamfer mills and drill points.
     Cone(Cone),
+    /// Tapered end mills, round-tipped V-bits and face mills with a lead.
+    Tapered(Tapered),
+    /// Slot cutters and lollipops.
+    Undercut(Undercut),
 }
 
 impl Cutter {
@@ -273,8 +491,65 @@ impl Cutter {
     pub(crate) fn bullnose(&self) -> Option<&Bullnose> {
         match self {
             Cutter::Bullnose(b) => Some(b),
-            Cutter::Cone(_) => None,
+            Cutter::Cone(_) | Cutter::Tapered(_) | Cutter::Undercut(_) => None,
         }
+    }
+
+    /// Widest the material is cut beside the axis: an undercutting head's
+    /// neck, which is all a height field sees it take; any other's radius.
+    pub fn swept_max_radius(&self) -> f64 {
+        match self {
+            Cutter::Undercut(u) => u.neck(),
+            _ => self.max_radius(),
+        }
+    }
+
+    /// Height the material is cut to at `d` from the axis, above the tip:
+    /// under an undercutting head's neck, its underside, and nothing
+    /// further out, where the head reaches only under what stays.
+    pub fn swept_height_at(&self, d: f64) -> Option<f64> {
+        match self {
+            Cutter::Undercut(u) if d > u.neck() => None,
+            _ => self.height_at(d),
+        }
+    }
+
+    /// The same cutter grown by stock to leave, `radial` beside and
+    /// `axial` down, by the rounded cylinder [`super::allowance`] says;
+    /// `None` for a cone, which grown is no longer one.
+    pub(crate) fn grown(&self, radial: f64, axial: f64) -> Option<Result<Self, ToolError>> {
+        let m = radial.min(axial);
+        let bullnose =
+            |b: &Bullnose| Bullnose::new(b.max_radius() + radial, (b.corner() + m).max(0.0));
+        Some(match self {
+            Cutter::Bullnose(b) => bullnose(b).map(Cutter::Bullnose),
+            Cutter::Cone(_) => return None,
+            Cutter::Tapered(t) => t
+                .grown(radial, m)
+                .map(Cutter::Tapered)
+                .ok_or(ToolError::BadRadius(t.max_radius() + radial)),
+            // Only its head is ever dropped, so its neck stays as it is,
+            // even past a head shrunk by negative stock.
+            Cutter::Undercut(u) => bullnose(u.head()).map(|head| {
+                Cutter::Undercut(Undercut {
+                    head,
+                    neck: u.neck(),
+                    height: u.height(),
+                })
+            }),
+        })
+    }
+}
+
+impl From<Tapered> for Cutter {
+    fn from(t: Tapered) -> Self {
+        Cutter::Tapered(t)
+    }
+}
+
+impl From<Undercut> for Cutter {
+    fn from(u: Undercut) -> Self {
+        Cutter::Undercut(u)
     }
 }
 
@@ -307,6 +582,8 @@ impl ToolProfile for Cutter {
         match self {
             Cutter::Bullnose(t) => t.radius_at(z),
             Cutter::Cone(t) => t.radius_at(z),
+            Cutter::Tapered(t) => t.radius_at(z),
+            Cutter::Undercut(t) => t.radius_at(z),
         }
     }
 
@@ -314,6 +591,8 @@ impl ToolProfile for Cutter {
         match self {
             Cutter::Bullnose(t) => t.max_radius(),
             Cutter::Cone(t) => t.max_radius(),
+            Cutter::Tapered(t) => t.max_radius(),
+            Cutter::Undercut(t) => t.max_radius(),
         }
     }
 
@@ -321,7 +600,13 @@ impl ToolProfile for Cutter {
         match self {
             Cutter::Bullnose(t) => t.height_at(d),
             Cutter::Cone(t) => t.height_at(d),
+            Cutter::Tapered(t) => t.height_at(d),
+            Cutter::Undercut(t) => t.height_at(d),
         }
+    }
+
+    fn is_monotonic(&self) -> bool {
+        !matches!(self, Cutter::Undercut(_))
     }
 }
 
@@ -350,6 +635,17 @@ pub enum ToolError {
         /// The offending tip radius.
         tip: f64,
         /// The tool radius it had to fit inside.
+        radius: f64,
+    },
+    /// A taper or lead was not between 0° and 90° from the axis.
+    #[error("the taper must be more than 0 and less than 90 degrees from the axis, got {0}")]
+    BadTaper(f64),
+    /// An undercutting head's neck was not narrower than the head.
+    #[error("the neck must be narrower than the head ({radius} radius), got {neck}")]
+    BadNeck {
+        /// The neck's radius.
+        neck: f64,
+        /// The head's radius.
         radius: f64,
     },
     /// Stock to leave was asked of a cone, which cannot be grown and stay a cone.
@@ -422,5 +718,5 @@ impl ToolProfile for Ball {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::float_cmp)]
+#[allow(clippy::unwrap_used, clippy::float_cmp, clippy::panic)]
 mod tests;

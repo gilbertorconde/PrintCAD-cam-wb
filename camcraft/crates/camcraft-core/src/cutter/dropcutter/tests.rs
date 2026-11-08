@@ -427,3 +427,94 @@ proptest! {
         }
     }
 }
+
+fn tapered_ball(corner: f64, taper_degrees: f64) -> Tapered {
+    Tapered::new(R, 0.0, corner, taper_degrees.to_radians()).unwrap()
+}
+
+/// With no corner a tapered end is a cone, and must answer as one.
+#[test]
+fn a_tapered_end_without_a_corner_is_a_cone() {
+    let half = 30f64.to_radians();
+    for mesh in [
+        synthetic::step(4.0, 12.0),
+        synthetic::inclined_plane(0.3, -0.2, 1.0, 12.0),
+        synthetic::uv_sphere(9.0, 40, 60),
+    ] {
+        cross_check(
+            &mesh,
+            &Tapered::new(R, 0.5, 0.0, half).unwrap(),
+            &Cone::new(R, 0.5, half).unwrap(),
+            1e-7,
+        );
+    }
+}
+
+/// On a plane shallower than its flank a tapered ball rests on its ball, as a
+/// ball its tip's radius does; steeper, on its full radius.
+#[test]
+fn a_tapered_ball_on_an_incline_matches_the_closed_form() {
+    let (x, y) = (1.5, -2.0);
+    let tool = tapered_ball(0.5, 20.0);
+    let ball = Ball::new(0.5).unwrap();
+    for (a, b) in [(0.2, 0.1), (1.6, 0.9), (2.5, 2.0)] {
+        let mesh = synthetic::inclined_plane(a, b, 0.5, 40.0);
+        let dc = DropCutter::new(&mesh);
+        let plane = 0.5 + a * x + b * y;
+        let s = f64::hypot(a, b);
+        let want = if s * 20f64.to_radians().tan() < 1.0 {
+            dc.drop_at(&ball, x, y).unwrap()
+        } else {
+            plane + s * R - tool.height_at(R).unwrap()
+        };
+        let z = dc.drop_at(&tool, x, y).unwrap();
+        assert!((z - want).abs() < 1e-9, "slope {s}: got {z}, want {want}");
+    }
+}
+
+/// The gouge a ball its tip's size would make: beside a wall, past the
+/// ball's reach, the flank of a tapered ball meets the wall's top edge, so
+/// its tip hangs `h(d)` below it, where the ball alone would drop to the
+/// floor, through the flank's place.
+#[test]
+fn a_tapered_ball_beside_a_wall_hangs_on_its_flank() {
+    let mesh = synthetic::step(10.0, 12.0);
+    let dc = DropCutter::new(&mesh);
+    let tool = tapered_ball(0.5, 5.0);
+    let ball = Ball::new(0.5).unwrap();
+    for d in [0.6, 0.8, 1.0] {
+        let z = dc.drop_at(&tool, d, 0.0).unwrap();
+        let want = 10.0 - tool.height_at(d).unwrap();
+        assert!((z - want).abs() < 1e-9, "at {d} got {z}, want {want}");
+        assert!(z > 0.0, "on the flank, above the floor: {z}");
+        assert_eq!(dc.drop_at(&ball, d, 0.0), Some(0.0));
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    #[test]
+    fn tapered_never_penetrates_the_sphere(
+        x in -8.0f64..8.0,
+        y in -8.0f64..8.0,
+        corner in 0.0f64..1.5,
+        taper in 1.0f64..60.0,
+    ) {
+        let mesh = synthetic::uv_sphere(10.0, 40, 60);
+        let dc = DropCutter::new(&mesh);
+        assert_no_penetration(&mesh, &dc, &tapered_ball(corner, taper), x, y)?;
+    }
+
+    #[test]
+    fn tapered_never_penetrates_the_step(
+        x in -8.0f64..8.0,
+        y in -8.0f64..8.0,
+        corner in 0.0f64..1.5,
+        taper in 1.0f64..60.0,
+    ) {
+        let mesh = synthetic::step(4.0, 10.0);
+        let dc = DropCutter::new(&mesh);
+        assert_no_penetration(&mesh, &dc, &tapered_ball(corner, taper), x, y)?;
+    }
+}
