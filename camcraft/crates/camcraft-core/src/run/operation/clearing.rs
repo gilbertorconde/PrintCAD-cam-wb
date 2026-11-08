@@ -411,11 +411,37 @@ pub(in crate::run) fn heights_of(
 pub(super) fn drill_paths(
     work: &Work<'_>,
     (peck, chip_break, dwell): (Option<f64>, Option<f64>, Option<f64>),
-    tap: Option<Tap>,
+    (tap, spot): (Option<Tap>, Option<f64>),
     holes: &[Hole],
     warnings: &mut Vec<String>,
 ) -> Result<Paths, RunError> {
     let (job, op) = (work.job, work.op);
+    if tap.is_some() && work.spec.kind != crate::job::ToolKind::Tap {
+        warnings.push(format!(
+            "taps with a {}, as documents did before taps were a kind of tool: make its \
+             tool a tap, at the thread's pitch",
+            match work.spec.kind {
+                crate::job::ToolKind::Drill => "drill",
+                _ => "flat end mill",
+            }
+        ));
+    }
+    // Spotted, each hole goes only as deep as leaves it that wide at its
+    // top: the point's depth there, whatever its bottom.
+    let spotted: Vec<Hole>;
+    let holes = match spot.and_then(|d| work.spec.spot_depth(d)) {
+        Some(depth) => {
+            spotted = holes
+                .iter()
+                .map(|h| Hole {
+                    bottom: h.top - depth,
+                    ..*h
+                })
+                .collect();
+            &spotted[..]
+        }
+        None => holes,
+    };
     let feed = match tap {
         // The feed that keeps to the thread at the speed the spindle turns.
         Some(t) => t.feed(f64::from(op.passes.rpm.unwrap_or(work.spec.rpm))),
@@ -430,7 +456,7 @@ pub(super) fn drill_paths(
     };
     let path = drill(holes, &params).map_err(in_op(op))?;
     let width = work.spec.diameter;
-    for h in holes {
+    for h in holes.iter().filter(|_| spot.is_none()) {
         if (2.0 * h.radius - width).abs() > job.tolerance.max(0.01) {
             warnings.push(format!(
                 "the hole at ({:.3}, {:.3}) is {:.3} mm across but the tool is {:.3} mm",

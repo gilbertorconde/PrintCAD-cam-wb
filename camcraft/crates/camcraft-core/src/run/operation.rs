@@ -291,11 +291,12 @@ pub(super) fn run_operation(
                 peck,
                 dwell,
                 chip_break,
+                spot,
                 ..
             } => drill_paths(
                 work,
                 (peck, chip_break, dwell),
-                op.strategy.tap(),
+                (op.strategy.tap(), spot),
                 &holes.iter().map(|r| r.hole).collect::<Vec<Hole>>(),
                 &mut warnings,
             )?,

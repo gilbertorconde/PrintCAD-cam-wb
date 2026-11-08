@@ -649,15 +649,11 @@ fn tool_uses(
                 out.push(ToolUse {
                     name: name.to_string(),
                     number: tool.number,
-                    kind: tool_kind(tool.kind).into(),
+                    kind: tool.kind.name().into(),
+                    shape: tool.shape_words(),
                     diameter: tool.diameter,
                     corner: tool.corner,
-                    angle: tool.angle.or(match tool.kind {
-                        camcraft_core::job::ToolKind::Drill => {
-                            Some(camcraft_core::job::DRILL_POINT)
-                        }
-                        _ => None,
-                    }),
+                    angle: tool.point_angle().or(tool.angle),
                     pitch_range: tool.pitch_range,
                     flutes: tool.flutes,
                     flute_length: tool.flute_length,
@@ -700,20 +696,6 @@ fn probe_said(setup: &camcraft_core::job::Setup, ran: &Ran) -> Option<String> {
         }
         None => file.to_string(),
     })
-}
-
-/// A tool's kind, as a job file names it.
-fn tool_kind(kind: camcraft_core::job::ToolKind) -> &'static str {
-    use camcraft_core::job::ToolKind;
-    match kind {
-        ToolKind::Flat => "flat",
-        ToolKind::Ball => "ball",
-        ToolKind::Bullnose => "bullnose",
-        ToolKind::Cone => "cone",
-        ToolKind::Drill => "drill",
-        ToolKind::ThreadMill => "thread-mill",
-        ToolKind::Probe => "probe",
-    }
 }
 
 /// The box round the bodies `names`, as the setup sees them: their lowest

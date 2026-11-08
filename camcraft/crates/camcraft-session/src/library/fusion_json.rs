@@ -13,7 +13,7 @@
 //! this build cannot cut with, are left out, and each says why.
 
 use camcraft_core::job::{
-    Coolant, Holder, HolderSegment, Preset, SpindleDirection, ToolKind, ToolMaterial, ToolSpec,
+    Coolant, Holder, HolderSegment, Preset, SpindleDirection, ToolMaterial, ToolSpec,
     free_preset_name,
 };
 use serde_json::Value;
@@ -89,17 +89,7 @@ fn whole(v: &Value, key: &str) -> Option<u32> {
 /// One entry as a tool.
 fn tool(entry: &Value) -> Result<ToolSpec, String> {
     let kind_text = text(entry, "type").unwrap_or_default().to_ascii_lowercase();
-    let kind = match kind_text.as_str() {
-        "flat end mill" => ToolKind::Flat,
-        "ball end mill" => ToolKind::Ball,
-        "bull nose end mill" => ToolKind::Bullnose,
-        "chamfer mill" | "spot drill" => ToolKind::Cone,
-        "drill" => ToolKind::Drill,
-        "thread mill" => ToolKind::ThreadMill,
-        "holder" => return Err("a holder, not a tool".into()),
-        "" => return Err("no tool type".into()),
-        other => return Err(format!("'{other}' tools are not supported yet")),
-    };
+    let kind = super::fusion_kind(&kind_text)?;
     let scale = scale_of(entry.get("unit").and_then(Value::as_str));
     let geometry = entry.get("geometry").cloned().unwrap_or(Value::Null);
     let length = |key: &str| {
@@ -116,29 +106,6 @@ fn tool(entry: &Value) -> Result<ToolSpec, String> {
     let mut tool = ToolSpec {
         kind,
         diameter,
-        corner: match kind {
-            ToolKind::Bullnose => length("RE").unwrap_or(0.0),
-            _ => 0.0,
-        },
-        angle: match kind_text.as_str() {
-            "chamfer mill" => number(&geometry, "TA").map(|a| 2.0 * a),
-            "spot drill" | "drill" => number(&geometry, "SIG"),
-            "thread mill" => number(&geometry, "thread-profile-angle"),
-            _ => None,
-        },
-        tip_diameter: match kind {
-            ToolKind::Cone => length("tip-diameter").unwrap_or(0.0),
-            _ => 0.0,
-        },
-        tip_length: 0.0,
-        // Fusion's thread mill has the one pitch it cuts.
-        pitch_range: match kind {
-            ToolKind::ThreadMill => length("TP")
-                .or_else(|| length("thread-pitch"))
-                .map(|p| [p, p]),
-            _ => None,
-        },
-        teeth: None,
         number: entry
             .get("post-process")
             .and_then(|p| whole(p, "number"))
@@ -161,8 +128,14 @@ fn tool(entry: &Value) -> Result<ToolSpec, String> {
         holder: entry.get("holder").and_then(|h| holder(h, scale)),
         spindle: SpindleDirection::Clockwise,
         coolant: Coolant::Off,
-        presets: Vec::new(),
+        ..ToolSpec::default()
     };
+    super::fusion_shape(
+        &mut tool,
+        &kind_text,
+        &|keys| keys.iter().find_map(|k| length(k)),
+        &|keys| keys.iter().find_map(|k| number(&geometry, k)),
+    );
     for (i, p) in presets.iter().enumerate() {
         let preset = preset(p, i, scale);
         let name = free_preset_name(&tool.presets, &preset.name);
@@ -220,6 +193,7 @@ fn preset(p: &Value, index: usize, scale: f64) -> Preset {
 #[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
     use super::*;
+    use camcraft_core::job::ToolKind;
 
     const LIBRARY: &str = r#"{
       "data": [
@@ -237,7 +211,7 @@ mod tests {
                                         "use-stepdown": true}]}
         },
         {"type": "holder", "segments": []},
-        {"type": "slot mill", "geometry": {"DC": 6}},
+        {"type": "reamer", "geometry": {"DC": 6}},
         {
           "type": "ball end mill", "unit": "inches", "description": "1/8 ball",
           "geometry": {"DC": 0.125, "LCF": 0.5}
@@ -270,5 +244,40 @@ mod tests {
         assert!((ball.flute_length.unwrap() - 12.7).abs() < 1e-9);
         assert!(import("[1, 2]").is_err());
         assert!(import("nope").is_err());
+    }
+
+    /// The kinds past the end mills, from JSON, under ISO 13399's names
+    /// where it has them: `TA` a taper or lead, `DN` a neck, `TP` a tap's
+    /// pitch, `SIG` a point.
+    #[test]
+    fn the_other_kinds_come_in_with_their_shapes() {
+        let text = r#"{"data": [
+          {"type": "tapered mill", "description": "TB", "geometry": {"DC": 1, "RE": 0.5, "TA": 3, "LCF": 20}},
+          {"type": "face mill", "description": "FM", "geometry": {"DC": 50, "RE": 0.8, "TA": 45, "LCF": 6}},
+          {"type": "lollipop mill", "description": "LP", "geometry": {"DC": 6, "DN": 3}},
+          {"type": "slot mill", "description": "KS", "geometry": {"DC": 20, "LCF": 3, "DN": 8}},
+          {"type": "spot drill", "description": "SP", "geometry": {"DC": 6, "SIG": 90}},
+          {"type": "counter sink", "description": "CS", "geometry": {"DC": 12, "SIG": 82, "tip-diameter": 2}},
+          {"type": "tap right hand", "description": "M6", "geometry": {"DC": 6, "TP": 1, "tip-length": 2}},
+          {"type": "counter bore", "description": "CB", "geometry": {"DC": 10}}
+        ]}"#;
+        let got = import(text).unwrap();
+        assert_eq!(got.tools.len(), 7, "{:?}", got.skipped);
+        assert!(
+            got.skipped[0].contains("'counter bore'"),
+            "{:?}",
+            got.skipped
+        );
+        let by = |name: &str| &got.tools.iter().find(|(n, _)| n == name).unwrap().1;
+        assert_eq!(by("TB").kind, ToolKind::Tapered);
+        assert_eq!(by("TB").taper_angle, Some(3.0));
+        assert_eq!(by("FM").kind, ToolKind::FaceMill);
+        assert_eq!(by("LP").neck_diameter, Some(3.0));
+        assert_eq!(by("KS").kind, ToolKind::SlotCutter);
+        assert_eq!(by("SP").kind, ToolKind::SpotDrill);
+        assert_eq!(by("CS").tip_diameter, 2.0);
+        let tap = by("M6");
+        assert_eq!((tap.kind, tap.pitch), (ToolKind::Tap, Some(1.0)));
+        assert_eq!(tap.hand, camcraft_core::job::ThreadHand::Right);
     }
 }

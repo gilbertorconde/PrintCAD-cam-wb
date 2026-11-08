@@ -31,6 +31,96 @@ pub mod system;
 /// Millimetres in an inch, as tool makers' tables give sizes.
 const MM_PER_INCH: f64 = 25.4;
 
+/// The kind of tool a Fusion library's type names, the same in its CSV and
+/// its JSON; why not, for a type this build cannot cut with.
+///
+/// A centre drill is taken as a spot drill its body's diameter and angle:
+/// its pilot, narrower than its cone and with a point of its own, is not
+/// modelled, and makes the hole a little deeper than the spot says.
+fn fusion_kind(text: &str) -> Result<camcraft_core::job::ToolKind, String> {
+    use camcraft_core::job::ToolKind;
+    Ok(match text {
+        "flat end mill" => ToolKind::Flat,
+        "ball end mill" => ToolKind::Ball,
+        "bull nose end mill" => ToolKind::Bullnose,
+        "tapered mill" => ToolKind::Tapered,
+        "face mill" => ToolKind::FaceMill,
+        "lollipop mill" => ToolKind::Lollipop,
+        "slot mill" => ToolKind::SlotCutter,
+        "chamfer mill" => ToolKind::Cone,
+        "spot drill" | "center drill" => ToolKind::SpotDrill,
+        "counter sink" => ToolKind::Countersink,
+        "drill" => ToolKind::Drill,
+        "tap right hand" | "tap left hand" => ToolKind::Tap,
+        "thread mill" => ToolKind::ThreadMill,
+        "probe" => ToolKind::Probe,
+        "holder" => return Err("a holder, not a tool".into()),
+        "" => return Err("no tool type".into()),
+        other => return Err(format!("'{other}' tools are not supported yet")),
+    })
+}
+
+/// A Fusion tool's fields past its kind and diameter, by what each is in
+/// either export: `length` a length's value in millimetres under one of
+/// its names, `number` a plain one's. For the kinds that have them: a
+/// corner, a taper, a point, a tip, a neck, a pitch, a tap's hand.
+fn fusion_shape(
+    tool: &mut ToolSpec,
+    type_text: &str,
+    length: &dyn Fn(&[&str]) -> Option<f64>,
+    number: &dyn Fn(&[&str]) -> Option<f64>,
+) {
+    use camcraft_core::job::{ThreadHand, ToolKind};
+    let kind = tool.kind;
+    if matches!(
+        kind,
+        ToolKind::Bullnose | ToolKind::Tapered | ToolKind::FaceMill
+    ) {
+        tool.corner = length(&["RE", "tool_cornerRadius"]).unwrap_or(0.0);
+    }
+    // A chamfer mill's taper is measured from the axis; a spot drill's tip
+    // angle is the whole point.
+    tool.angle = match kind {
+        ToolKind::Cone => number(&["TA", "tool_taperAngle"]).map(|a| 2.0 * a),
+        ToolKind::SpotDrill | ToolKind::Countersink | ToolKind::Drill => {
+            number(&["SIG", "tool_tipAngle"])
+        }
+        ToolKind::ThreadMill => number(&["thread-profile-angle", "tool_threadProfileAngle"]),
+        _ => None,
+    };
+    if matches!(kind, ToolKind::Tapered | ToolKind::FaceMill) {
+        tool.taper_angle = number(&["TA", "tool_taperAngle"]).filter(|a| *a > 0.0);
+    }
+    if matches!(
+        kind,
+        ToolKind::Cone | ToolKind::Countersink | ToolKind::SpotDrill
+    ) {
+        tool.tip_diameter = length(&["tip-diameter", "tool_tipDiameter"]).unwrap_or(0.0);
+    }
+    if kind.undercuts() {
+        tool.neck_diameter = length(&[
+            "DN",
+            "neck-diameter",
+            "shoulder-diameter",
+            "tool_neckDiameter",
+            "tool_shoulderDiameter",
+        ]);
+    }
+    let pitch = length(&["TP", "thread-pitch", "tool_threadPitch"]);
+    match kind {
+        // Fusion's thread mill has the one pitch it cuts.
+        ToolKind::ThreadMill => tool.pitch_range = pitch.map(|p| [p, p]),
+        ToolKind::Tap => {
+            tool.pitch = pitch;
+            tool.chamfer_length = length(&["tip-length", "tool_tipLength"]);
+            if type_text == "tap left hand" {
+                tool.hand = ThreadHand::Left;
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Overrides where the library lives.
 pub const LIBRARY_ENV: &str = "CAMCRAFT_TOOL_LIBRARY";
 

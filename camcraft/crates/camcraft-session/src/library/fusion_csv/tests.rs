@@ -1,4 +1,5 @@
 use super::*;
+use camcraft_core::job::ToolKind;
 
 fn fixture(name: &str) -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -99,7 +100,7 @@ fn what_cannot_be_cut_with_is_skipped_and_said() {
 /// A chamfer mill's taper is half its included angle, and its tip carries over;
 /// a spot drill's tip angle is its whole angle.
 #[test]
-fn chamfer_mills_and_spot_drills_are_cones() {
+fn chamfer_mills_and_spot_drills_are_cones_of_their_own() {
     let text = "\"Type (tool_type)\",\"Unit (tool_unit)\",\"Diameter (tool_diameter)\",\
                     \"Taper Angle (tool_taperAngle)\",\"Tip Diameter (tool_tipDiameter)\",\
                     \"Tip Angle (tool_tipAngle)\",\"Product ID (tool_productId)\"\n\
@@ -112,6 +113,7 @@ fn chamfer_mills_and_spot_drills_are_cones() {
     assert_eq!(chamfer.angle, Some(90.0));
     assert!(close(chamfer.tip_diameter, 1.0));
     let spot = &got.tools[1].1;
+    assert_eq!(spot.kind, ToolKind::SpotDrill);
     assert_eq!(spot.angle, Some(120.0));
     assert_eq!(spot.tip_diameter, 0.0);
 }
@@ -173,4 +175,59 @@ fn a_tool_already_in_the_folder_gets_the_presets() {
         import(&fixture("425-up250.csv")).unwrap().tools,
     );
     assert_eq!(other.added, ["425-UP250"]);
+}
+
+/// The kinds past the end mills, from a CSV: a tapered ball, a face mill,
+/// a lollipop, a slot cutter, a centre drill, a countersink and a left-hand
+/// tap, each with its shape; a boring bar is left out.
+#[test]
+fn the_other_kinds_come_in_with_their_shapes() {
+    let text = "\"Type (tool_type)\",\"Unit (tool_unit)\",\"Diameter (tool_diameter)\",\
+                \"Corner Radius (tool_cornerRadius)\",\"Taper Angle (tool_taperAngle)\",\
+                \"Flute Length (tool_fluteLength)\",\"Tip Angle (tool_tipAngle)\",\
+                \"Tip Diameter (tool_tipDiameter)\",\"Thread Pitch (tool_threadPitch)\",\
+                \"Tip Length (tool_tipLength)\",\"Shoulder Diameter (tool_shoulderDiameter)\",\
+                \"Description (tool_description)\"\n\
+                \"tapered mill\",\"millimeters\",1,0.5,3,20,,,,,,\"TB\"\n\
+                \"face mill\",\"millimeters\",50,0.8,45,6,,,,,,\"FM\"\n\
+                \"lollipop mill\",\"millimeters\",6,,,,,,,,3,\"LP\"\n\
+                \"slot mill\",\"millimeters\",20,,,3,,,,,8,\"KS\"\n\
+                \"center drill\",\"millimeters\",5,,,,60,,,,,\"CD\"\n\
+                \"counter sink\",\"millimeters\",12,,,,82,2,,,,\"CS\"\n\
+                \"tap left hand\",\"millimeters\",6,,,,,,1,2,,\"M6 LH\"\n\
+                \"boring bar\",\"millimeters\",10,,,,,,,,,\"BB\"\n";
+    let got = import(text).unwrap();
+    assert_eq!(got.skipped.len(), 1, "{:?}", got.skipped);
+    assert!(got.skipped[0].contains("'boring bar'"), "{:?}", got.skipped);
+    let by = |name: &str| &got.tools.iter().find(|(n, _)| n == name).unwrap().1;
+    let t = by("TB");
+    assert_eq!(t.kind, ToolKind::Tapered);
+    assert_eq!(
+        (t.corner, t.taper_angle, t.flute_length),
+        (0.5, Some(3.0), Some(20.0))
+    );
+    let f = by("FM");
+    assert_eq!(f.kind, ToolKind::FaceMill);
+    assert_eq!((f.corner, f.taper_angle), (0.8, Some(45.0)));
+    let l = by("LP");
+    assert_eq!((l.kind, l.neck_diameter), (ToolKind::Lollipop, Some(3.0)));
+    let k = by("KS");
+    assert_eq!(
+        (k.kind, k.neck_diameter, k.flute_length),
+        (ToolKind::SlotCutter, Some(8.0), Some(3.0))
+    );
+    let c = by("CD");
+    assert_eq!((c.kind, c.angle), (ToolKind::SpotDrill, Some(60.0)));
+    let s = by("CS");
+    assert_eq!(
+        (s.kind, s.angle, s.tip_diameter),
+        (ToolKind::Countersink, Some(82.0), 2.0)
+    );
+    let tap = by("M6 LH");
+    assert_eq!(tap.kind, ToolKind::Tap);
+    assert_eq!((tap.pitch, tap.chamfer_length), (Some(1.0), Some(2.0)));
+    assert_eq!(tap.hand, camcraft_core::job::ThreadHand::Left);
+    for (_, t) in &got.tools {
+        assert!(t.check().is_empty(), "{t:?}: {:?}", t.check());
+    }
 }

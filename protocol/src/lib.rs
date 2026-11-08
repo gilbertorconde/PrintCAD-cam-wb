@@ -164,9 +164,15 @@ pub struct ToolUse {
     pub name: String,
     /// Its number in the program.
     pub number: u32,
-    /// Its kind, as a job file names it: `flat`, `ball`, `bullnose`, `cone`,
-    /// `drill`, `thread-mill` or `probe`.
+    /// Its kind, as a job file names it: `flat`, `ball`, `bullnose`,
+    /// `tapered`, `face-mill`, `lollipop`, `slot-cutter`, `cone`,
+    /// `spot-drill`, `countersink`, `drill`, `tap`, `thread-mill` or
+    /// `probe`.
     pub kind: String,
+    /// Its shape past its kind and diameter, in words: a corner, angles, a
+    /// neck, a tap's pitch and hand. Empty where it has none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub shape: String,
     /// Its diameter, and a bull-nose's corner radius, in millimetres.
     pub diameter: f64,
     pub corner: f64,

@@ -274,17 +274,29 @@ fn near(a: f64, b: f64) -> bool {
 }
 
 /// Whether `a` and `b` are the same shape of tool: kind, diameter, corner,
-/// angle and tip, which is what it cuts.
+/// angle and tip, which is what it cuts; and where its kind has them, its
+/// taper or lead, its neck, a tap's pitch and hand, and the flute length a
+/// tapered mill tapers up, a face mill leads up and a slot cutter is thick.
 pub fn same_shape(a: &ToolSpec, b: &ToolSpec) -> bool {
+    let same = |x: Option<f64>, y: Option<f64>| match (x, y) {
+        (Some(x), Some(y)) => near(x, y),
+        (None, None) => true,
+        _ => false,
+    };
+    let height = matches!(
+        a.kind,
+        ToolKind::Tapered | ToolKind::FaceMill | ToolKind::SlotCutter
+    );
     a.kind == b.kind
         && near(a.diameter, b.diameter)
         && near(a.corner, b.corner)
         && near(a.tip_diameter, b.tip_diameter)
-        && match (a.angle, b.angle) {
-            (Some(x), Some(y)) => near(x, y),
-            (None, None) => true,
-            _ => false,
-        }
+        && same(a.point_angle().or(a.angle), b.point_angle().or(b.angle))
+        && same(a.taper_angle, b.taper_angle)
+        && same(a.neck_diameter, b.neck_diameter)
+        && same(a.pitch, b.pitch)
+        && a.hand == b.hand
+        && (!height || same(a.flute_length, b.flute_length))
 }
 
 /// The tool to cut with for a template's `want`: one of the setup's
@@ -1554,6 +1566,64 @@ mod tests {
     /// A tool is matched by number and shape, then by shape, in the setup,
     /// the document and the library in turn; else the template's is added,
     /// under a free name and number.
+    /// The kinds past the end mills match only their own shape: a tap its
+    /// pitch and hand, a tapered mill its taper and flutes, a spot drill
+    /// its point, 90° given or not.
+    #[test]
+    fn the_other_kinds_match_by_their_shape() {
+        let tap = ToolSpec {
+            kind: ToolKind::Tap,
+            diameter: 6.0,
+            pitch: Some(1.0),
+            ..ToolSpec::default()
+        };
+        assert!(same_shape(&tap, &tap.clone()));
+        let fine = ToolSpec {
+            pitch: Some(0.75),
+            ..tap.clone()
+        };
+        assert!(!same_shape(&tap, &fine));
+        let left = ToolSpec {
+            hand: camcraft_core::job::ThreadHand::Left,
+            ..tap.clone()
+        };
+        assert!(!same_shape(&tap, &left));
+        let tapered = ToolSpec {
+            kind: ToolKind::Tapered,
+            diameter: 1.0,
+            corner: 0.5,
+            taper_angle: Some(3.0),
+            flute_length: Some(20.0),
+            ..ToolSpec::default()
+        };
+        let longer = ToolSpec {
+            flute_length: Some(30.0),
+            ..tapered.clone()
+        };
+        let steeper = ToolSpec {
+            taper_angle: Some(5.0),
+            ..tapered.clone()
+        };
+        assert!(!same_shape(&tapered, &longer) && !same_shape(&tapered, &steeper));
+        let spot = ToolSpec {
+            kind: ToolKind::SpotDrill,
+            diameter: 6.0,
+            ..ToolSpec::default()
+        };
+        let ninety = ToolSpec {
+            angle: Some(90.0),
+            ..spot.clone()
+        };
+        assert!(same_shape(&spot, &ninety));
+        // A flat end mill's flute length is not its shape.
+        let flat = ToolSpec::default();
+        let long = ToolSpec {
+            flute_length: Some(30.0),
+            ..flat.clone()
+        };
+        assert!(same_shape(&flat, &long));
+    }
+
     #[test]
     fn tools_are_matched_by_number_kind_and_diameter() {
         let want = flat(6.0, 4);

@@ -8,6 +8,7 @@ use camcraft_geom::topology::Body;
 use glam::{DVec2, DVec3, dvec2};
 
 mod holes;
+mod kinds;
 mod probe;
 mod wrap;
 
@@ -312,6 +313,7 @@ fn drilled(peck: Option<f64>) -> (SetupResult, Job) {
         chip_break: None,
         pitch: None,
         hand: Default::default(),
+        spot: None,
     })
 }
 

@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{Depths, Leave, Operation, StrategySpec, ToolKind, ToolSpec, is_default};
+use super::{Depths, Leave, Operation, StrategySpec, ToolSpec, is_default};
 
 /// How the passes are laid out.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -264,15 +264,7 @@ impl Operation {
     /// lower than minus a round end's corner radius in 3D, where the end has to
     /// stay round, and in 2D or with a flat end as low as it likes.
     pub fn least_stock_to_leave(&self, tool: &ToolSpec) -> StockToLeave {
-        let corner = match tool.kind {
-            ToolKind::Ball => tool.diameter / 2.0,
-            ToolKind::Bullnose => tool.corner,
-            ToolKind::Flat
-            | ToolKind::Cone
-            | ToolKind::Drill
-            | ToolKind::ThreadMill
-            | ToolKind::Probe => 0.0,
-        };
+        let corner = tool.corner_radius();
         StockToLeave {
             radial: -tool.diameter / 2.0,
             axial: if !self.strategy.uses().outline && corner > 0.0 {
@@ -302,15 +294,7 @@ impl Operation {
             | StrategySpec::Spiral { .. }
             | StrategySpec::Radial { .. }
             | StrategySpec::MorphedSpiral { .. } => {
-                let r = match tool.kind {
-                    ToolKind::Ball => d / 2.0,
-                    ToolKind::Bullnose => tool.corner,
-                    ToolKind::Flat
-                    | ToolKind::Cone
-                    | ToolKind::Drill
-                    | ToolKind::ThreadMill
-                    | ToolKind::Probe => 0.0,
-                };
+                let r = tool.corner_radius();
                 let over = if r > tolerance && r > 0.0 {
                     2.0 * (r * r - (r - tolerance).powi(2)).sqrt() / 2f64.sqrt()
                 } else {
@@ -326,15 +310,7 @@ impl Operation {
             // Fusion's optimal load: a tenth of the tool, to the micron.
             StrategySpec::Adaptive { .. } => Some((0.1 * d * 1000.0).round() / 1000.0),
             // Fusion's: 95% of the flat of the tool's end, less its corners.
-            StrategySpec::Face { .. } => match tool.kind {
-                ToolKind::Flat => Some(0.95 * d),
-                ToolKind::Bullnose => Some(0.95 * (d - 2.0 * tool.corner)),
-                ToolKind::Ball
-                | ToolKind::Cone
-                | ToolKind::Drill
-                | ToolKind::ThreadMill
-                | ToolKind::Probe => None,
-            },
+            StrategySpec::Face { .. } => tool.flat_diameter().map(|f| 0.95 * f),
             StrategySpec::Profile { .. }
             | StrategySpec::Contour { .. }
             | StrategySpec::Drill { .. }

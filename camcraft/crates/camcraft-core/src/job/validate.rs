@@ -330,6 +330,15 @@ impl Job {
                     op.strategy.name()
                 )));
             }
+            // A head under an overhang, unrolled, would reach in under the
+            // bar's own surface round it: no undercut goes round a bar.
+            if self.tool_for(op).is_some_and(|t| t.kind.undercuts()) {
+                return Err(refuse(format!(
+                    "operation '{}' cuts with a lollipop or slot cutter, whose head undercuts: \
+                     on a rotary, use a tool that cuts from its end",
+                    op.name
+                )));
+            }
             if (op.cuts_selection() || op.heights.measured_from_selection())
                 && !(op.selection.faces.is_empty() && op.selection.edges.is_empty())
             {

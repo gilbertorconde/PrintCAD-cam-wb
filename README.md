@@ -125,7 +125,10 @@ panels, the drawing and the helper that runs camcraft.
 - **Operations**, after Fusion's: adaptive and pocket clearing; parallel,
   scallop, contour, flat, spiral, radial and morphed spiral finishing; 2D
   profiles and pockets; facing; drilling: at once, in pecks backing out,
-  breaking the chip, or tapping, right- or left-hand; holes milled with
+  breaking the chip, spotting each hole to a diameter (only as deep as
+  leaves it that wide at its top, with a spot drill's, countersink's or
+  drill's point: "spot to 3 mm"), or tapping with a tap, right- or
+  left-hand; holes milled with
   the side of a tool: bored down a helix (a millimetre a turn unless set),
   round once at the bottom, then finished at the wall in passes that go in
   and out along arcs; holes and round bosses cleared in circles, a hole's
@@ -300,7 +303,49 @@ panels, the drawing and the helper that runs camcraft.
   its foot and top and its length. A Fusion tool library exported as CSV or
   JSON imports into it, the JSON bringing each tool's holder. A touch
   probe is a kind of its own, its ball's diameter, which only a probe
-  operation takes. A setup takes a copy of a tool when an operation first cuts with it, so a document never
+  operation takes. Past the flat, ball and bull-nose end mills, the
+  V-bit and chamfer mill, the drill and the thread mill, each kind is cut
+  with its own shape, in the toolpaths, their gouge checks, the
+  simulation and the shank check:
+  - a **tapered** (or tapered ball) end mill: its diameter at the tip, its
+    corner (half that for a ball), and its taper a side up its flute
+    length, where it is widest. It finishes in 3D (parallel, scallop,
+    contour, spiral, radial, morphed spiral) and engraves, stock to leave
+    and all: where a wall or a slope is steeper than the taper, its flank
+    holds it off, where a ball its tip's size would cut through. On a
+    rotary it finishes round the bar as a ball does, its flank met
+    radially;
+  - a **face mill**: its diameter at the face, its inserts' corner, and its
+    lead angle from the axis (0 square, 45 a 45° mill) up its cutting
+    height. It faces and finishes flats, 95% of its flat a pass, and goes
+    off the stock by its widest;
+  - a **lollipop** and a **slot (key) cutter**: a head, a ball or a disc its
+    cutting height thick, on a neck narrower than it. They undercut, in a
+    2D profile or a slot at one height (multiple depths off, the bottom
+    where it cuts), entered outside the material: in a profile, negative
+    stock to leave beside takes the groove into the wall. The neck, from
+    the head up, and the shank are checked against the material, so a neck
+    too wide for the groove is a failed check. The simulation, which keeps
+    one stretch of material a column, takes from it only what the neck's
+    width takes from above: the material under an overhang stays in it.
+    On a rotary they are refused: no undercut goes round a bar;
+  - a **spot drill** (or centre drill, its pilot not modelled) and a
+    **countersink**: a cone at its point angle, 90° unless given, with a
+    tip. They drill, spot to a diameter (above), chamfer and engrave;
+  - a **tap**: its thread's diameter, pitch and hand, and its chamfer,
+    leading in from the thread's minor diameter at the tip. Tapping wants
+    one at its pitch and hand, and a tap only taps;
+  - an **engraving tool**: a V-bit with a round tip (its tip radius), which
+    engraves and finishes, but neither V-carves nor chamfers.
+
+  From Fusion, `tapered mill`, `face mill` (`TA` its lead), `lollipop
+  mill`, `slot mill` (`LCF` its cutting height), `spot drill`, `center
+  drill`, `counter sink` and `tap right hand` and `tap left hand` (`TP` its
+  pitch) come in as these; a neck's diameter is read from `DN` (CSV
+  `tool_shoulderDiameter` or `tool_neckDiameter`) and a tap's chamfer from
+  `tip-length` (`tool_tipLength`), names not confirmed against a Fusion
+  export. A boring bar or head is left out: boring here is helical, with
+  the side of an end mill, which a single point cannot do. A setup takes a copy of a tool when an operation first cuts with it, so a document never
   depends on the machine it is opened on.
 - **Templates,** as Fusion's: a setup, or some of its operations, kept to
   make again on another part. A template keeps the setup's stock, work
@@ -348,7 +393,9 @@ panels, the drawing and the helper that runs camcraft.
   whether it is the part or stock left above it, and for the holder the
   stickout that would clear it ("holder segment 1 (Ø32.00) meets the part on
   12 move(s) from move 40, 8.30 mm into it: needs 38.3 mm stickout"). What
-  the tool's lengths do not say is not checked, and a note says so. A 3D
+  the tool's lengths do not say is not checked, and a note says so. A
+  lollipop's or slot cutter's neck is checked from its head up, and a
+  tapered mill's body above its flutes as wide as its flank's top. A 3D
   finish (parallel, scallop, contour, flat, spiral, radial, morphed spiral)
   can be asked to Use shank and holder, as Fusion's: it leaves out the cuts
   where they would meet the part, and links round what it left out; the
@@ -406,7 +453,8 @@ panels, the drawing and the helper that runs camcraft.
   the work zero, the work zero and its work offset, and where that is on
   the machine when the setup says; the tool axis, and what a tilt asks of
   whoever sets the part up; the post, the program's name and number; each
-  tool with its number, kind (a thread mill with its pitches), diameter, flutes, flute length, stickout and
+  tool with its number, kind (a thread mill with its pitches; a tapered
+  mill's taper, a face mill's lead, a neck, a tap's pitch and hand), diameter, flutes, flute length, stickout and
   length, holder (its name and segments, `ER20: Ø28 × 19, Ø42 × 15 mm`),
   the operations that use it, the lowest it goes and the
   fastest it is fed and turned; each operation with its strategy, tool,
@@ -527,8 +575,10 @@ panels, the drawing and the helper that runs camcraft.
   encoder and the Pro licence on an Acorn) or a floating tap holder. Masso,
   GRBL and Mach cannot (Mach4's G84 is for a floating holder, not kept to
   the spindle): a tapping operation posted for them is a failed check that
-  says so, and names the machines that can. A tap is kept in the tool
-  library as a flat end mill its size, and turns the way its thread does.
+  says so, and names the machines that can. A tap is a kind of tool of its
+  own (above), at the pitch and hand the operation taps; a document from
+  before, that taps with a flat end mill its size, still taps, and a
+  warning says to make the tool a tap. It turns the way its thread does.
   A thread mill is a kind of its own: its cutting diameter, its tip below
   the teeth, the pitches it cuts, and its rows of teeth.
   A profile can name its rotary axes, for 3+2 machining:
