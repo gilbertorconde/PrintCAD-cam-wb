@@ -576,6 +576,7 @@ fn heights_from_the_selection_need_picks() {
         chip_break: None,
         pitch: None,
         hand: Default::default(),
+        spot: None,
     };
     assert!(op.cannot_measure_from_picks().is_some());
 
@@ -669,6 +670,7 @@ fn drills_drill_and_only_drill() {
         chip_break: None,
         pitch: None,
         hand: Default::default(),
+        spot: None,
     };
     j.validate().unwrap();
     j.setups[0].operations[1].tool = Some("finish-4-ball".into());
@@ -680,6 +682,7 @@ fn drills_drill_and_only_drill() {
         chip_break: None,
         pitch: None,
         hand: Default::default(),
+        spot: None,
     };
     assert!(matches!(j.validate(), Err(JobError::BadValue { .. })));
 
@@ -760,6 +763,7 @@ fn stock_to_leave_is_what_the_strategy_uses() {
         chip_break: None,
         pitch: None,
         hand: Default::default(),
+        spot: None,
     };
     op.tool = Some("d".into());
     assert_eq!(op.stock_to_leave(), StockToLeave::default());
@@ -889,6 +893,7 @@ fn each_strategy_says_what_it_uses() {
         chip_break: None,
         pitch: None,
         hand: Default::default(),
+        spot: None,
     }
     .uses();
     assert_eq!(drill.stock_to_leave, Leave::None);
@@ -1319,6 +1324,7 @@ fn stepovers_default_as_fusions() {
         chip_break: None,
         pitch: None,
         hand: Default::default(),
+        spot: None,
     };
     assert_eq!(
         op.default_stepover(&tool(ToolKind::Drill, 6.0, 0.0), 0.05),
@@ -1510,6 +1516,7 @@ fn a_2d_operation_has_an_outline_and_a_3d_one_a_boundary() {
             chip_break: None,
             pitch: None,
             hand: Default::default(),
+            spot: None,
         },
     ];
     for s in strategies {
@@ -1574,6 +1581,7 @@ fn multiple_depths_are_shared_and_used_as_the_strategy_says() {
                 chip_break: None,
                 pitch: None,
                 hand: Default::default(),
+                spot: None,
             },
             None,
         ),
@@ -2132,6 +2140,7 @@ fn settings_a_strategy_does_not_use_are_not_required() {
         chip_break: None,
         pitch: None,
         hand: Default::default(),
+        spot: None,
     };
     finish.tool = Some("rough-6-flat".into());
     finish.passes.feed = 0.0;
@@ -2325,5 +2334,334 @@ fn every_hole_strategy_reads_back_from_a_job_file() {
     assert_eq!(again, j, "{text}");
     for name in ["bore", "circular", "thread"] {
         assert!(StrategySpec::named(name).is_some(), "{name}");
+    }
+}
+
+/// Each new kind of tool, as a job file writes it, built into its cutting
+/// profile.
+mod kinds {
+    use super::*;
+
+    fn tool(text: &str) -> ToolSpec {
+        toml::from_str(text).unwrap()
+    }
+
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-9
+    }
+
+    /// A tapered ball 1 mm across, 3° a side up 20 mm of flutes: the ball,
+    /// then the flank to its widest at the top of the flutes.
+    #[test]
+    fn a_tapered_ball_tapers_up_its_flutes() {
+        let t = tool(
+            "kind = 'tapered'\ndiameter = 1.0\ncorner = 0.5\ntaper_angle = 3.0\nflute_length = 20.0",
+        );
+        assert!(t.check().is_empty(), "{:?}", t.check());
+        let Ok(Cutter::Tapered(p)) = t.build() else {
+            panic!("{:?}", t.build());
+        };
+        let a = 3f64.to_radians();
+        assert!(close(p.corner(), 0.5) && close(p.flat(), 0.0));
+        let top = 0.5 * a.cos() + (20.0 - 0.5 * (1.0 - a.sin())) * a.tan();
+        assert!(close(p.max_radius(), top), "{} vs {top}", p.max_radius());
+        assert!(close(p.height_at(top).unwrap(), 20.0));
+        assert!(close(t.cutting_diameter(), 2.0 * top));
+        assert_eq!(t.corner_radius(), 0.5);
+        // Without its taper or its flutes it is not yet a tool.
+        let mut no_taper = t.clone();
+        no_taper.taper_angle = None;
+        assert_eq!(no_taper.check()[0].field, "taper_angle");
+        let mut no_flutes = t.clone();
+        no_flutes.flute_length = None;
+        assert_eq!(no_flutes.check()[0].field, "flute_length");
+        // Its body above the flutes is checked as wide as its flank's top.
+        let mut held = t.clone();
+        held.stickout = Some(30.0);
+        let above = held.above_flutes();
+        assert!(close(above.body.rings[0].radius_from, top));
+    }
+
+    /// A 45° face mill 50 mm across at its face, its inserts' corners 0.8,
+    /// 6 mm of cutting height: flat to 25 less its corner, then the corner,
+    /// then its edge out 45° to the top of the inserts.
+    #[test]
+    fn a_face_mill_leads_out_from_its_face() {
+        let t = tool(
+            "kind = 'face-mill'\ndiameter = 50.0\ncorner = 0.8\ntaper_angle = 45.0\nflute_length = 6.0",
+        );
+        assert!(t.check().is_empty(), "{:?}", t.check());
+        let Ok(Cutter::Tapered(p)) = t.build() else {
+            panic!("{:?}", t.build());
+        };
+        assert!(close(p.flat(), 24.2));
+        let h = std::f64::consts::FRAC_1_SQRT_2;
+        let top = 24.2 + 0.8 * h + (6.0 - 0.8 * (1.0 - h));
+        assert!(close(p.max_radius(), top));
+        assert_eq!(t.flat_diameter(), Some(48.4));
+        // Square, it is a bullnose.
+        let mut square = t.clone();
+        square.taper_angle = None;
+        assert!(matches!(square.build(), Ok(Cutter::Bullnose(_))));
+        // It faces at 95% of its flat, and does nothing but face and flat.
+        let face = Operation::new("face", StrategySpec::named("face").unwrap());
+        assert!(close(face.default_stepover(&t, 0.01).unwrap(), 0.95 * 48.4));
+        assert_eq!(face.cannot_use(&t), None);
+        let flat = Operation::new("flat", StrategySpec::named("flat").unwrap());
+        assert_eq!(flat.cannot_use(&t), None);
+        let pocket = Operation::new("p", StrategySpec::named("pocket").unwrap());
+        assert!(pocket.cannot_use(&t).unwrap().contains("face mill"));
+    }
+
+    /// A slot cutter and a lollipop: a head on a neck, its height a slot
+    /// cutter's flutes and a lollipop's ball up to its neck; the neck is
+    /// checked above the head, the shank above the shoulder.
+    #[test]
+    fn undercutting_heads_stand_on_their_necks() {
+        let slot = tool(
+            "kind = 'slot-cutter'\ndiameter = 20.0\nneck_diameter = 8.0\nflute_length = 3.0\n\
+             shoulder_length = 15.0\nshank_diameter = 10.0\nstickout = 40.0",
+        );
+        assert!(slot.check().is_empty(), "{:?}", slot.check());
+        let Ok(Cutter::Undercut(u)) = slot.build() else {
+            panic!("{:?}", slot.build());
+        };
+        assert!(close(u.neck(), 4.0) && close(u.height(), 3.0));
+        let above = slot.above_flutes();
+        assert_eq!(above.pieces, vec![Piece::Body, Piece::Shank]);
+        let neck = above.body.rings[0];
+        assert!(close(neck.from, 3.0) && close(neck.to, 15.0) && close(neck.radius_from, 4.0));
+        assert!(close(above.body.rings[1].from, 15.0));
+        let pop = tool("kind = 'lollipop'\ndiameter = 6.0\nneck_diameter = 3.0");
+        assert!(pop.check().is_empty(), "{:?}", pop.check());
+        let want = 3.0 + (9.0f64 - 2.25).sqrt();
+        assert!(close(pop.head_height().unwrap(), want));
+        assert_eq!(pop.corner_radius(), 3.0);
+        let mut no_neck = pop.clone();
+        no_neck.neck_diameter = None;
+        assert_eq!(no_neck.check()[0].field, "neck_diameter");
+        let mut fat = pop.clone();
+        fat.neck_diameter = Some(6.0);
+        assert_eq!(fat.check()[0].field, "neck_diameter");
+        let mut no_height = slot.clone();
+        no_height.flute_length = None;
+        assert_eq!(no_height.check()[0].field, "flute_length");
+    }
+
+    /// Only a 2D profile or a slot, straight to its depth, undercuts.
+    #[test]
+    fn an_undercutting_head_cuts_at_one_height() {
+        let slot =
+            tool("kind = 'slot-cutter'\ndiameter = 20.0\nneck_diameter = 8.0\nflute_length = 3.0");
+        let mut profile = Operation::new("p", StrategySpec::named("profile").unwrap());
+        profile.passes.stepdown = None;
+        assert_eq!(profile.cannot_use(&slot), None);
+        profile.passes.stepdown = Some(1.0);
+        assert!(profile.cannot_use(&slot).unwrap().contains("one height"));
+        let mut groove = Operation::new("s", StrategySpec::named("slot").unwrap());
+        groove.passes.stepdown = None;
+        assert_eq!(groove.cannot_use(&slot), None);
+        let pocket = Operation::new("p", StrategySpec::named("pocket").unwrap());
+        let why = pocket.cannot_use(&slot);
+        assert!(why.is_some_and(|w| w.contains("2D profile")), "{why:?}");
+        let parallel = Operation::new("f", StrategySpec::named("parallel").unwrap());
+        assert!(parallel.cannot_use(&slot).is_some());
+    }
+
+    /// A tapered mill finishes in 3D and engraves, and leaves stock there; it
+    /// does not clear, face or profile.
+    #[test]
+    fn a_tapered_mill_finishes_in_3d() {
+        let t = tool(
+            "kind = 'tapered'\ndiameter = 1.0\ncorner = 0.5\ntaper_angle = 3.0\nflute_length = 20.0",
+        );
+        for name in ["parallel", "scallop", "contour", "engrave"] {
+            let mut op = Operation::new("f", StrategySpec::named(name).unwrap());
+            op.passes.stepover = 0.2;
+            assert_eq!(op.cannot_use(&t), None, "{name}");
+        }
+        for name in ["adaptive", "pocket-clearing", "face", "profile", "slot"] {
+            let op = Operation::new("f", StrategySpec::named(name).unwrap());
+            assert!(op.cannot_use(&t).is_some(), "{name}");
+        }
+        let mut op = Operation::new("f", StrategySpec::named("parallel").unwrap());
+        op.passes.stepover = 0.2;
+        op.passes.stock_to_leave = StockToLeave {
+            radial: 0.2,
+            axial: 0.2,
+        };
+        assert_eq!(op.cannot_use(&t), None);
+        let grown = crate::cutter::allowance::EffectiveTool::of(
+            &t.build().unwrap(),
+            crate::cutter::allowance::Allowance::isotropic(0.2).unwrap(),
+        )
+        .unwrap();
+        assert!(close(grown.max_radius(), t.cutting_diameter() / 2.0 + 0.2));
+    }
+
+    /// A V-bit with a round tip, an engraving tool, is a tapered end with no
+    /// flat: it engraves and finishes, but neither V-carves nor chamfers.
+    #[test]
+    fn a_round_tipped_vbit_engraves() {
+        let t = tool("kind = 'cone'\ndiameter = 6.0\nangle = 30.0\ncorner = 0.1");
+        assert!(t.check().is_empty(), "{:?}", t.check());
+        let Ok(Cutter::Tapered(p)) = t.build() else {
+            panic!("{:?}", t.build());
+        };
+        assert!(close(p.corner(), 0.1) && close(p.half_angle(), 15f64.to_radians()));
+        let engrave = Operation::new("e", StrategySpec::named("engrave").unwrap());
+        assert_eq!(engrave.cannot_use(&t), None);
+        let carve = Operation::new("v", StrategySpec::named("v-carve").unwrap());
+        assert!(carve.cannot_use(&t).is_some());
+        let chamfer = Operation::new("c", StrategySpec::named("chamfer").unwrap());
+        assert!(chamfer.cannot_use(&t).is_some());
+        // The sharp one does both.
+        let sharp = tool("kind = 'cone'\ndiameter = 6.0\nangle = 90.0");
+        assert_eq!(carve.cannot_use(&sharp), None);
+    }
+
+    fn drilling(pitch: Option<f64>, spot: Option<f64>) -> Operation {
+        Operation::new(
+            "d",
+            StrategySpec::Drill {
+                peck: None,
+                dwell: None,
+                chip_break: None,
+                pitch,
+                hand: ThreadHand::Right,
+                spot,
+            },
+        )
+    }
+
+    /// A tap is a kind with its pitch, hand and chamfer: tapping wants one at
+    /// the pitch it taps, and a tap does nothing else. A flat end mill still
+    /// taps, as documents from before taps did.
+    #[test]
+    fn a_tap_taps_at_its_pitch() {
+        let tap = tool("kind = 'tap'\ndiameter = 6.0\npitch = 1.0\nchamfer_length = 2.0");
+        assert!(tap.check().is_empty(), "{:?}", tap.check());
+        let Ok(Cutter::Cone(c)) = tap.build() else {
+            panic!("{:?}", tap.build());
+        };
+        // Its chamfer from the minor diameter, 6 - 1.0825 at 1 mm, at the tip.
+        assert!((c.tip() - (3.0 - 0.541_266)).abs() < 1e-9);
+        assert!(close(c.height_at(3.0).unwrap(), 2.0));
+        assert_eq!(drilling(Some(1.0), None).cannot_use(&tap), None);
+        assert!(
+            drilling(Some(1.25), None)
+                .cannot_use(&tap)
+                .unwrap()
+                .contains("pitch")
+        );
+        assert!(
+            drilling(None, None)
+                .cannot_use(&tap)
+                .unwrap()
+                .contains("only taps")
+        );
+        let left = Operation {
+            strategy: StrategySpec::Drill {
+                peck: None,
+                dwell: None,
+                chip_break: None,
+                pitch: Some(1.0),
+                hand: ThreadHand::Left,
+                spot: None,
+            },
+            ..drilling(None, None)
+        };
+        assert!(left.cannot_use(&tap).unwrap().contains("other way"));
+        let profile = Operation::new("p", StrategySpec::named("profile").unwrap());
+        assert!(profile.cannot_use(&tap).is_some());
+        let flat = ToolSpec::default();
+        assert_eq!(drilling(Some(1.0), None).cannot_use(&flat), None);
+        let drill = tool("kind = 'drill'\ndiameter = 6.0");
+        assert_eq!(
+            drilling(Some(1.0), None).cannot_use(&drill),
+            None,
+            "as before"
+        );
+        let ball = tool("kind = 'ball'\ndiameter = 6.0");
+        assert!(drilling(Some(1.0), None).cannot_use(&ball).is_some());
+        let mut no_pitch = tap.clone();
+        no_pitch.pitch = None;
+        assert_eq!(no_pitch.check()[0].field, "pitch");
+        // Square without a chamfer.
+        let mut square = tap.clone();
+        square.chamfer_length = None;
+        assert!(matches!(square.build(), Ok(Cutter::Bullnose(_))));
+    }
+
+    /// A spot drill, a countersink and a drill spot to a diameter: as deep as
+    /// leaves the hole that wide at its top, its point's depth there.
+    #[test]
+    fn a_hole_is_spotted_to_a_diameter() {
+        let spot = tool("kind = 'spot-drill'\ndiameter = 6.0");
+        assert!(
+            close(spot.spot_depth(3.0).unwrap(), 1.5),
+            "90° unless given"
+        );
+        let sink = tool("kind = 'countersink'\ndiameter = 12.0\nangle = 82.0\ntip_diameter = 2.0");
+        let want = (5.0 - 1.0) / 41f64.to_radians().tan();
+        assert!(close(sink.spot_depth(10.0).unwrap(), want));
+        assert_eq!(sink.spot_depth(1.5), None, "inside its tip");
+        assert_eq!(sink.spot_depth(13.0), None, "wider than it");
+        let drill = tool("kind = 'drill'\ndiameter = 6.0");
+        assert!(drill.spot_depth(3.0).is_some());
+        assert_eq!(ToolSpec::default().spot_depth(3.0), None);
+        assert_eq!(drilling(None, Some(3.0)).cannot_use(&spot), None);
+        assert_eq!(drilling(None, Some(3.0)).cannot_use(&sink), None);
+        assert!(
+            drilling(None, Some(3.0))
+                .cannot_use(&ToolSpec::default())
+                .is_some()
+        );
+        assert!(drilling(None, Some(8.0)).cannot_use(&spot).is_some());
+        // Both chamfer, and neither profiles.
+        let chamfer = Operation::new("c", StrategySpec::named("chamfer").unwrap());
+        assert_eq!(chamfer.cannot_use(&spot), None);
+        let profile = Operation::new("p", StrategySpec::named("profile").unwrap());
+        assert!(profile.cannot_use(&sink).is_some());
+    }
+
+    /// A job file from before the new kinds reads as it did: its tools, and
+    /// a drilling that taps with a flat end mill.
+    #[test]
+    fn a_job_from_before_still_reads() {
+        let old =
+            format!("{SAMPLE}\n[tools.tap-m6]\nkind = \"flat\"\ndiameter = 5.0\nnumber = 7\n");
+        let job: Job = toml::from_str(&old).unwrap();
+        assert_eq!(job.tools["tap-m6"].kind, ToolKind::Flat);
+        assert_eq!(job.tools["tap-m6"].pitch, None);
+        // A tapping written as before reads back as it was: no spot.
+        let mut op = drilling(Some(1.0), None);
+        op.tool = Some("tap-m6".into());
+        let text = toml::to_string(&op).unwrap();
+        assert!(!text.contains("spot"), "{text}");
+        let back: Operation = toml::from_str(&text).unwrap();
+        assert_eq!(back, op);
+        assert_eq!(back.cannot_use(&job.tools["tap-m6"]), None);
+        let written = toml::to_string(&job.tools["tap-m6"]).unwrap();
+        assert!(
+            !written.contains("hand") && !written.contains("pitch"),
+            "{written}"
+        );
+    }
+
+    #[test]
+    fn every_kind_has_its_name() {
+        for kind in [
+            ToolKind::Tapered,
+            ToolKind::FaceMill,
+            ToolKind::Lollipop,
+            ToolKind::SlotCutter,
+            ToolKind::SpotDrill,
+            ToolKind::Countersink,
+            ToolKind::Tap,
+        ] {
+            let text = format!("kind = '{}'\ndiameter = 6.0", kind.name());
+            assert_eq!(tool(&text).kind, kind);
+        }
     }
 }

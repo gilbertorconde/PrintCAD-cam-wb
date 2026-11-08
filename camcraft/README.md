@@ -48,8 +48,9 @@ And drilling breaks the chip and taps, as Fusion's drilling cycles do. In
 backs off only that far: Fusion's chip break distance) and `pitch` and
 `hand` (each hole tapped, fed at the pitch times the spindle's speed both
 ways; a left-hand tap turns counter-clockwise, whatever its tool says).
-There is no tap kind of tool: a tap is a flat end mill or a drill its size,
-which is the hole it leaves. In `camcraft-post`, the cycles are `G73`,
+A tap was then a flat end mill or a drill its size, which is the hole it
+leaves; it is now a kind of its own (below), and those still tap. In
+`camcraft-post`, the cycles are `G73`,
 `G84` and `G74`, a tap's feed written to three more places than other feeds;
 `ProgramSpec::taps` makes lowering refuse a tap as plain moves
 (`LowerError::TapsAsMoves`), and one turning against its thread; and
@@ -636,6 +637,60 @@ the tool's radius apart, again between two where the tip strays from
 the line between them, in parallel, and simplified. `JobError::Wrap`
 lets parallel finishing through, and `StrategyError::RotaryGrid` refuses a
 part on a grid that does not go round in whole cells.
+
+And the tool kinds a machinist's library has, each cut with its own
+shape. In `camcraft-core`'s `cutter::tool`, two cutters more:
+`Tapered`, a flat tip, a round corner and a straight flank tangent to it,
+an angle from the axis, out to a radius (a tapered or tapered ball end
+mill, a round-tipped V-bit, a face mill with a lead), its `h(d)` convex
+as the cone's, so `DropTest for Tapered` is the cone's (a vertex
+directly, an edge by the shared concave search, a facet where the
+profile's slope is the plane's, `touches_slope`); and `Undercut`, a
+head (a flat or ball `Bullnose`) on a narrower neck, a slot cutter's
+disc or a lollipop's ball, not monotonic, dropped as its head.
+`Cutter::grown` grows either by stock to leave as a bullnose grows, the
+tapered end's corner by the stock and its flat by the radial stock past
+it, which `EffectiveTool::of` uses for every cutter but a cone; and
+`Cutter::swept_height_at` and `swept_max_radius`, which the simulator
+sweeps (`path::simadapt`), take an undercutting head as only its neck's
+width, since a height field cannot hold an undercut. `ToolError` has
+`BadTaper` and `BadNeck`. In `job`, `ToolKind` has `Tapered`,
+`FaceMill`, `Lollipop`, `SlotCutter`, `SpotDrill`, `Countersink` and
+`Tap` (`name`, `is_cone`, `undercuts`, `is_pointed`), and `ToolSpec`
+`taper_angle` (a taper or a lead, from the axis), `neck_diameter`, and a
+tap's `pitch`, `hand` and `chamfer_length`, its `corner` now also a
+tapered mill's, a face mill's inserts' and a V-bit's round tip;
+`build` makes each its profile (a tapered mill and a face mill from
+their diameter at the tip up their flute length; a tap a cone from its
+thread's minor diameter, `5/8 H` a side, up its chamfer; a spot drill
+and a countersink cones at 90° unless given), `check` asks for what
+each needs, and `flat_diameter`, `cutting_diameter`, `head_height`,
+`point_angle`, `spot_depth` and `shape_words` say what their names do.
+`above_flutes` checks an undercutting head's neck from the head up, and
+a tapered mill's body as wide as its flank's top. `Operation::cannot_use`
+(its kinds now in `cannot_use_kind` and `cannot_drill`) takes a face
+mill only in facing and flat finishing, a tapered mill only in 3D
+finishing and engraving, a lollipop or slot cutter only in a 2D profile
+or a slot with no stepdown, a spot drill and a countersink in drilling,
+chamfering and engraving, a round-tipped V-bit neither V-carving nor
+chamfering, and a tap only tapping, at its pitch and hand; a flat end
+mill or a drill still taps, and the run warns to make it a tap.
+`StrategySpec::Drill` has `spot`, a diameter: each hole goes only as deep
+as leaves it that wide at its top, with a pointed tool; `run::cut_past`
+takes what a tap cuts past its hole, its thread, and a spot's or a
+countersink's seat, as meant. On a rotary a tapered end is met radially
+as any profile is, and a lollipop or slot cutter is refused
+(`JobError::Wrap`). `passes` reads a
+tool's corner and flat through `corner_radius` and `flat_diameter`. In
+`camcraft-session`, `library::fusion_kind` and `fusion_shape`, shared by
+the CSV and the JSON import, map Fusion's `tapered mill`, `face mill`,
+`lollipop mill`, `slot mill`, `spot drill`, `center drill`, `counter
+sink` and `tap right hand` and `tap left hand` to these, with their
+taper (`TA`), neck (`DN`, `tool_shoulderDiameter`), pitch (`TP`) and
+chamfer (`tip-length`), a spot drill no longer a plain cone; and
+`finish` names a kind by `ToolKind::name`. Tests in
+`cutter/tool/tests.rs`, `cutter/dropcutter/tests.rs`, `job/tests.rs`
+(`kinds`), `run/tests/kinds.rs` and the two imports'.
 
 And one test: ogeom is 0.11.1 here, which printCAD's shapes need, and it
 meshes `round_edge_loose_fit.step`'s seam that 0.11.0 drew off the torus, so

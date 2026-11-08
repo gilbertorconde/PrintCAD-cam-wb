@@ -505,6 +505,7 @@ fn kind(t: &ToolUse) -> String {
         "flat" => "flat end mill".into(),
         "ball" => "ball end mill".into(),
         "bullnose" => format!("bull-nose, r{}", num(t.corner)),
+        "cone" if !t.shape.is_empty() => format!("V-bit, {}", t.shape),
         "cone" => format!("V-bit, {}°", t.angle.map_or_else(dash, num)),
         "drill" => format!("drill, {}°", t.angle.map_or_else(dash, num)),
         "thread-mill" => match t.pitch_range {
@@ -513,7 +514,20 @@ fn kind(t: &ToolUse) -> String {
             None => "thread mill".into(),
         },
         "probe" => "touch probe".into(),
-        other => other.into(),
+        other => {
+            let label = match other {
+                "tapered" => "tapered end mill",
+                "face-mill" => "face mill",
+                "slot-cutter" => "slot cutter",
+                "spot-drill" => "spot drill",
+                other => other,
+            };
+            if t.shape.is_empty() {
+                label.into()
+            } else {
+                format!("{label}, {}", t.shape)
+            }
+        }
     }
 }
 

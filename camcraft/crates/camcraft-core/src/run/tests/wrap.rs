@@ -234,3 +234,67 @@ fn a_rotary_finish_takes_a_bar_down_to_the_rod() {
         assert!(worst < 0.05, "{angle}: {worst} left");
     }
 }
+
+/// A tapered ball finishes the rod on a rotary as a ball does, its profile
+/// met radially, down to the rod and nowhere below it; a slot cutter is
+/// refused, as its head would reach in under the bar round it.
+#[test]
+fn a_tapered_ball_finishes_on_a_rotary_and_a_slot_cutter_does_not() {
+    use crate::job::{FixedCylinder, ToolKind, ToolSpec};
+    let tapered = ToolSpec {
+        kind: ToolKind::Tapered,
+        diameter: 4.0,
+        corner: 2.0,
+        taper_angle: Some(5.0),
+        flute_length: Some(10.0),
+        ..ToolSpec::default()
+    };
+    let (job, result) = on_a_rotary(
+        15.0,
+        StrategySpec::Parallel { angle: 0.0 },
+        tapered,
+        vec![],
+        |job| {
+            job.stocks[0].spec = StockSpec::FixedCylinder(FixedCylinder {
+                models: vec![],
+                axis: BarAxis::X,
+                diameter: 34.0,
+                length: 60.0,
+                place: crate::job::Place::Center {},
+            });
+            let op = &mut job.setups[0].operations[0];
+            op.passes.stepover = 1.5;
+            op.passes.feed = 1000.0;
+            op.heights.clearance = Height {
+                reference: HeightRef::StockTop,
+                offset: 5.0,
+            };
+        },
+    );
+    let result = result.unwrap();
+    assert_eq!(result.verify.gouged, 0);
+    let lowest = result.operations[0]
+        .path
+        .moves()
+        .iter()
+        .filter(|m| m.role == MoveRole::Cut)
+        .map(|m| m.to.z)
+        .fold(f64::MAX, f64::min);
+    assert!((lowest - 15.0).abs() < job.tolerance, "{lowest}");
+    let slot = ToolSpec {
+        kind: ToolKind::SlotCutter,
+        diameter: 10.0,
+        neck_diameter: Some(4.0),
+        flute_length: Some(3.0),
+        ..ToolSpec::default()
+    };
+    let profile = StrategySpec::Profile {
+        side: crate::job::ProfileSide::On,
+        conventional: false,
+    };
+    let (_, r) = on_a_rotary(20.0, profile, slot, drawn(), |job| {
+        job.setups[0].operations[0].passes.stepdown = None;
+    });
+    let e = r.unwrap_err().to_string();
+    assert!(e.contains("lollipop or slot cutter"), "{e}");
+}

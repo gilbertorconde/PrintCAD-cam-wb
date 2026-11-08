@@ -53,15 +53,7 @@ pub struct FinishSpec {
 /// Its one setup is called `finish`.
 pub fn single_operation(spec: &FinishSpec, model: ModelDef) -> Job {
     const TOOL: &str = "cutter";
-    let shape = match spec.tool {
-        ToolKind::Ball => "ball",
-        ToolKind::Flat => "flat",
-        ToolKind::Bullnose => "bullnose",
-        ToolKind::Cone => "cone",
-        ToolKind::Drill => "drill",
-        ToolKind::ThreadMill => "thread-mill",
-        ToolKind::Probe => "probe",
-    };
+    let shape = spec.tool.name();
     let tool = ToolSpec {
         kind: spec.tool,
         diameter: spec.diameter,

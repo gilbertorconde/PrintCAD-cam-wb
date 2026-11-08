@@ -225,6 +225,11 @@ pub enum StrategySpec {
         /// Which way the thread turns, when tapping.
         #[serde(default, skip_serializing_if = "is_default")]
         hand: ThreadHand,
+        /// Spot each hole rather than drill it: only as deep as leaves it
+        /// this many millimetres across at its top, with a pointed tool, a
+        /// spot drill's or a countersink's.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        spot: Option<f64>,
     },
     /// Holes bored with an end mill: down a helix, `pitch` a turn, round
     /// once at the bottom, then out to the wall in finishing passes there

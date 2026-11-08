@@ -8,7 +8,6 @@
 use camcraft_sim::stock::{MoveClass, SimMove, SweptTool};
 
 use crate::cutter::allowance::EffectiveTool;
-use crate::cutter::tool::ToolProfile;
 use crate::path::toolpath::{Move, MoveKind, MoveRole, Toolpath};
 
 /// Reduce a toolpath to what the simulator needs.
@@ -40,13 +39,14 @@ pub fn sim_moves_of(moves: &[Move]) -> Vec<SimMove> {
 }
 
 /// The material is cut by the real tool: the grown one only finds where its tip
-/// goes, and the stock it leaves stays in the material.
+/// goes, and the stock it leaves stays in the material. An undercutting head
+/// takes only what its neck's width does: a height field has no undercut.
 impl SweptTool for EffectiveTool {
     fn max_radius(&self) -> f64 {
-        ToolProfile::max_radius(self.base())
+        self.base().swept_max_radius()
     }
     fn height_at(&self, d: f64) -> Option<f64> {
-        ToolProfile::height_at(self.base(), d)
+        self.base().swept_height_at(d)
     }
 }
 
@@ -94,7 +94,7 @@ mod tests {
     #[test]
     fn the_simulator_sweeps_the_real_tool() {
         use crate::cutter::allowance::Allowance;
-        use crate::cutter::tool::Ball;
+        use crate::cutter::tool::{Ball, ToolProfile};
         let bare = Ball::new(3.0).unwrap();
         let with_stock = EffectiveTool::new(&bare, Allowance::isotropic(0.5).unwrap()).unwrap();
         assert_eq!(SweptTool::max_radius(&with_stock), 3.0);

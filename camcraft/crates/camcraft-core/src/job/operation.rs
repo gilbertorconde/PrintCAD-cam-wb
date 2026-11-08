@@ -118,7 +118,6 @@ impl Operation {
             return None;
         }
         let uses = self.strategy.uses();
-        let drilling = matches!(self.strategy, StrategySpec::Drill { .. });
         // A thread mill's teeth are the thread's form: it cuts nothing else,
         // and a thread is cut by nothing else.
         let threading = matches!(self.strategy, StrategySpec::Thread { .. });
@@ -134,62 +133,8 @@ impl Operation {
         {
             return Some("the thread's pitch is outside the thread mill's range of pitches");
         }
-        // Bored and milled with the side of an end mill, which a drill has not.
-        if matches!(
-            self.strategy,
-            StrategySpec::Bore { .. } | StrategySpec::Circular { .. }
-        ) && matches!(tool.kind, ToolKind::Drill | ToolKind::Cone)
-        {
-            return Some("bore and mill holes with an end mill: it cuts with its side");
-        }
-        if tool.kind == ToolKind::Drill && !drilling {
-            return Some("a drill only drills; use a drilling operation");
-        }
-        if drilling && !matches!(tool.kind, ToolKind::Drill | ToolKind::Flat) {
-            if let StrategySpec::Drill { pitch: Some(_), .. } = self.strategy {
-                // The library has no kind for a tap: it cuts a hole its size
-                // straight down, as a flat end mill does.
-                return Some("tap with a tap, kept in the library as a flat end mill its size");
-            }
-            return Some("drill holes with a drill, or a flat end mill that plunges");
-        }
-        // Its depth is the V's, from how wide the area is: no other shape
-        // cuts its width to its depth.
-        if matches!(self.strategy, StrategySpec::VCarve { .. }) && tool.kind != ToolKind::Cone {
-            return Some("V-carving cuts with a V-bit: its width follows how deep its V goes");
-        }
-        // A slot is as wide as the tool, all the way down.
-        if matches!(self.strategy, StrategySpec::Slot { .. }) && tool.kind == ToolKind::Cone {
-            return Some(
-                "a slot is cut with an end mill its width: a V-bit's width changes with \
-                 depth; engrave with it instead",
-            );
-        }
-        // The chamfer is the cone's flank: a cone with flank enough for it.
-        if let StrategySpec::Chamfer {
-            width, tip_offset, ..
-        } = self.strategy
-        {
-            if tool.kind != ToolKind::Cone {
-                return Some("deburr with a chamfer mill or a V-bit: the chamfer is its flank");
-            }
-            let half = (tool.angle.unwrap_or(f64::NAN) / 2.0).to_radians();
-            let place = crate::strategy::chamfer::Place::new(
-                width,
-                tip_offset,
-                half,
-                tool.tip_diameter / 2.0,
-                tool.diameter / 2.0,
-            );
-            if place.is_err() {
-                return Some(
-                    "the chamfer needs more of the cone than the tool has: make it narrower, \
-                     the tip offset less, or take a wider tool",
-                );
-            }
-        }
-        if matches!(self.strategy, StrategySpec::Face { .. }) && tool.kind == ToolKind::Ball {
-            return Some("a ball end mill cannot face flat; use a flat or bull-nose end mill");
+        if let Some(why) = self.cannot_use_kind(tool) {
+            return Some(why);
         }
         if uses.stepover && self.passes.stepover > tool.diameter {
             return Some(
@@ -207,7 +152,7 @@ impl Operation {
                 "negative stock to leave down must be no more than the tool's corner radius",
             );
         }
-        if tool.kind != ToolKind::Cone {
+        if !tool.kind.is_cone() {
             return None;
         }
         match self.strategy {
@@ -242,6 +187,186 @@ impl Operation {
             return Some("a V-bit or chamfer mill cuts to size: set stock to leave to zero");
         }
         None
+    }
+
+    /// Why its strategy cannot cut with a tool of `tool`'s kind, if it
+    /// cannot: each kind cuts what its shape cuts.
+    fn cannot_use_kind(&self, tool: &ToolSpec) -> Option<&'static str> {
+        let kind = tool.kind;
+        let drilling = matches!(self.strategy, StrategySpec::Drill { .. });
+        // Bored and milled with the side of an end mill, which a point, a tap
+        // or a head on a neck has not.
+        if matches!(
+            self.strategy,
+            StrategySpec::Bore { .. } | StrategySpec::Circular { .. }
+        ) && (kind.is_pointed()
+            || kind.undercuts()
+            || matches!(kind, ToolKind::Tap | ToolKind::Tapered | ToolKind::FaceMill))
+        {
+            return Some("bore and mill holes with an end mill: it cuts with its side");
+        }
+        if kind == ToolKind::Drill && !drilling {
+            return Some("a drill only drills; use a drilling operation");
+        }
+        if let StrategySpec::Drill {
+            pitch, hand, spot, ..
+        } = self.strategy
+        {
+            return self.cannot_drill(tool, pitch.map(|p| (p, hand)), spot);
+        }
+        if kind == ToolKind::Tap {
+            return Some("a tap only taps; use a drilling operation that taps");
+        }
+        // Its width at its tip and its point: neither is a side.
+        if matches!(kind, ToolKind::SpotDrill | ToolKind::Countersink)
+            && !matches!(
+                self.strategy,
+                StrategySpec::Chamfer { .. } | StrategySpec::Engrave { .. }
+            )
+        {
+            return Some(
+                "a spot drill or countersink drills, spots and chamfers; use a drilling, \
+                 chamfer or engraving operation",
+            );
+        }
+        // A head under an overhang, at one height: a 2D profile or a slot,
+        // straight to its depth, entered outside the material.
+        if kind.undercuts() {
+            if !matches!(
+                self.strategy,
+                StrategySpec::Profile { .. } | StrategySpec::Slot { .. }
+            ) {
+                return Some(
+                    "a lollipop or slot cutter undercuts at one height: use it in a 2D \
+                 profile or a slot",
+                );
+            }
+            if self.stepdown().is_some() {
+                return Some(
+                    "a lollipop or slot cutter cuts at one height: turn multiple depths off \
+                 and set the bottom where it cuts",
+                );
+            }
+        }
+        if kind == ToolKind::FaceMill
+            && !matches!(
+                self.strategy,
+                StrategySpec::Face { .. } | StrategySpec::Flat { .. }
+            )
+        {
+            return Some("a face mill faces: use it in facing or flat finishing");
+        }
+        // Its width changes with depth: a finish in 3D, where the drop
+        // finds where its flank touches, or an engraving.
+        if kind == ToolKind::Tapered
+            && !matches!(
+                self.strategy,
+                StrategySpec::Parallel { .. }
+                    | StrategySpec::Scallop { .. }
+                    | StrategySpec::Contour { .. }
+                    | StrategySpec::Spiral { .. }
+                    | StrategySpec::Radial { .. }
+                    | StrategySpec::MorphedSpiral { .. }
+                    | StrategySpec::Engrave { .. }
+            )
+        {
+            return Some(
+                "a tapered mill finishes in 3D, or engraves: its width changes with depth",
+            );
+        }
+        let round_tip = kind == ToolKind::Cone && tool.corner > 0.0;
+        // Its depth is the V's, from how wide the area is: no other shape
+        // cuts its width to its depth.
+        if matches!(self.strategy, StrategySpec::VCarve { .. })
+            && (kind != ToolKind::Cone || round_tip)
+        {
+            return Some(
+                "V-carving cuts with a sharp V-bit: its width follows how deep its V goes",
+            );
+        }
+        // A slot is as wide as the tool, all the way down.
+        if matches!(self.strategy, StrategySpec::Slot { .. }) && kind.is_cone() {
+            return Some(
+                "a slot is cut with an end mill its width: a V-bit's width changes with \
+                 depth; engrave with it instead",
+            );
+        }
+        // The chamfer is the cone's flank: a cone with flank enough for it.
+        if let StrategySpec::Chamfer {
+            width, tip_offset, ..
+        } = self.strategy
+        {
+            if !kind.is_cone() || round_tip {
+                return Some(
+                    "deburr with a chamfer mill or a V-bit, a spot drill or a countersink: \
+                     the chamfer is its flank",
+                );
+            }
+            let angle = tool.point_angle();
+            let half = (angle.unwrap_or(f64::NAN) / 2.0).to_radians();
+            let place = crate::strategy::chamfer::Place::new(
+                width,
+                tip_offset,
+                half,
+                tool.tip_diameter / 2.0,
+                tool.diameter / 2.0,
+            );
+            if place.is_err() {
+                return Some(
+                    "the chamfer needs more of the cone than the tool has: make it narrower, \
+                     the tip offset less, or take a wider tool",
+                );
+            }
+        }
+        if matches!(self.strategy, StrategySpec::Face { .. })
+            && tool.flat_diameter().is_none()
+            && !kind.is_cone()
+        {
+            return Some(
+                "facing needs a flat end: use a face mill, or a flat or bull-nose end mill",
+            );
+        }
+        None
+    }
+
+    /// Why drilling, tapping at `tap` (its pitch and hand) or spotting to
+    /// `spot` across, cannot be done with `tool`, if it cannot.
+    fn cannot_drill(
+        &self,
+        tool: &ToolSpec,
+        tap: Option<(f64, crate::job::ThreadHand)>,
+        spot: Option<f64>,
+    ) -> Option<&'static str> {
+        let kind = tool.kind;
+        if let Some((pitch, hand)) = tap {
+            return match kind {
+                ToolKind::Tap if tool.pitch.is_some_and(|p| (p - pitch).abs() > 1e-6) => {
+                    Some("the tap's pitch is not the one the operation taps at")
+                }
+                ToolKind::Tap if tool.hand != hand => {
+                    Some("the tap's thread turns the other way from the one the operation taps")
+                }
+                // Documents from before taps were a kind tapped with a flat
+                // end mill or a drill its size; they still do, and the run
+                // says to make it a tap.
+                ToolKind::Tap | ToolKind::Flat | ToolKind::Drill => None,
+                _ => Some("tap with a tap"),
+            };
+        }
+        if kind == ToolKind::Tap {
+            return Some("a tap only taps: set the drilling to tap at its pitch");
+        }
+        if let Some(d) = spot {
+            return tool.spot_depth(d).is_none().then_some(
+                "spot to a diameter with a spot drill, countersink or drill whose point is \
+                 that wide",
+            );
+        }
+        (!matches!(
+            kind,
+            ToolKind::Drill | ToolKind::Flat | ToolKind::SpotDrill | ToolKind::Countersink
+        ))
+        .then_some("drill holes with a drill, a spot drill, a countersink, or a flat end mill that plunges")
     }
 
     /// Copy the values `preset` has into this operation, leaving the rest, and

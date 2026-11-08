@@ -81,7 +81,7 @@ pub(crate) fn chamfer_curves(
     else {
         return Ok((Vec::new(), Place::default(), Centres::default()));
     };
-    let half = (spec.angle.unwrap_or(f64::NAN) / 2.0).to_radians();
+    let half = (spec.point_angle().unwrap_or(f64::NAN) / 2.0).to_radians();
     let place = Place::new(
         width,
         tip_offset,

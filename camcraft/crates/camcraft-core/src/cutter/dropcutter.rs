@@ -28,7 +28,7 @@ use camcraft_geom::bvh::MeshBvh;
 use camcraft_geom::mesh::TriMesh;
 use glam::{DVec2, DVec3, dvec2, dvec3};
 
-use crate::cutter::tool::{Ball, Bullnose, Cone, Cutter, Flat, ToolProfile};
+use crate::cutter::tool::{Ball, Bullnose, Cone, Cutter, Flat, Tapered, ToolProfile, Undercut};
 
 /// Triangles smaller than this in squared normal length are treated as degenerate
 /// and contribute only through their vertices.
@@ -621,11 +621,79 @@ impl DropTest for Cone {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Tapered end: tapered and tapered ball mills, round-tipped V-bits, face mills
+// ---------------------------------------------------------------------------
+
+impl DropTest for Tapered {
+    /// As the cone's: the surface `h(d)` is convex (flat, then a round corner,
+    /// then a straight flank its slope where they meet), so a vertex is
+    /// touched at `pz - h(d)`, an edge by the shared concave search, and a
+    /// facet rising at slope `s` where the profile's slope is `s`: on the
+    /// corner for a plane shallower than the flank, at the full radius for
+    /// one steeper. Both are tried where they land inside the triangle; the
+    /// edges and the rim cover the rest.
+    fn drop_triangle(&self, x: f64, y: f64, tri: &[DVec3; 3]) -> Option<f64> {
+        let reach = self.max_radius();
+        let centre = dvec2(x, y);
+        let contact = |pz: f64, d: f64| self.height_at(d).map(|h| pz - h);
+        let mut best: Option<f64> = None;
+
+        for v in tri {
+            if let Some(z) = contact(v.z, (v.truncate() - centre).length()) {
+                raise(&mut best, z);
+            }
+        }
+
+        if let Some(n) = normal(tri)
+            && n.z.abs() > 0.0
+        {
+            let grad = dvec2(-n.x / n.z, -n.y / n.z);
+            let slope = grad.length();
+            let dir = if grad.length_squared() > DEGENERATE {
+                grad / slope
+            } else {
+                DVec2::ZERO // Horizontal: every direction is as high.
+            };
+            for r in [self.touches_slope(slope), reach] {
+                let at = centre + dir * r;
+                let z = plane_z(n, tri[0], at.x, at.y);
+                if point_in_triangle(dvec3(at.x, at.y, z), tri, n)
+                    && let Some(tz) = contact(z, r)
+                {
+                    raise(&mut best, tz);
+                }
+            }
+        }
+
+        for (p0, p1) in edges(tri) {
+            if let Some(z) = edge_contact(p0, p1, centre, reach, contact) {
+                raise(&mut best, z);
+            }
+        }
+        best
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Undercutting heads: slot cutters and lollipops
+// ---------------------------------------------------------------------------
+
+impl DropTest for Undercut {
+    /// Dropped from above, a head meets the part with its underside first:
+    /// what is above its widest only goes away from what is below it.
+    fn drop_triangle(&self, x: f64, y: f64, tri: &[DVec3; 3]) -> Option<f64> {
+        self.head().drop_triangle(x, y, tri)
+    }
+}
+
 impl DropTest for Cutter {
     fn drop_triangle(&self, x: f64, y: f64, tri: &[DVec3; 3]) -> Option<f64> {
         match self {
             Cutter::Bullnose(t) => t.drop_triangle(x, y, tri),
             Cutter::Cone(t) => t.drop_triangle(x, y, tri),
+            Cutter::Tapered(t) => t.drop_triangle(x, y, tri),
+            Cutter::Undercut(t) => t.drop_triangle(x, y, tri),
         }
     }
 }

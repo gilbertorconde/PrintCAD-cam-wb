@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use camcraft_core::job::{Holder, HolderSegment, Preset, ToolKind, ToolSpec};
+use camcraft_core::job::{Holder, HolderSegment, Preset, ThreadHand, ToolKind, ToolSpec};
 use camcraft_post::profile::Profile;
 use camcraft_session::library::{fusion_csv, fusion_json, system};
 use printcad_bench_sdk::api::*;
@@ -136,14 +136,27 @@ pub fn add_post(posts: &mut BTreeMap<String, String>, text: &str) -> Result<Stri
 }
 
 /// The tool kinds, as the editor lists them.
-const KINDS: [(ToolKind, &str); 7] = [
+const KINDS: [(ToolKind, &str); 14] = [
     (ToolKind::Flat, "Flat end mill"),
     (ToolKind::Ball, "Ball end mill"),
     (ToolKind::Bullnose, "Bull nose end mill"),
-    (ToolKind::Cone, "V-bit or chamfer mill"),
+    (ToolKind::Tapered, "Tapered (or tapered ball) end mill"),
+    (ToolKind::FaceMill, "Face mill"),
+    (ToolKind::Lollipop, "Lollipop (undercut)"),
+    (ToolKind::SlotCutter, "Slot (key) cutter"),
+    (ToolKind::Cone, "V-bit, chamfer mill or engraving tool"),
+    (ToolKind::SpotDrill, "Spot or centre drill"),
+    (ToolKind::Countersink, "Countersink"),
     (ToolKind::Drill, "Drill"),
+    (ToolKind::Tap, "Tap"),
     (ToolKind::ThreadMill, "Thread mill"),
     (ToolKind::Probe, "Touch probe (its ball's diameter)"),
+];
+
+/// The thread hands, as the editor lists them.
+const HANDS: [(ThreadHand, &str); 2] = [
+    (ThreadHand::Right, "Right-hand"),
+    (ThreadHand::Left, "Left-hand"),
 ];
 
 /// A number of a tool, by the editor's field, for showing: zero for none.
@@ -155,6 +168,10 @@ fn field(t: &ToolSpec, id: &str) -> Option<f64> {
         "angle" => opt(t.angle),
         "tip_diameter" => t.tip_diameter,
         "tip_length" => t.tip_length,
+        "taper_angle" => opt(t.taper_angle),
+        "neck_diameter" => opt(t.neck_diameter),
+        "pitch" => opt(t.pitch),
+        "chamfer_length" => opt(t.chamfer_length),
         "pitch_fine" => t.pitch_range.map_or(0.0, |[f, _]| f),
         "pitch_coarse" => t.pitch_range.map_or(0.0, |[_, c]| c),
         "teeth" => f64::from(t.teeth.unwrap_or(0)),
@@ -184,6 +201,10 @@ fn set_field(t: &mut ToolSpec, id: &str, v: f64) -> bool {
         "angle" if v < 180.0 => t.angle = opt,
         "tip_diameter" if v < t.diameter => t.tip_diameter = v,
         "tip_length" => t.tip_length = v,
+        "taper_angle" if v < 90.0 => t.taper_angle = opt,
+        "neck_diameter" if v < t.diameter => t.neck_diameter = opt,
+        "pitch" => t.pitch = opt,
+        "chamfer_length" => t.chamfer_length = opt,
         // A range from one pitch, or to one: the other end follows it where
         // it would be passed.
         "pitch_fine" => {
@@ -214,36 +235,77 @@ fn set_field(t: &mut ToolSpec, id: &str, v: f64) -> bool {
 
 /// The editor's fields for a tool of `kind`, with their labels.
 fn fields(kind: ToolKind) -> Vec<(&'static str, &'static str, Dim, usize)> {
-    let mut out = vec![("diameter", "Diameter", Dim::Length, 3)];
-    if kind == ToolKind::Bullnose {
-        out.push(("corner", "Corner radius", Dim::Length, 3));
-    }
-    if matches!(kind, ToolKind::Cone | ToolKind::Drill) {
-        out.push(("angle", "Included angle (0: none)", Dim::Angle, 1));
-    }
-    if kind == ToolKind::ThreadMill {
-        out.extend([
+    let diameter = match kind {
+        ToolKind::Tapered => "Diameter at the tip",
+        ToolKind::FaceMill => "Diameter at the face",
+        ToolKind::Lollipop | ToolKind::SlotCutter => "Head diameter",
+        ToolKind::Tap => "Thread diameter",
+        _ => "Diameter",
+    };
+    let mut out = vec![("diameter", diameter, Dim::Length, 3)];
+    match kind {
+        ToolKind::Bullnose => out.push(("corner", "Corner radius", Dim::Length, 3)),
+        ToolKind::Tapered => out.extend([
+            ("taper_angle", "Taper angle, a side", Dim::Angle, 2),
+            (
+                "corner",
+                "Corner radius (half the diameter: a ball)",
+                Dim::Length,
+                3,
+            ),
+        ]),
+        ToolKind::FaceMill => out.extend([
+            (
+                "taper_angle",
+                "Lead angle from the axis (0: square)",
+                Dim::Angle,
+                1,
+            ),
+            ("corner", "Insert corner radius", Dim::Length, 3),
+        ]),
+        ToolKind::Lollipop | ToolKind::SlotCutter => {
+            out.push(("neck_diameter", "Neck diameter", Dim::Length, 3));
+        }
+        ToolKind::Cone => out.extend([
+            ("angle", "Included angle (0: none)", Dim::Angle, 1),
+            ("tip_diameter", "Tip diameter", Dim::Length, 3),
+            ("corner", "Tip radius (engraving)", Dim::Length, 3),
+        ]),
+        ToolKind::SpotDrill | ToolKind::Countersink => out.extend([
+            ("angle", "Point angle (0: 90°)", Dim::Angle, 1),
+            ("tip_diameter", "Tip diameter", Dim::Length, 3),
+        ]),
+        ToolKind::Drill => out.push(("angle", "Point angle (0: 118°)", Dim::Angle, 1)),
+        ToolKind::Tap => out.extend([
+            ("pitch", "Thread pitch", Dim::Length, 3),
+            (
+                "chamfer_length",
+                "Chamfer length (0: not given)",
+                Dim::Length,
+                2,
+            ),
+        ]),
+        ToolKind::ThreadMill => out.extend([
             ("angle", "Thread angle (0: 60°)", Dim::Angle, 1),
             ("tip_length", "Tip, below the teeth", Dim::Length, 3),
             ("pitch_fine", "Finest pitch (0: any)", Dim::Length, 3),
             ("pitch_coarse", "Coarsest pitch (0: any)", Dim::Length, 3),
             ("teeth", "Rows of teeth (0: single form)", Dim::Number, 0),
-        ]);
-    }
-    if kind == ToolKind::Cone {
-        out.push(("tip_diameter", "Tip diameter", Dim::Length, 3));
+        ]),
+        ToolKind::Flat | ToolKind::Ball | ToolKind::Probe => {}
     }
     // A probe has no flutes.
     if kind != ToolKind::Probe {
         out.push(("flutes", "Flutes (0: not given)", Dim::Number, 0));
     }
+    let flutes = match kind {
+        ToolKind::SlotCutter => "Cutting height",
+        ToolKind::FaceMill => "Cutting height (0: not given)",
+        ToolKind::Tapered => "Flute length, up which it tapers",
+        _ => "Flute length (0: not given)",
+    };
     out.extend([
-        (
-            "flute_length",
-            "Flute length (0: not given)",
-            Dim::Length,
-            2,
-        ),
+        ("flute_length", flutes, Dim::Length, 2),
         (
             "shoulder_length",
             "Shoulder length (0: not given)",
@@ -310,6 +372,22 @@ pub fn tool_editor(name: &str, t: &ToolSpec, chosen_preset: Option<usize>) -> Wi
             dim,
             decimals,
         ));
+    }
+    if t.kind == ToolKind::Tap {
+        rows.push(choice(
+            "tool/hand",
+            "Thread",
+            HANDS.iter().map(|(_, l)| l.to_string()).collect(),
+            HANDS.iter().position(|(h, _)| *h == t.hand).unwrap_or(0),
+        ));
+    }
+    // What its fields leave wrong, where the editor cannot refuse it: a
+    // tapered mill's flutes, a slot cutter's neck.
+    if let Some(e) = t.check().first() {
+        rows.push(Widget::Text {
+            text: format!("Not yet a tool: {e}."),
+            mono: false,
+        });
     }
     rows.extend(holder_rows(t));
     rows.push(Widget::TextField {
@@ -512,8 +590,22 @@ pub fn tool_event(
         PanelEvent::Choice { id, index } if id == "tool/kind" => {
             if let Some((k, _)) = KINDS.get(*index) {
                 tool.kind = *k;
-                if *k != ToolKind::Bullnose {
+                if !matches!(
+                    k,
+                    ToolKind::Bullnose | ToolKind::Tapered | ToolKind::FaceMill | ToolKind::Cone
+                ) {
                     tool.corner = 0.0;
+                }
+                if !matches!(k, ToolKind::Tapered | ToolKind::FaceMill) {
+                    tool.taper_angle = None;
+                }
+                if !k.undercuts() {
+                    tool.neck_diameter = None;
+                }
+                if *k != ToolKind::Tap {
+                    tool.pitch = None;
+                    tool.chamfer_length = None;
+                    tool.hand = ThreadHand::Right;
                 }
                 // A thread mill's own, which no other tool has.
                 if *k != ToolKind::ThreadMill {
@@ -521,6 +613,11 @@ pub fn tool_event(
                     tool.pitch_range = None;
                     tool.teeth = None;
                 }
+            }
+        }
+        PanelEvent::Choice { id, index } if id == "tool/hand" => {
+            if let Some((h, _)) = HANDS.get(*index) {
+                tool.hand = *h;
             }
         }
         PanelEvent::Text { id, value } if id == "tool/comment" => tool.comment = value.clone(),
@@ -647,6 +744,10 @@ pub fn files_groups(posts: &BTreeMap<String, String>, chosen_post: Option<usize>
 mod tests {
     use super::*;
 
+    fn kind_index(kind: ToolKind) -> usize {
+        KINDS.iter().position(|(k, _)| *k == kind).unwrap()
+    }
+
     fn library() -> BTreeMap<String, ToolSpec> {
         BTreeMap::from([(
             "Flat 6".to_string(),
@@ -669,7 +770,7 @@ mod tests {
         };
         send(PanelEvent::Choice {
             id: "tool/kind".into(),
-            index: 2,
+            index: kind_index(ToolKind::Bullnose),
         });
         send(PanelEvent::Number {
             id: "tool/corner".into(),
@@ -721,7 +822,7 @@ mod tests {
             &mut tools,
             PanelEvent::Choice {
                 id: "tool/kind".into(),
-                index: 5,
+                index: kind_index(ToolKind::ThreadMill),
             },
         );
         for (field, value) in [
@@ -755,6 +856,110 @@ mod tests {
         );
         let t = &tools["Flat 6"];
         assert_eq!((t.tip_length, t.pitch_range, t.teeth), (0.0, None, None));
+    }
+
+    /// The kinds past the end mills each have their own fields in the
+    /// editor, which reach the tool; made another kind, they go.
+    #[test]
+    fn each_kind_is_edited_with_its_own_fields() {
+        let mut tools = library();
+        let (mut chosen, mut preset) = (Some(0), None);
+        let mut send = |tools: &mut BTreeMap<String, ToolSpec>, e: PanelEvent| {
+            assert!(tool_event(tools, &mut chosen, &mut preset, &e), "{e:?}");
+        };
+        let kind = |k| PanelEvent::Choice {
+            id: "tool/kind".into(),
+            index: kind_index(k),
+        };
+        let number = |f: &str, value| PanelEvent::Number {
+            id: format!("tool/{f}"),
+            value,
+        };
+        let ids = |k| fields(k).iter().map(|f| f.0).collect::<Vec<_>>();
+        // A tapered ball: 1 mm at its tip, 3° a side up 20 mm of flutes.
+        send(&mut tools, kind(ToolKind::Tapered));
+        for (f, v) in [
+            ("diameter", 1.0),
+            ("taper_angle", 3.0),
+            ("corner", 0.5),
+            ("flute_length", 20.0),
+        ] {
+            send(&mut tools, number(f, v));
+        }
+        let t = &tools["Flat 6"];
+        assert_eq!(
+            (t.kind, t.taper_angle, t.corner),
+            (ToolKind::Tapered, Some(3.0), 0.5)
+        );
+        assert!(t.check().is_empty(), "{:?}", t.check());
+        assert!(ids(ToolKind::Tapered).contains(&"taper_angle"));
+        // A face mill keeps its corner and its lead.
+        send(&mut tools, kind(ToolKind::FaceMill));
+        send(&mut tools, number("diameter", 50.0));
+        send(&mut tools, number("taper_angle", 45.0));
+        send(&mut tools, number("flute_length", 6.0));
+        let t = &tools["Flat 6"];
+        assert_eq!(
+            (t.kind, t.taper_angle, t.corner),
+            (ToolKind::FaceMill, Some(45.0), 0.5)
+        );
+        assert!(t.check().is_empty(), "{:?}", t.check());
+        // A slot cutter: no taper, its neck narrower than its head.
+        send(&mut tools, kind(ToolKind::SlotCutter));
+        send(&mut tools, number("neck_diameter", 60.0));
+        send(&mut tools, number("neck_diameter", 8.0));
+        let t = &tools["Flat 6"];
+        assert_eq!((t.taper_angle, t.corner), (None, 0.0));
+        assert_eq!(
+            t.neck_diameter,
+            Some(8.0),
+            "wider than the head does not take"
+        );
+        assert!(t.check().is_empty(), "{:?}", t.check());
+        assert!(ids(ToolKind::Lollipop).contains(&"neck_diameter"));
+        // A left-hand tap, its pitch and its chamfer.
+        send(&mut tools, kind(ToolKind::Tap));
+        send(&mut tools, number("diameter", 6.0));
+        send(&mut tools, number("pitch", 1.0));
+        send(&mut tools, number("chamfer_length", 2.0));
+        send(
+            &mut tools,
+            PanelEvent::Choice {
+                id: "tool/hand".into(),
+                index: 1,
+            },
+        );
+        let t = &tools["Flat 6"];
+        assert_eq!(t.neck_diameter, None);
+        assert_eq!(
+            (t.pitch, t.chamfer_length, t.hand),
+            (Some(1.0), Some(2.0), ThreadHand::Left)
+        );
+        assert!(t.check().is_empty(), "{:?}", t.check());
+        let editor = format!("{:?}", tool_editor("Flat 6", t, None));
+        assert!(
+            editor.contains("tool/hand") && editor.contains("Thread pitch"),
+            "{editor}"
+        );
+        // Its own go when it is made a spot drill, and the point is its.
+        send(&mut tools, kind(ToolKind::SpotDrill));
+        let t = &tools["Flat 6"];
+        assert_eq!(
+            (t.pitch, t.chamfer_length, t.hand),
+            (None, None, ThreadHand::Right)
+        );
+        assert!(ids(ToolKind::SpotDrill).contains(&"angle"));
+        // An engraving tool: a V-bit with a round tip.
+        send(&mut tools, kind(ToolKind::Cone));
+        send(&mut tools, number("angle", 30.0));
+        send(&mut tools, number("corner", 0.1));
+        let t = &tools["Flat 6"];
+        assert_eq!(t.corner, 0.1);
+        assert!(t.check().is_empty(), "{:?}", t.check());
+        // What is not yet a tool is said in the editor.
+        send(&mut tools, kind(ToolKind::Lollipop));
+        let editor = format!("{:?}", tool_editor("Flat 6", &tools["Flat 6"], None));
+        assert!(editor.contains("Not yet a tool"), "{editor}");
     }
 
     #[test]

@@ -1548,7 +1548,7 @@ impl Bench for Cam {
                              from the operations before it; rest_adjustment: mm, rest thinner \
                              than it left; probe_x_spacing, probe_y_spacing, probe_inset (mm), \
                              probe_feed (mm/min), probe_depth (mm below the top): a probe \
-                             grid's; outer_radius, peck, chip_break, dwell, pitch, max_depth, \
+                             grid's; outer_radius, peck, chip_break, dwell, pitch, spot, max_depth, \
                              finishing_stepover, finishing_feed, thread_diameter, \
                              probe_x_count, probe_y_count: {value, given}}",
                         ),
@@ -1703,7 +1703,10 @@ impl Bench for Cam {
                          cannot probe. A setup's probe_map then corrects every cut to them."
                             .into(),
                         "Drilling: peck backs out between pecks, and with chip_break only that \
-                         far (G73); pitch, mm a turn, taps each hole instead (hand = left for a \
+                         far (G73); spot, mm, drills each only as deep as leaves it that wide \
+                         at its top, with a spot drill's, countersink's or drill's point; \
+                         pitch, mm a turn, taps each hole instead, with a tap of that pitch \
+                         and hand (hand = left for a \
                          left-hand thread), fed at the pitch times the spindle's speed: posted \
                          only for a machine that taps: LinuxCNC (G33.1), Fanuc (M29, G84, G74), \
                          Haas and Centroid CNC12 (G84, G74), Heidenhain (cycle 207), or a post \

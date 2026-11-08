@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 
 use camcraft_core::job::{
-    Coolant, Preset, SpindleDirection, ToolKind, ToolMaterial, ToolSpec, free_preset_name,
+    Coolant, Preset, SpindleDirection, ToolMaterial, ToolSpec, free_preset_name,
 };
 
 use super::{Folder, MM_PER_INCH, free_name};
@@ -230,46 +230,16 @@ impl Row<'_> {
 
     /// The tool, without presets.
     fn tool(&self) -> Result<ToolSpec, String> {
-        let kind_text = self.text("tool_type").unwrap_or_default();
-        let kind = match kind_text.to_ascii_lowercase().as_str() {
-            "flat end mill" => ToolKind::Flat,
-            "ball end mill" => ToolKind::Ball,
-            "bull nose end mill" => ToolKind::Bullnose,
-            "chamfer mill" | "spot drill" => ToolKind::Cone,
-            "drill" => ToolKind::Drill,
-            "thread mill" => ToolKind::ThreadMill,
-            "probe" => ToolKind::Probe,
-            "" => return Err("no tool type".into()),
-            other => return Err(format!("'{other}' tools are not supported yet")),
-        };
+        let kind_text = self
+            .text("tool_type")
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let kind = super::fusion_kind(&kind_text)?;
         let diameter = self.scaled("tool_diameter").ok_or("no diameter")?;
         let rpm = self.whole("tool_spindleSpeed").unwrap_or(18000);
-        Ok(ToolSpec {
+        let mut tool = ToolSpec {
             kind,
             diameter,
-            corner: match kind {
-                ToolKind::Bullnose => self.scaled("tool_cornerRadius").unwrap_or(0.0),
-                _ => 0.0,
-            },
-            // A chamfer mill's taper is measured from the axis; a spot drill's tip
-            // angle is the whole point.
-            angle: match kind_text.to_ascii_lowercase().as_str() {
-                "chamfer mill" => self.number("tool_taperAngle").map(|a| 2.0 * a),
-                "spot drill" | "drill" => self.number("tool_tipAngle"),
-                "thread mill" => self.number("tool_threadProfileAngle"),
-                _ => None,
-            },
-            tip_diameter: match kind {
-                ToolKind::Cone => self.scaled("tool_tipDiameter").unwrap_or(0.0),
-                _ => 0.0,
-            },
-            tip_length: 0.0,
-            // Fusion's thread mill has the one pitch it cuts.
-            pitch_range: match kind {
-                ToolKind::ThreadMill => self.scaled("tool_threadPitch").map(|p| [p, p]),
-                _ => None,
-            },
-            teeth: None,
             number: self.whole("tool_number").unwrap_or(1),
             rpm,
             comment: self.text("tool_description").unwrap_or_default(),
@@ -297,8 +267,17 @@ impl Row<'_> {
                 Some(c) if c.contains("mist") => Coolant::Mist,
                 _ => Coolant::Off,
             },
-            presets: Vec::new(),
-        })
+            ..ToolSpec::default()
+        };
+        let first =
+            |keys: &[&str], get: &dyn Fn(&str) -> Option<f64>| keys.iter().find_map(|k| get(k));
+        super::fusion_shape(
+            &mut tool,
+            &kind_text,
+            &|keys| first(keys, &|k| self.scaled(k)),
+            &|keys| first(keys, &|k| self.number(k)),
+        );
+        Ok(tool)
     }
 
     /// The row's preset; `index` names one Fusion left unnamed.

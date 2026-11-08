@@ -54,6 +54,10 @@ pub struct PassesData {
     pub pitch: Opt,
     #[serde(default)]
     pub hand: ThreadHand,
+    /// Spot each hole to this diameter at its top, rather than drill it to
+    /// its bottom: a spot drill's, a countersink's or a drill's point.
+    #[serde(default)]
+    pub spot: Opt,
     /// How deep an engraving or a slot cuts below its top.
     #[serde(default = "half")]
     pub depth: f64,
@@ -151,6 +155,7 @@ impl Default for PassesData {
             dwell: Opt::default(),
             chip_break: Opt::default(),
             pitch: Opt::default(),
+            spot: Opt::default(),
             hand: ThreadHand::default(),
             depth: half(),
             chamfer_width: half(),
@@ -347,12 +352,14 @@ impl PassesData {
                 chip_break,
                 pitch,
                 hand,
+                spot,
             } => {
                 // Tapping, the others are not given, and keep what they were.
                 if pitch.is_none() {
                     self.peck = Opt::of(peck);
                     self.dwell = Opt::of(dwell);
                     self.chip_break = Opt::of(chip_break);
+                    self.spot = Opt::of(spot);
                 }
                 self.pitch = Opt::of(pitch);
                 self.hand = hand;
@@ -489,10 +496,12 @@ impl PassesData {
                 chip_break,
                 pitch,
                 hand,
+                spot,
             } => {
                 // A tap neither pecks nor pauses; a chip is broken between pecks.
                 let tapping = self.pitch.given;
                 let drilling = |v: Opt| v.get().filter(|_| !tapping);
+                *spot = drilling(self.spot);
                 *peck = drilling(self.peck);
                 *dwell = drilling(self.dwell);
                 *chip_break = drilling(self.chip_break).filter(|_| self.peck.given);
@@ -676,6 +685,12 @@ impl PassesData {
                 Dim::Length,
             ),
             (drill && self.dwell.given, "dwell", "Dwell, s", Dim::Number),
+            (
+                drill && self.spot.given,
+                "spot",
+                "Spot diameter",
+                Dim::Length,
+            ),
             (
                 matches!(s, StrategySpec::VCarve { .. }) && self.max_depth.given,
                 "max_depth",
@@ -1201,10 +1216,12 @@ fn chamfer_note(p: &PassesData, tool: Option<&ToolSpec>) -> String {
     let what = "Each edge is chamfered from its own height, the tool's centre beside it \
                 away from the material, as the part either side says, and its tip below \
                 the chamfer by the tip offset, so the flank cuts it.";
-    let Some(t) = tool.filter(|t| t.kind == ToolKind::Cone) else {
-        return format!("{what} It cuts with a chamfer mill or a V-bit.");
+    let Some(t) = tool.filter(|t| t.kind.is_cone() && t.corner == 0.0) else {
+        return format!(
+            "{what} It cuts with a chamfer mill or a V-bit, a spot drill or a countersink."
+        );
     };
-    let half = (t.angle.unwrap_or(f64::NAN) / 2.0).to_radians();
+    let half = (t.point_angle().unwrap_or(f64::NAN) / 2.0).to_radians();
     match camcraft_core::strategy::chamfer::Place::new(
         p.chamfer_width,
         p.tip_offset,
@@ -1337,6 +1354,30 @@ fn drill_rows(
             Dim::Number,
             feature,
         );
+        optional_row(
+            rows,
+            "passes",
+            "spot",
+            "Spot to a diameter",
+            "drilled to its bottom",
+            p.spot,
+            Dim::Length,
+            feature,
+        );
+        if let (true, Some(t)) = (p.spot.given, tool) {
+            rows.push(Widget::Text {
+                text: match t.spot_depth(p.spot.value) {
+                    Some(depth) => format!(
+                        "Each hole {:.3} mm deep, its point {} mm across at the top.",
+                        depth, p.spot.value
+                    ),
+                    None => "The tool's point is not that wide: spot with a spot drill, a \
+                             countersink or a drill wider than the spot."
+                        .into(),
+                },
+                mono: false,
+            });
+        }
     }
     optional_row(
         rows,
@@ -1516,7 +1557,11 @@ fn start(field: &str, data: &OperationData, tool: Option<&ToolSpec>) -> Option<f
         "peck" => 2.0,
         "chip_break" => 0.5,
         "dwell" => 0.5,
-        "pitch" => coarse_pitch(d),
+        // A tap's own, which it must tap at.
+        "pitch" => tool
+            .and_then(|t| t.pitch)
+            .unwrap_or_else(|| coarse_pitch(d)),
+        "spot" => (d / 2.0).max(1.0),
         "finishing_stepover" => 0.1 * d,
         "finishing_feed" => data.feed,
         "max_depth" => 1.0,
@@ -1913,6 +1958,7 @@ mod tests {
                 dwell: None,
                 pitch: Some(1.25),
                 hand: ThreadHand::Left,
+                spot: None,
             }
         ));
         let back = OperationData::from(&drill.to_value()).unwrap();

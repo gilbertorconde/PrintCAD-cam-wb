@@ -164,16 +164,25 @@ impl EffectiveTool {
     }
 
     /// Dilate any cutter by `stock`. A cone grown by a ball is no longer a cone,
-    /// so a cone is taken only as it is, with no stock to leave.
+    /// so a cone is taken only as it is, with no stock to leave. A tapered end
+    /// grows as a bullnose does, its flank moving out with its corner; an
+    /// undercutting head grows as its own end does.
     pub fn of(tool: &Cutter, stock: Allowance) -> Result<Self, ToolError> {
         match tool {
             Cutter::Bullnose(b) => Self::new(b, stock),
-            Cutter::Cone(_) if stock.is_none() => Ok(Self {
+            _ if stock.is_none() => Ok(Self {
                 shape: *tool,
                 base: *tool,
                 allowance: stock,
             }),
-            Cutter::Cone(_) => Err(ToolError::ConeStock),
+            _ => match tool.grown(stock.radial, stock.axial) {
+                Some(shape) => Ok(Self {
+                    shape: shape?,
+                    base: *tool,
+                    allowance: stock,
+                }),
+                None => Err(ToolError::ConeStock),
+            },
         }
     }
 

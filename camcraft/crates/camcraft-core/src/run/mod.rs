@@ -444,8 +444,17 @@ fn cut_past(
         let leave = op.stock_to_leave();
         let (radial, axial) = (-leave.radial.min(0.0), -leave.axial.min(0.0));
         let uses = op.strategy.uses();
-        // A thread's groove, past the wall it is cut in, is meant too.
-        let into = uses.traces || uses.carves || matches!(op.strategy, StrategySpec::Thread { .. });
+        // A thread's groove, past the wall it is cut in, is meant too: a
+        // milled one's, or a tap's, wider than the hole it is tapped in;
+        // and a spot's or a countersink's seat, wider than its hole.
+        let into = uses.traces
+            || uses.carves
+            || matches!(
+                op.strategy,
+                StrategySpec::Thread { .. }
+                    | StrategySpec::Drill { pitch: Some(_), .. }
+                    | StrategySpec::Drill { spot: Some(_), .. }
+            );
         let reliefs = operations.get(i).map_or(&[][..], |r| r.reliefs.as_slice());
         if !op.enabled || (radial == 0.0 && axial == 0.0 && !into && reliefs.is_empty()) {
             continue;
