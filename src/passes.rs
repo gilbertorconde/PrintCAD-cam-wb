@@ -131,6 +131,10 @@ pub struct PassesData {
     /// holder would meet the part: Fusion's Use Shank and Holder.
     #[serde(default)]
     pub use_holder: bool,
+    /// Whether a 3D finish leaves out the cuts where the tool would meet one
+    /// of its setup's fixtures.
+    #[serde(default)]
+    pub avoid_fixtures: bool,
 }
 
 impl Default for PassesData {
@@ -189,6 +193,7 @@ impl Default for PassesData {
             relief_style: ReliefStyle::default(),
             relief_angle: obtuse(),
             use_holder: false,
+            avoid_fixtures: false,
         };
         for name in [
             "radial",
@@ -269,6 +274,7 @@ impl PassesData {
         let p = &op.passes;
         out.max_cut_step = p.max_cut_step;
         out.use_holder = p.use_holder;
+        out.avoid_fixtures = p.avoid_fixtures;
         if let Some(t) = p.tabs {
             out.tabs = true;
             out.tab_shape = t.shape;
@@ -557,6 +563,7 @@ impl PassesData {
         let p = &mut op.passes;
         p.max_cut_step = self.max_cut_step;
         p.use_holder = finish && self.use_holder;
+        p.avoid_fixtures = finish && self.avoid_fixtures;
         p.tabs = (uses.tabs && self.tabs).then_some(Tabs {
             shape: self.tab_shape,
             width: self.tab_width,
@@ -1093,6 +1100,11 @@ pub fn strategy_rows(data: &OperationData, tool: Option<&ToolSpec>, feature: &st
             id: "passes/use_holder".into(),
             label: "Use shank and holder: leave out cuts where they meet the part".into(),
             on: p.use_holder,
+        });
+        rows.push(Widget::Toggle {
+            id: "passes/avoid_fixtures".into(),
+            label: "Avoid fixtures: leave out cuts where the tool meets one".into(),
+            on: p.avoid_fixtures,
         });
     }
     if let StrategySpec::Probe { .. } = s {

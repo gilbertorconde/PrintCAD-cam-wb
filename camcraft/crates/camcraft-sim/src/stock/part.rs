@@ -62,7 +62,7 @@ impl PartSurface {
             f64::NAN,
         )?;
         let rows = rows_of(mesh, grid, window);
-        rasterise(&mut field, mesh, &rows, grid, window);
+        rasterise(&mut field, mesh, &rows, grid, window, false);
         Ok(Self {
             field,
             at: (window.x0, window.y0),
@@ -340,9 +340,41 @@ fn rows_of(mesh: &TriMesh, (origin, pitch, _, _): Grid, window: CellRect) -> Vec
     rows
 }
 
+/// The highest and the lowest `mesh` comes over each column of the grid laid
+/// over `[min, max]` at `pitch` (as [`HeightMap::covering`] lays one), in the
+/// window of it the mesh covers, whose first cell is the rectangle's: unset
+/// where it comes nowhere.
+pub(super) fn extremes(
+    mesh: &TriMesh,
+    min: DVec2,
+    max: DVec2,
+    pitch: f64,
+) -> Result<(HeightMap, HeightMap, CellRect), StockError> {
+    if !pitch.is_finite() || pitch <= 0.0 {
+        return Err(HeightMapError::BadPitch(pitch).into());
+    }
+    let (nx, ny) = HeightMap::covering_size(min, max, pitch);
+    let grid = (min, pitch, nx, ny);
+    let window = window(mesh, grid);
+    let unset = || {
+        HeightMap::filled(
+            min + dvec2(f64::from(window.x0) * pitch, f64::from(window.y0) * pitch),
+            pitch,
+            window.width(),
+            window.height(),
+            f64::NAN,
+        )
+    };
+    let (mut high, mut low) = (unset()?, unset()?);
+    let rows = rows_of(mesh, grid, window);
+    rasterise(&mut high, mesh, &rows, grid, window, false);
+    rasterise(&mut low, mesh, &rows, grid, window, true);
+    Ok((high, low, window))
+}
+
 /// Set each column of `field`, the window of the grid, to the highest of the
-/// triangles covering it, `rows` being each row's triangles, each column at the
-/// grid's own position for it.
+/// triangles covering it (with `lowest`, the lowest), `rows` being each row's
+/// triangles, each column at the grid's own position for it.
 ///
 /// Parallel over rows, each writing only its own slice, so the result does not
 /// depend on thread count; and the maximum does not depend on the order it is
@@ -353,6 +385,7 @@ fn rasterise(
     rows: &[Vec<usize>],
     (origin, pitch, _, _): Grid,
     window: CellRect,
+    lowest: bool,
 ) {
     let CellRect { x0, y0, x1, y1 } = window;
     field
@@ -382,7 +415,7 @@ fn rasterise(
                         continue;
                     };
                     let z = narrow(z);
-                    if cell.is_nan() || z > *cell {
+                    if cell.is_nan() || (if lowest { z < *cell } else { z > *cell }) {
                         *cell = z;
                     }
                 }

@@ -189,6 +189,15 @@ pub(super) fn trim(
         }
         found.iter().any(Option::is_some)
     };
+    leave_out(raw, |from, m| m.role == MoveRole::Cut && hits(from, m))
+}
+
+/// `raw` with every move `out` says to leave out (from where the tool is)
+/// left out, a link for the linker where the moves go on; how many were.
+pub(in crate::run) fn leave_out(
+    raw: &Toolpath,
+    mut out: impl FnMut(DVec3, &Move) -> bool,
+) -> Result<(Toolpath, u64), ToolpathError> {
     let mut kept: Vec<Move> = Vec::with_capacity(raw.len());
     let link = |kept: &mut Vec<Move>, m: Move| {
         // A link straight after another goes where the second does.
@@ -202,7 +211,7 @@ pub(super) fn trim(
     for m in raw.moves() {
         let from = at.unwrap_or(m.to);
         at = Some(m.to);
-        if m.role == MoveRole::Cut && hits(from, m) {
+        if out(from, m) {
             dropped += 1;
             gap = true;
             continue;

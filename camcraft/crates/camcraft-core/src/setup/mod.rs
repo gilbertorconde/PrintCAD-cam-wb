@@ -19,7 +19,9 @@
 //! A setup may carry on from an earlier one ([`Carried`]), as Fusion's take
 //! their stock from the setup before: its stock is then what that one left,
 //! the same material turned the way this one sees it, and its box the box
-//! round that.
+//! round that. Or its stock may be a solid of the job's own
+//! ([`StockSpec::Solid`]): its material, as the setup sees it, and its box
+//! the box round it.
 
 pub mod features;
 pub mod frame;
@@ -32,7 +34,7 @@ use camcraft_geom::contour::RegionError;
 use camcraft_geom::mesh::{Aabb, MeshError, TriMesh};
 use camcraft_geom::shadow::{Shadow, shadow_above};
 use camcraft_geom::topology::Body;
-use camcraft_sim::stock::{Axis as FrameAxis, Bar, Block, Carry, Stock};
+use camcraft_sim::stock::{Axis as FrameAxis, Bar, Block, Carry, Stock, StockError};
 use glam::{DAffine3, DMat3, DVec3};
 
 use crate::job::{BoxOf, HeightContext, Job, JobError, Origin, Setup, StockSpec};
@@ -118,6 +120,11 @@ pub struct Prepared {
     /// The material it starts from, when it carries on from an earlier setup:
     /// that one's, and how to carry it into this frame.
     pub carried: Option<(Arc<Stock>, Carry)>,
+    /// The solid it starts from, in its frame, when its stock is one
+    /// ([`StockSpec::Solid`]) and it does not carry on from an earlier setup.
+    pub solid: Option<Arc<TriMesh>>,
+    /// What holds the part, each fixture by its model's name, in its frame.
+    pub fixtures: Vec<(String, Arc<TriMesh>)>,
     /// The part's shadow, once cast ([`Prepared::shadow`]).
     shadow: OnceLock<Shadow>,
 }
@@ -131,6 +138,26 @@ impl Prepared {
     /// The box around every stock block.
     pub fn stock_bounds(&self) -> Aabb {
         bounds_all(&self.stocks).unwrap_or(self.model_bounds)
+    }
+
+    /// The material it starts from, on a grid `pitch` apart over its stock's
+    /// box, empty columns at `floor`: what an earlier setup left, carried into
+    /// its frame; its solid, sampled; or its blocks.
+    pub fn fresh_stock(&self, floor: f64, pitch: f64) -> Result<Stock, StockError> {
+        let all = self.stock_bounds();
+        match (&self.carried, &self.solid) {
+            (Some((left, carry)), _) => left.carried(carry, all, floor, pitch),
+            (None, Some(solid)) => {
+                Stock::from_solid(solid, all.min.truncate(), all.max.truncate(), floor, pitch)
+            }
+            (None, None) => Stock::from_blocks(&self.stocks, floor, pitch),
+        }
+    }
+
+    /// Whether the material it starts from has a shape of its own, not its
+    /// blocks': carried from an earlier setup, or a solid.
+    pub fn starts_shaped(&self) -> bool {
+        self.carried.is_some() || self.solid.is_some()
     }
 
     /// What a height resolves against in this setup: its stock's top and
@@ -268,6 +295,9 @@ fn block(
                 length: along + 2.0 * ends,
             })
         }
+        // Its material is sampled from it when the setup is laid out; here,
+        // as for anything that needs only a bound, it is its box.
+        StockSpec::Solid { .. } => Block::Box(around),
         StockSpec::FixedCylinder(c) => {
             let a = c.axis.vector();
             let (lo, hi) = (around.min.dot(a), around.max.dot(a));
@@ -433,6 +463,14 @@ pub fn prepare_from(
                     "its stock cannot carry on from an earlier setup".into(),
                 ));
             }
+            let solid = setup
+                .stocks
+                .iter()
+                .filter_map(|s| job.stock(s))
+                .any(|d| matches!(d.spec, StockSpec::Solid { .. }));
+            if solid {
+                return Err(PrepareError::Wrap("its stock cannot be a solid".into()));
+            }
             let (unrolled, part, stock) = round::unrolled(
                 wrap,
                 &mut frame,
@@ -452,6 +490,35 @@ pub fn prepare_from(
         ),
     };
     let origin = frame.origin;
+    // A solid to start from, as the setup sees it; what an earlier setup
+    // left comes first.
+    let solid = match setup.stocks.as_slice() {
+        [name] if carried.is_none() && setup.wrap.is_none() => {
+            match job.stock(name).map(|d| &d.spec) {
+                Some(StockSpec::Solid { model }) => {
+                    let body = bodies
+                        .get(model.as_str())
+                        .ok_or_else(|| PrepareError::NotLoaded(model.clone()))?;
+                    Some(Arc::new(body.mesh().mapped(|p| frame.to_setup(p))?))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    let fixtures = setup
+        .fixtures
+        .iter()
+        .map(|name| {
+            let body = bodies
+                .get(name.as_str())
+                .ok_or_else(|| PrepareError::NotLoaded(name.clone()))?;
+            Ok((
+                name.clone(),
+                Arc::new(body.mesh().mapped(|p| frame.to_setup(p))?),
+            ))
+        })
+        .collect::<Result<Vec<_>, PrepareError>>()?;
     let model_bounds = part
         .bounds()
         .ok_or_else(|| PrepareError::EmptyModel(setup.name.clone()))?;
@@ -468,6 +535,8 @@ pub fn prepare_from(
             };
             (Arc::clone(&c.stock), carry)
         }),
+        solid,
+        fixtures,
         shadow: OnceLock::new(),
     })
 }

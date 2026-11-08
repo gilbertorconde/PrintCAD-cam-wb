@@ -51,6 +51,12 @@ pub struct Passes {
     /// checked for them meeting material either way.
     #[serde(default, skip_serializing_if = "is_default")]
     pub use_holder: bool,
+    /// Whether a 3D finish keeps the tool, whole, off the setup's fixtures,
+    /// leaving out the cuts where it would meet one, as `use_holder` keeps
+    /// the shank and holder off the part. Every operation is checked for the
+    /// tool meeting a fixture either way.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub avoid_fixtures: bool,
 }
 
 impl Default for Passes {
@@ -66,6 +72,7 @@ impl Default for Passes {
             finishing: None,
             relief: None,
             use_holder: false,
+            avoid_fixtures: false,
         }
     }
 }

@@ -22,6 +22,10 @@ pub struct Sheet<'a> {
     pub run: &'a Run,
     /// The earlier setup its stock carries on from, by name, when it does.
     pub carried_from: Option<String>,
+    /// The body its stock is, by name, when it is one.
+    pub stock_body: Option<String>,
+    /// What holds the part, by name.
+    pub fixtures: Vec<String>,
 }
 
 /// The sheet's look: plain, small and black on white, so it prints as it
@@ -157,6 +161,9 @@ impl Sheet<'_> {
         } else {
             rows.push(("Stock", self.stock_kind()));
         }
+        if !self.fixtures.is_empty() {
+            rows.push(("Fixtures", self.fixtures.join(", ")));
+        }
         section("Part and stock", &list(&rows))
     }
 
@@ -197,6 +204,10 @@ impl Sheet<'_> {
                     .as_deref()
                     .map_or_else(|| "the setup before".to_string(), |n| format!("setup {n}"))
             ),
+            StockKind::Solid => format!(
+                "the body {}, as it is; its size is the box round it",
+                self.stock_body.as_deref().unwrap_or("picked")
+            ),
         }
     }
 
@@ -228,6 +239,18 @@ impl Sheet<'_> {
             wcs.push_str(": set it where the work zero is");
         }
         rows.push(("Work offset", wcs));
+        // The run's parts past the first are the setup's, in order.
+        for (p, q) in self.run.placements.iter().skip(1).zip(&s.parts) {
+            let mut at = format!(
+                "{}: another part, its work zero {} from the first's along the setup's axes",
+                p.wcs,
+                xyz([q.x, q.y, q.z])
+            );
+            if let Some(w) = p.work_offset {
+                let _ = write!(at, ", at {} in machine coordinates", xyz(w));
+            }
+            rows.push(("Work offset", at));
+        }
         let layout = self.run.layout.as_ref();
         let tilt = layout.map(|l| l.tilt.as_slice()).unwrap_or_default();
         let axis = layout.map_or_else(|| s.up(), |l| l.tool_axis);
@@ -823,6 +846,8 @@ mod tests {
             bodies: vec!["Bracket".into()],
             run: &run,
             carried_from: None,
+            stock_body: None,
+            fixtures: Vec::new(),
         }
         .html()
     }
@@ -849,6 +874,8 @@ mod tests {
             bodies: vec!["Bracket".into()],
             run: &run,
             carried_from: None,
+            stock_body: None,
+            fixtures: Vec::new(),
         }
         .html();
         assert!(
@@ -930,6 +957,8 @@ mod tests {
             bodies: vec!["Bracket".into()],
             run: &run,
             carried_from: None,
+            stock_body: None,
+            fixtures: Vec::new(),
         }
         .html();
         assert!(html.contains("2 check(s) failed"), "{html}");
@@ -977,11 +1006,26 @@ mod tests {
             bodies: vec!["Bracket".into()],
             run: &run,
             carried_from: Some("Top".into()),
+            stock_body: None,
+            fixtures: Vec::new(),
         }
         .html();
         assert!(
             html.contains("what setup Top leaves after its last operation"),
             "{html}"
         );
+        setup.stock = StockKind::Solid;
+        let html = Sheet {
+            name: "Top",
+            setup: &setup,
+            bodies: vec!["Bracket".into()],
+            run: &run,
+            carried_from: None,
+            stock_body: Some("Casting".into()),
+            fixtures: vec!["Vise jaw".into()],
+        }
+        .html();
+        assert!(html.contains("the body Casting, as it is"), "{html}");
+        assert!(html.contains("Vise jaw"), "{html}");
     }
 }

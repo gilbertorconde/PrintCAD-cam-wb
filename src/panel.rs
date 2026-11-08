@@ -3,8 +3,8 @@
 
 use cam_protocol::{Level, Run};
 use camcraft_core::job::{
-    Boundary, Containment, CutDirection, Depths, HeightRef, HoleOrder, Leave, Outline, ProfileSide,
-    Programs, StrategySpec, ToolKind, ToolSpec,
+    Boundary, Containment, CutDirection, Depths, HeightRef, HoleOrder, Leave, Outline,
+    PlacementOrder, ProfileSide, Programs, StrategySpec, ToolKind, ToolSpec,
 };
 use camcraft_core::setup::frame::{Axis, Orientation};
 use camcraft_post::profile::Profile;
@@ -566,6 +566,77 @@ fn machining(run: &Run) -> Widget {
     }
 }
 
+/// Several parts, each at a work offset of its own: the first the setup's,
+/// the others in a table, and which comes first.
+fn part_rows(cam: &Cam, setup: &SetupData) -> Vec<Widget> {
+    let word = |w: f64| {
+        setup
+            .work_offsets()
+            .into_iter()
+            .find(|(n, _)| f64::from(*n) == w)
+            .map_or_else(|| format!("G{w}"), |(_, s)| s)
+    };
+    let mut rows = vec![Widget::Text {
+        text: format!(
+            "The same operations cut at more parts, each at a work offset of its own, as \
+             in a second vise: the first at {}, where the part is, and each other as far \
+             from it, along the setup's axes, as it says. Each is checked as the first, \
+             against the fixtures and the travel where its offset puts it.",
+            setup.wcs_word()
+        ),
+        mono: false,
+    }];
+    if !setup.parts.is_empty() {
+        rows.push(Widget::Table {
+            id: "parts".into(),
+            columns: ["Work offset", "X", "Y", "Z"].map(String::from).to_vec(),
+            rows: setup
+                .parts
+                .iter()
+                .map(|p| {
+                    vec![
+                        word(p.wcs),
+                        crate::sheet::num(p.x),
+                        crate::sheet::num(p.y),
+                        crate::sheet::num(p.z),
+                    ]
+                })
+                .collect(),
+            selected: cam.chosen_part,
+            editable: vec![true, true, true, true],
+        });
+        rows.push(choice(
+            "part_order",
+            "Order",
+            vec![
+                "By tool: each tool at every part".into(),
+                "By part: every operation at one part".into(),
+            ],
+            usize::from(setup.part_order == PlacementOrder::ByPart),
+        ));
+    }
+    rows.push(button("add_part", "Add a part", ButtonStyle::Small, true));
+    if !setup.parts.is_empty() {
+        rows.push(button(
+            "remove_part",
+            "Remove the chosen part",
+            ButtonStyle::Small,
+            cam.chosen_part.is_some(),
+        ));
+    }
+    rows
+}
+
+/// The document's bodies `setup` does not machine, by id and name: those
+/// its stock may be.
+fn other_bodies(setup: &SetupData) -> Vec<(String, String)> {
+    host::bodies()
+        .into_iter()
+        .filter(|b| !setup.bodies.contains(&b.id))
+        .map(|b| (b.id, b.name))
+        .collect()
+}
+
 /// The setups before setup `id` in the document, by id and name: those its
 /// stock may carry on from.
 fn earlier_setups(id: &str) -> Vec<(String, String)> {
@@ -634,6 +705,47 @@ pub fn setup_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
             ),
         ],
     ));
+    let name_of = |b: &String| {
+        bodies
+            .iter()
+            .find(|x| &x.id == b)
+            .map_or_else(|| "A body no longer there".into(), |x| x.name.clone())
+    };
+    let mut held = vec![Widget::Text {
+        text: "Bodies that hold the part: vise jaws, clamps, a board. They are never cut: \
+               the tool, its shank or its holder meeting one on any move, cutting or rapid, \
+               is a failed check that names it and the move."
+            .into(),
+        mono: false,
+    }];
+    if !setup.fixtures.is_empty() {
+        held.push(Widget::List {
+            id: "fixtures".into(),
+            items: setup
+                .fixtures
+                .iter()
+                .map(|b| ListItem {
+                    label: name_of(b),
+                    ..Default::default()
+                })
+                .collect(),
+            selected: cam.chosen_fixture,
+        });
+    }
+    held.push(Widget::Pick {
+        id: "fixture".into(),
+        label: "Add the selected body".into(),
+        value: None,
+        armed: false,
+    });
+    if !setup.fixtures.is_empty() {
+        held.push(button(
+            "remove_fixture",
+            "Remove the chosen fixture",
+            ButtonStyle::Small,
+            cam.chosen_fixture.is_some(),
+        ));
+    }
     let mut stock = vec![choice(
         "stock",
         "Stock",
@@ -642,15 +754,36 @@ pub fn setup_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
             "A box of a fixed size".into(),
             "Cylinder".into(),
             "From an earlier setup".into(),
+            "A body (from solid)".into(),
         ],
         match setup.stock {
             StockKind::Around => 0,
             StockKind::Fixed => 1,
             StockKind::Cylinder => 2,
             StockKind::Earlier => 3,
+            StockKind::Solid => 4,
         },
     )];
     match setup.stock {
+        StockKind::Solid => {
+            let others = other_bodies(&setup);
+            let mut names = vec!["Choose a body".to_string()];
+            names.extend(others.iter().map(|(_, name)| name.clone()));
+            let chosen = setup
+                .stock_body
+                .as_ref()
+                .and_then(|b| others.iter().position(|(o, _)| o == b))
+                .map_or(0, |i| i + 1);
+            stock.push(choice("stock_body", "Body", names, chosen));
+            stock.push(Widget::Text {
+                text: "A body of the document that is the stock: a casting, a blank cut \
+                       before, a printed part. Its material is what the setup starts from, \
+                       each column of it from its lowest to its highest along the tool; it \
+                       is not machined, and a work zero on the stock is on its box."
+                    .into(),
+                mono: false,
+            });
+        }
         StockKind::Earlier => {
             let earlier = earlier_setups(id);
             let mut names = vec!["The setup before".to_string()];
@@ -776,6 +909,7 @@ pub fn setup_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
         value: setup.material.clone(),
     });
     panel.push(group("Stock", stock));
+    panel.push(group("Fixtures", held));
     let mut orientation = orientation_rows(cam, id, &setup);
     orientation.extend([
         choice(
@@ -851,6 +985,7 @@ pub fn setup_panel(cam: &Cam, node: &Node) -> Vec<Widget> {
         ],
     ));
     panel.push(group("Work offset", work_offset_rows(id, &setup)));
+    panel.push(group("Parts", part_rows(cam, &setup)));
     panel.push(group("Probed surface", probe_rows(id, &setup)));
     let run = cam.runs.get(id).and_then(|c| c.shown());
     let items = ops
@@ -1150,8 +1285,15 @@ pub fn setup_event(cam: &mut Cam, id: &str, event: PanelEvent) {
                         1 => StockKind::Fixed,
                         2 => StockKind::Cylinder,
                         3 => StockKind::Earlier,
+                        4 => StockKind::Solid,
                         _ => StockKind::Around,
                     }
+                }
+                "stock_body" => {
+                    setup.stock_body = index
+                        .checked_sub(1)
+                        .and_then(|i| other_bodies(&setup).into_iter().nth(i))
+                        .map(|(b, _)| b);
                 }
                 "stock_from" => {
                     setup.stock_from = index
@@ -1223,6 +1365,13 @@ pub fn setup_event(cam: &mut Cam, id: &str, event: PanelEvent) {
                     // The one it had, which its post has not got.
                     None => return,
                 },
+                "part_order" => {
+                    setup.part_order = if index == 1 {
+                        PlacementOrder::ByPart
+                    } else {
+                        PlacementOrder::ByTool
+                    };
+                }
                 "programs" => {
                     setup.programs = if index == 1 {
                         Programs::Operation
@@ -1239,6 +1388,90 @@ pub fn setup_event(cam: &mut Cam, id: &str, event: PanelEvent) {
             cam.write_setup(id, &setup);
         }
         PanelEvent::Select { id: list, index } if list == "bodies" => cam.chosen_body = Some(index),
+        PanelEvent::Select { id: list, index } if list == "parts" => {
+            cam.chosen_part = Some(index);
+        }
+        PanelEvent::Cell {
+            id: table,
+            row,
+            column,
+            value,
+        } if table == "parts" => {
+            let offsets = setup.work_offsets();
+            let Some(part) = setup.parts.get_mut(row) else {
+                return;
+            };
+            let value = value.trim();
+            if column == 0 {
+                let w = value.to_ascii_uppercase();
+                let w = if w.starts_with('G') {
+                    w
+                } else {
+                    format!("G{w}")
+                };
+                match offsets.into_iter().find(|(_, o)| *o == w) {
+                    Some((n, _)) => part.wcs = f64::from(n),
+                    None => {
+                        cam.hint = Some(format!("The post has no work offset {w}."));
+                        return;
+                    }
+                }
+            } else {
+                let Ok(v) = value.replace(',', ".").parse::<f64>() else {
+                    return;
+                };
+                match column {
+                    1 => part.x = v,
+                    2 => part.y = v,
+                    _ => part.z = v,
+                }
+            }
+            cam.write_setup(id, &setup);
+        }
+        PanelEvent::Button { id: b } if b == "add_part" => match setup.next_part(100.0) {
+            Some(p) => {
+                setup.parts.push(p);
+                cam.write_setup(id, &setup);
+            }
+            None => cam.hint = Some("Every work offset the post has is taken.".into()),
+        },
+        PanelEvent::Button { id: b } if b == "remove_part" => {
+            if let Some(i) = cam.chosen_part.take()
+                && i < setup.parts.len()
+            {
+                setup.parts.remove(i);
+                cam.write_setup(id, &setup);
+            }
+        }
+        PanelEvent::Select { id: list, index } if list == "fixtures" => {
+            cam.chosen_fixture = Some(index);
+        }
+        PanelEvent::Pick { id: pick } if pick == "fixture" => {
+            match cam
+                .pointer
+                .selected_body
+                .clone()
+                .or(cam.pointer.body.clone())
+            {
+                Some(body) if setup.bodies.contains(&body) => {
+                    cam.hint = Some("The setup machines that body: it cannot hold it.".into());
+                }
+                Some(body) if !setup.fixtures.contains(&body) => {
+                    setup.fixtures.push(body);
+                    cam.write_setup(id, &setup);
+                }
+                Some(_) => cam.hint = Some("That body is a fixture already.".into()),
+                None => cam.hint = Some("Select a body in the view or the tree first.".into()),
+            }
+        }
+        PanelEvent::Button { id: b } if b == "remove_fixture" => {
+            if let Some(i) = cam.chosen_fixture.take()
+                && i < setup.fixtures.len()
+            {
+                setup.fixtures.remove(i);
+                cam.write_setup(id, &setup);
+            }
+        }
         PanelEvent::Select { id: list, index } if list == "operations" => {
             if let Some((op, _)) = operations_of(id).get(index) {
                 let op = op.id.clone();

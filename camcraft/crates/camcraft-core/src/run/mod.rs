@@ -14,6 +14,7 @@
 //! found.
 
 mod error;
+mod fixtures;
 mod operation;
 mod pitch;
 mod result;
@@ -49,6 +50,7 @@ use crate::setup::{Bodies, Prepared};
 
 pub use crate::path::toolpath::PLUNGE_RATIO;
 pub use error::RunError;
+pub use fixtures::{Fixture, FixtureHit, Part as FixturePart, whole_tool};
 pub use result::{Clash, Clashes, Made, OperationResult, Plan, SetupResult, Stage, StrategyDetail};
 
 use error::in_op;
@@ -114,13 +116,13 @@ pub fn run_prepared_planned(
     let sim_pitch = round.map_or(sim_pitch, |r| round_pitch(&r, sim_pitch));
     let blocks = &prepared.stocks;
     // What an earlier setup left, carried into this frame, when it carries on
-    // from one; else its blocks, fresh, on the rotary when it is on one.
-    let fresh = || match (&prepared.carried, round) {
-        (Some((left, carry)), _) => left.carried(carry, all, ctx.stock_bottom - 1.0, sim_pitch),
-        (None, Some(round)) => {
+    // from one; its solid, when it starts from one; else its blocks, fresh,
+    // on the rotary when it is on one.
+    let fresh = || match round {
+        Some(round) if !prepared.starts_shaped() => {
             Stock::from_blocks(blocks, ctx.stock_bottom - 1.0, sim_pitch)?.rounded(round)
         }
-        (None, None) => Stock::from_blocks(blocks, ctx.stock_bottom - 1.0, sim_pitch),
+        _ => prepared.fresh_stock(ctx.stock_bottom - 1.0, sim_pitch),
     };
     let mut stock = fresh()?;
     // The part's top on the simulator's grid: what the tool above its flutes
@@ -128,6 +130,12 @@ pub fn run_prepared_planned(
     // verified against at the end.
     let surface = PartSurface::from_mesh(mesh, lo, hi, sim_pitch)?;
     let cutter = DropCutter::new(mesh);
+    // What holds the part, on the same grid: never cut, so laid once.
+    let fixtures = prepared
+        .fixtures
+        .iter()
+        .map(|(name, m)| Fixture::of(name, m, sim_pitch))
+        .collect::<Result<Vec<_>, _>>()?;
     // Found once for the setup, when an operation first needs them.
     let flats = OnceCell::new();
     // The probed surface the setup's depths are corrected to, if they are.
@@ -247,6 +255,7 @@ pub fn run_prepared_planned(
             blocks,
             flats: &flats,
             part: &surface,
+            fixtures: &fixtures,
         };
         operations.push(run_operation(&work, &target, &mut stock)?);
         keyframes.push(Arc::new(PackedStock::pack(&stock)));
@@ -279,6 +288,10 @@ pub fn run_prepared_planned(
         None => surface,
     };
 
+    // Every move of every operation against what holds the part, as it will
+    // be cut: after any correction to a probed surface.
+    fixture_hits(job, setup, &fixtures, &mut operations)?;
+
     // The simulator resolves the surface on a grid, so it cannot be held finer than
     // one cell plus the chordal tolerance the paths were built to; and that holds
     // across as well as down, or every vertical wall is a gouge beside it.
@@ -302,6 +315,55 @@ pub fn run_prepared_planned(
         keyframes,
         probe_map: probed,
     })
+}
+
+/// Each of `operations` checked against each of `fixtures` with its tool
+/// whole, at each placement of the part, in parallel: what it meets, the
+/// first move it does, of each fixture at each placement.
+fn fixture_hits(
+    job: &Job,
+    setup: &Setup,
+    fixtures: &[Fixture],
+    operations: &mut [OperationResult],
+) -> Result<(), RunError> {
+    use rayon::prelude::*;
+    if fixtures.is_empty() {
+        return Ok(());
+    }
+    let at: Vec<glam::DVec3> = setup.placement_offsets();
+    let margin = job.tolerance;
+    operations
+        .par_iter_mut()
+        .zip(setup.operations.par_iter())
+        .try_for_each(|(result, op)| {
+            if !result.made.has_paths() {
+                return Ok(());
+            }
+            let (spec, _) = tool_of(job, op)?;
+            result.fixtures.clear();
+            for (k, by) in at.iter().enumerate() {
+                for f in fixtures {
+                    let Some((part, diameter, first_move, moves, deepest, rapid)) =
+                        fixtures::hit(&result.path, spec, f, *by, margin)
+                    else {
+                        continue;
+                    };
+                    let hit = FixtureHit {
+                        fixture: f.name.clone(),
+                        placement: k,
+                        part,
+                        diameter,
+                        first_move,
+                        moves,
+                        deepest,
+                        rapid,
+                    };
+                    result.warnings.push(hit.line(None));
+                    result.fixtures.push(hit);
+                }
+            }
+            Ok::<(), RunError>(())
+        })
 }
 
 /// A probe operation's run: the points of its grid, over what it is kept

@@ -13,8 +13,8 @@ use std::collections::BTreeMap;
 use camcraft_core::job::{
     Along, BarAxis, Boundary, BoxOf, Containment, Curve, Depths, FeatureRef, FixedBox,
     FixedCylinder, Height, HeightRef, Heights, Job, Leave, MachiningBoundary, ModelDef, Operation,
-    Origin, Outline, Place, PointRef, Preset, Programs, Selection, Setup, Snap, StockDef,
-    StockSpec, StockToLeave, StrategySpec, ToolSpec, ZCorrection,
+    Origin, Outline, Place, Placement, PlacementOrder, PointRef, Preset, Programs, Selection,
+    Setup, Snap, StockDef, StockSpec, StockToLeave, StrategySpec, ToolSpec, ZCorrection,
 };
 use camcraft_core::setup::frame::{Axis, Direction, Orientation};
 use printcad_bench_sdk::serde_json;
@@ -38,6 +38,9 @@ pub enum StockKind {
     /// operation, turned as this setup sees it, as Fusion's "Continue from
     /// previous setup".
     Earlier,
+    /// A body of the document, as Fusion's "From solid": a casting, a blank
+    /// cut before, a printed part near its net shape.
+    Solid,
 }
 
 /// Which way a cylinder of stock lies, as the part sits.
@@ -222,6 +225,14 @@ pub struct SetupData {
     /// before it in the document; `None` for the one just before it.
     #[serde(default)]
     pub stock_from: Option<String>,
+    /// The body that is the stock, by id, for [`StockKind::Solid`]: never
+    /// one of the bodies it machines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stock_body: Option<String>,
+    /// What holds the part, by body id: vise jaws, clamps, a board. Never
+    /// cut, and any move of the tool into one is a failed check.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fixtures: Vec<String>,
     /// Extra material each side in X and Y, round the bodies.
     pub margin_side: f64,
     /// Extra material on top of the bodies.
@@ -317,6 +328,13 @@ pub struct SetupData {
     /// Whether it is posted as one program, or one an operation.
     #[serde(default)]
     pub programs: Programs,
+    /// More parts, each at a work offset of its own, cut as the first is,
+    /// the one at `wcs`: a second vise, a fixture plate's next station.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<PartData>,
+    /// Which comes first with several parts.
+    #[serde(default)]
+    pub part_order: PlacementOrder,
     /// Its program's number, for a control that files programs by number;
     /// each program of a setup posted one an operation takes the next.
     #[serde(default = "program_number")]
@@ -362,6 +380,8 @@ impl SetupData {
             bodies,
             stock: StockKind::Around,
             stock_from: None,
+            stock_body: None,
+            fixtures: Vec::new(),
             margin_side: 2.0,
             margin_top: 2.0,
             margin_below: 0.0,
@@ -399,6 +419,8 @@ impl SetupData {
             wcs_y: 0.0,
             wcs_z: 0.0,
             programs: Programs::Setup,
+            parts: Vec::new(),
+            part_order: PlacementOrder::ByTool,
             program_number: program_number(),
             tolerance,
             tools: BTreeMap::new(),
@@ -498,8 +520,9 @@ impl SetupData {
             },
             // The helper starts from what the earlier setup left, which its
             // request carries, and lays the setup out round that; the job
-            // still names a stock, the bodies' box.
-            StockKind::Earlier => StockSpec::AroundModels {
+            // still names a stock, the bodies' box. A solid is named by its
+            // model, which only the job knows ([`job`]).
+            StockKind::Earlier | StockKind::Solid => StockSpec::AroundModels {
                 models: Vec::new(),
                 margin: [0.0; 3],
                 below: 0.0,
@@ -720,6 +743,29 @@ impl SetupData {
         if self.wraps() && self.probe_correct {
             return Some("On a rotary the depths are not corrected to probe results.".into());
         }
+        if self.stock == StockKind::Solid {
+            match &self.stock_body {
+                None => return Some("Pick the body the stock is.".into()),
+                Some(b) if self.bodies.contains(b) => {
+                    return Some(
+                        "The stock's body is one the setup machines: take it out of its \
+                         bodies, or pick another."
+                            .into(),
+                    );
+                }
+                Some(_) => {}
+            }
+        }
+        if self.fixtures.iter().any(|f| {
+            self.bodies.contains(f)
+                || (self.stock == StockKind::Solid && self.stock_body.as_ref() == Some(f))
+        }) {
+            return Some(
+                "A fixture is one of the bodies the setup machines, or its stock: take it out \
+                 of one or the other."
+                    .into(),
+            );
+        }
         if self.stock == StockKind::Fixed
             && ![self.size_x, self.size_y, self.size_z]
                 .into_iter()
@@ -750,6 +796,25 @@ impl SetupData {
         {
             return Some("Where the work offset is on the machine must be numbers.".into());
         }
+        let mut taken = vec![self.wcs];
+        for p in &self.parts {
+            if !offsets.iter().any(|(n, _)| f64::from(*n) == p.wcs) {
+                return Some(format!(
+                    "A part's work offset, G{}, is not one {} has.",
+                    p.wcs, self.post
+                ));
+            }
+            if taken.contains(&p.wcs) {
+                return Some(format!(
+                    "Two parts are at work offset G{}: give each its own.",
+                    p.wcs
+                ));
+            }
+            taken.push(p.wcs);
+            if ![p.x, p.y, p.z].iter().all(|v| v.is_finite()) {
+                return Some("Where each part is must be numbers.".into());
+            }
+        }
         if !(1.0..=99_999.0).contains(&self.program_number) {
             return Some("The program number must be 1 to 99999.".into());
         }
@@ -769,6 +834,86 @@ impl SetupData {
             return Some(e.to_string());
         }
         None
+    }
+}
+
+/// Another part of a setup: its work offset and how far it is from the
+/// first, along the setup's axes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PartData {
+    /// Its work offset, as [`SetupData::wcs`].
+    pub wcs: f64,
+    #[serde(default)]
+    pub x: f64,
+    #[serde(default)]
+    pub y: f64,
+    #[serde(default)]
+    pub z: f64,
+}
+
+impl SetupData {
+    /// Its parts as camcraft has them: none for the one, else the first
+    /// at its own offset and each other where it is.
+    fn placements(&self) -> Vec<Placement> {
+        if self.parts.is_empty() {
+            return Vec::new();
+        }
+        let wcs = |w: f64| {
+            w.round()
+                .clamp(54.0, f64::from(camcraft_core::job::LAST_WCS)) as u8
+        };
+        let first = Placement {
+            wcs: wcs(self.wcs),
+            at: [0.0; 3],
+            work_offset: self
+                .wcs_known
+                .then_some([self.wcs_x, self.wcs_y, self.wcs_z]),
+        };
+        std::iter::once(first)
+            .chain(self.parts.iter().map(|p| Placement {
+                wcs: wcs(p.wcs),
+                at: [p.x, p.y, p.z],
+                work_offset: None,
+            }))
+            .collect()
+    }
+
+    /// The next part: the next work offset the post has that none is at,
+    /// as far on from the last as the last is from the one before it, or
+    /// `step` along X after the first. `None` when the offsets run out.
+    pub fn next_part(&self, step: f64) -> Option<PartData> {
+        let taken: Vec<f64> = std::iter::once(self.wcs)
+            .chain(self.parts.iter().map(|p| p.wcs))
+            .collect();
+        let last = taken.last().copied().unwrap_or(self.wcs);
+        let offsets = self.work_offsets();
+        let free = |n: &&(u8, String)| !taken.contains(&f64::from(n.0));
+        let wcs = offsets
+            .iter()
+            .filter(free)
+            .find(|(n, _)| f64::from(*n) > last)
+            .or_else(|| offsets.iter().find(free))?
+            .0;
+        let at = |k: usize| {
+            k.checked_sub(1)
+                .and_then(|k| self.parts.get(k))
+                .map_or([0.0; 3], |p| [p.x, p.y, p.z])
+        };
+        let n = self.parts.len();
+        let (a, b) = (at(n), at(n.saturating_sub(1)));
+        let d = if n == 0 {
+            [step, 0.0, 0.0]
+        } else if n == 1 {
+            a
+        } else {
+            [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+        };
+        Some(PartData {
+            wcs: f64::from(wcs),
+            x: a[0] + d[0],
+            y: a[1] + d[1],
+            z: a[2] + d[2],
+        })
     }
 }
 
@@ -1371,6 +1516,17 @@ fn fit_stepover(
     }
 }
 
+/// What a body is to a setup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// A part it machines.
+    Part,
+    /// The stock it starts from.
+    Stock,
+    /// A fixture that holds the part.
+    Fixture,
+}
+
 /// A body of the document as one of a job's models.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BodyModel {
@@ -1378,13 +1534,28 @@ pub struct BodyModel {
     pub body: String,
     /// Its model's name in the job.
     pub name: String,
+    /// What it is to the setup.
+    pub role: Role,
 }
 
 /// The models a setup's bodies make: each body once, named after it, the names
-/// made unique.
+/// made unique; its parts first, then the body its stock is, then its
+/// fixtures.
 pub fn models_of(setup: &SetupData, name_of: impl Fn(&str) -> Option<String>) -> Vec<BodyModel> {
     let mut out: Vec<BodyModel> = Vec::new();
-    for body in &setup.bodies {
+    let stock = setup
+        .stock_body
+        .iter()
+        .filter(|_| setup.stock == StockKind::Solid)
+        .map(|b| (b, Role::Stock));
+    let fixtures = setup.fixtures.iter().map(|b| (b, Role::Fixture));
+    let bodies = setup
+        .bodies
+        .iter()
+        .map(|b| (b, Role::Part))
+        .chain(stock)
+        .chain(fixtures);
+    for (body, role) in bodies {
         if out.iter().any(|m| &m.body == body) {
             continue;
         }
@@ -1398,6 +1569,7 @@ pub fn models_of(setup: &SetupData, name_of: impl Fn(&str) -> Option<String>) ->
         out.push(BodyModel {
             body: body.clone(),
             name,
+            role,
         });
     }
     out
@@ -1418,7 +1590,9 @@ pub fn job(
             .map(|m| m.name.clone())
     };
     let mut camcraft = Setup::new(name);
-    camcraft.models = models.iter().map(|m| m.name.clone()).collect();
+    let named = |role: Role| models.iter().filter(move |m| m.role == role);
+    camcraft.models = named(Role::Part).map(|m| m.name.clone()).collect();
+    camcraft.fixtures = named(Role::Fixture).map(|m| m.name.clone()).collect();
     camcraft.stocks = vec!["stock".into()];
     camcraft.wcs = setup
         .wcs
@@ -1428,6 +1602,8 @@ pub fn job(
         .wcs_known
         .then_some([setup.wcs_x, setup.wcs_y, setup.wcs_z]);
     camcraft.programs = setup.programs;
+    camcraft.placements = setup.placements();
+    camcraft.placement_order = setup.part_order;
     camcraft.number = setup.program_number.round().clamp(1.0, 99_999.0) as u32;
     camcraft.post = setup.post.clone();
     camcraft.z_correction = setup.z_correction();
@@ -1467,7 +1643,12 @@ pub fn job(
             .collect(),
         stocks: vec![StockDef {
             name: "stock".into(),
-            spec: setup.stock_spec(),
+            spec: match named(Role::Stock).next() {
+                Some(m) => StockSpec::Solid {
+                    model: m.name.clone(),
+                },
+                None => setup.stock_spec(),
+            },
         }],
         setups: vec![camcraft],
         ..Job::default()
@@ -1512,6 +1693,116 @@ mod tests {
         setup.stock_from = Some("s1".into());
         assert_eq!(SetupData::from(&setup.to_value()).unwrap(), setup);
         assert_eq!(setup.to_value()["stock"], "earlier");
+    }
+
+    /// A body that is the stock is a model of the job, its stock a solid
+    /// of it, and not one of the models the setup machines.
+    #[test]
+    fn a_body_as_the_stock_is_a_solid_of_the_job() {
+        let mut setup = SetupData::new(vec!["b1".into()], "grbl", 0.05);
+        setup.stock = StockKind::Solid;
+        assert!(setup.problem().unwrap().contains("Pick the body"));
+        setup.stock_body = Some("b1".into());
+        assert!(setup.problem().unwrap().contains("one the setup machines"));
+        setup.stock_body = Some("b2".into());
+        assert_eq!(setup.problem(), None);
+        assert_eq!(SetupData::from(&setup.to_value()).unwrap(), setup);
+        let models = models_of(&setup, |b| {
+            Some(if b == "b1" { "Part" } else { "Casting" }.into())
+        });
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[1].role, Role::Stock);
+        let job = job("Setup 1", &setup, &models, &[]);
+        assert_eq!(job.setups[0].models, ["Part"]);
+        assert_eq!(job.models.len(), 2);
+        assert_eq!(
+            job.stocks[0].spec,
+            StockSpec::Solid {
+                model: "Casting".into()
+            }
+        );
+        let text = camcraft_session::job_text(&job).unwrap();
+        assert_eq!(camcraft_session::parse_job(&text, "test").unwrap(), job);
+    }
+
+    /// Fixtures are models of the job, named as the setup's fixtures, and
+    /// not among the models it machines; one that is a part is refused.
+    #[test]
+    fn fixtures_are_models_the_setup_does_not_machine() {
+        let mut setup = SetupData::new(vec!["b1".into()], "grbl", 0.05);
+        setup.fixtures = vec!["b1".into()];
+        assert!(setup.problem().unwrap().contains("fixture"));
+        setup.fixtures = vec!["jaw".into(), "clamp".into()];
+        assert_eq!(setup.problem(), None);
+        assert_eq!(SetupData::from(&setup.to_value()).unwrap(), setup);
+        let models = models_of(&setup, |b| Some(b.to_uppercase()));
+        let job = job("Setup 1", &setup, &models, &[]);
+        assert_eq!(job.setups[0].models, ["B1"]);
+        assert_eq!(job.setups[0].fixtures, ["JAW", "CLAMP"]);
+        assert_eq!(job.models.len(), 3);
+        let text = camcraft_session::job_text(&job).unwrap();
+        assert_eq!(camcraft_session::parse_job(&text, "test").unwrap(), job);
+    }
+
+    /// More parts: each the next work offset, as far on as the last went;
+    /// the job places the first at the setup's own offset and the rest from
+    /// it; two on one offset, or one the post has not got, are refused.
+    #[test]
+    fn more_parts_are_placements_from_the_first() {
+        let mut setup = SetupData::new(vec!["b1".into()], "linuxcnc", 0.05);
+        setup.wcs_known = true;
+        (setup.wcs_x, setup.wcs_y, setup.wcs_z) = (10.0, -20.0, -30.0);
+        let second = setup.next_part(80.0).unwrap();
+        assert_eq!((second.wcs, second.x, second.y), (55.0, 80.0, 0.0));
+        setup.parts.push(second);
+        let third = setup.next_part(80.0).unwrap();
+        assert_eq!((third.wcs, third.x), (56.0, 160.0));
+        setup.parts.push(third);
+        assert_eq!(setup.problem(), None);
+        assert_eq!(SetupData::from(&setup.to_value()).unwrap(), setup);
+        setup.part_order = PlacementOrder::ByPart;
+        let models = models_of(&setup, |_| Some("Part".into()));
+        let job = job("Setup 1", &setup, &models, &[]);
+        let s = &job.setups[0];
+        assert_eq!(s.placement_order, PlacementOrder::ByPart);
+        let placed = s.placed();
+        assert_eq!(placed.len(), 3);
+        assert_eq!(placed[0].wcs, 54);
+        assert_eq!(placed[2].work_offset, Some([170.0, -20.0, -30.0]));
+        let text = camcraft_session::job_text(&job).unwrap();
+        assert_eq!(camcraft_session::parse_job(&text, "test").unwrap(), job);
+        setup.parts[1].wcs = 54.0;
+        assert!(setup.problem().unwrap().contains("Two parts"));
+        setup.parts[1].wcs = 200.0;
+        assert!(setup.problem().unwrap().contains("not one"));
+    }
+
+    /// More parts each take the next work offset the post has, as far on
+    /// as the last two are apart, and are camcraft's placements after the
+    /// setup's own; two on one offset are refused.
+    #[test]
+    fn more_parts_are_placements_after_the_first() {
+        let mut setup = SetupData::new(vec!["b1".into()], "linuxcnc", 0.05);
+        let second = setup.next_part(80.0).unwrap();
+        assert_eq!((second.wcs, second.x, second.y), (55.0, 80.0, 0.0));
+        setup.parts.push(second);
+        let third = setup.next_part(80.0).unwrap();
+        assert_eq!((third.wcs, third.x), (56.0, 160.0));
+        setup.parts.push(third);
+        assert_eq!(setup.problem(), None);
+        assert_eq!(SetupData::from(&setup.to_value()).unwrap(), setup);
+        let models = models_of(&setup, |_| Some("Part".into()));
+        let job = job("Setup 1", &setup, &models, &[]);
+        let placed: Vec<(u8, f64)> = job.setups[0]
+            .placements
+            .iter()
+            .map(|p| (p.wcs, p.at[0]))
+            .collect();
+        assert_eq!(placed, [(54, 0.0), (55, 80.0), (56, 160.0)]);
+        let text = camcraft_session::job_text(&job).unwrap();
+        assert_eq!(camcraft_session::parse_job(&text, "test").unwrap(), job);
+        setup.parts[1].wcs = 55.0;
+        assert!(setup.problem().unwrap().contains("Two parts"));
     }
 
     #[test]

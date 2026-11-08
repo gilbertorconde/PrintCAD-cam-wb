@@ -39,6 +39,34 @@ pub enum JobError {
         /// Which stock.
         stock: String,
     },
+    /// A setup's stock is a solid it cannot start from.
+    #[error("setup '{setup}' starts from the solid '{model}', but {why}")]
+    SolidStock {
+        /// Which setup.
+        setup: String,
+        /// The solid's model.
+        model: String,
+        /// Why not.
+        why: &'static str,
+    },
+    /// A setup's fixture is one it cannot have.
+    #[error("setup '{setup}' is held by the fixture '{model}', but {why}")]
+    BadFixture {
+        /// Which setup.
+        setup: String,
+        /// The fixture's model.
+        model: String,
+        /// Why not.
+        why: &'static str,
+    },
+    /// Two placements of a setup on one work offset.
+    #[error("setup '{setup}' places two parts at work offset {wcs}")]
+    SameWorkOffset {
+        /// Which setup.
+        setup: String,
+        /// The offset, as [`super::Setup::wcs`].
+        wcs: u8,
+    },
     /// A setup machines no model.
     #[error("setup '{0}' has no model")]
     NoModels(String),

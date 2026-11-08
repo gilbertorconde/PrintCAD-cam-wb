@@ -157,6 +157,10 @@ struct Cam {
     chosen_tool: Option<usize>,
     /// The setup panel's selected body.
     chosen_body: Option<usize>,
+    /// The setup panel's selected fixture.
+    chosen_fixture: Option<usize>,
+    /// The setup panel's selected part, of those past the first.
+    chosen_part: Option<usize>,
     /// The setup panel's strategy for Add operation, by its place in
     /// [`STRATEGIES`].
     new_strategy: usize,
@@ -1088,6 +1092,8 @@ impl Cam {
         self.template_ui.name = None;
         self.template_ui.rules = None;
         self.load_templates();
+        self.chosen_fixture = None;
+        self.chosen_part = None;
         self.refresh_for(id, false);
         if let Some(setup) = self.setup_of(id) {
             self.find_lines(&setup);
@@ -1219,19 +1225,22 @@ impl Cam {
             State::Failed(e) => return Err(e.clone()),
         };
         let bodies = host::bodies();
+        let name_of = |b: &String| {
+            bodies
+                .iter()
+                .find(|x| &x.id == b)
+                .map_or_else(|| b.clone(), |x| x.name.clone())
+        };
         let html = sheet::Sheet {
             name: &node.name,
             setup: &data,
-            bodies: data
-                .bodies
-                .iter()
-                .map(|b| {
-                    bodies
-                        .iter()
-                        .find(|x| &x.id == b)
-                        .map_or_else(|| b.clone(), |x| x.name.clone())
-                })
-                .collect(),
+            stock_body: data
+                .stock_body
+                .as_ref()
+                .filter(|_| data.stock == StockKind::Solid)
+                .map(name_of),
+            fixtures: data.fixtures.iter().map(name_of).collect(),
+            bodies: data.bodies.iter().map(name_of).collect(),
             run,
             carried_from: source_of(&setup, &data)
                 .and_then(Result::ok)
@@ -1351,7 +1360,31 @@ impl Bench for Cam {
                             false,
                             "box (round the bodies, the default), fixed-box or cylinder; or \
                              {from = \"previous\"}, what the setup before it leaves, or \
-                             {from = <a setup's name>}, what that earlier one leaves",
+                             {from = <a setup's name>}, what that earlier one leaves; or \
+                             {solid = <a body id>}, a body that is the stock, not machined",
+                        ),
+                        param(
+                            "parts",
+                            ParamKind::Any,
+                            false,
+                            "more parts, each at a work offset of its own, cut as the first \
+                             (at wcs): a list of {wcs = \"G55\", x, y, z} in mm from the \
+                             first, or a pattern {count = <parts in all>, x, y, z}, each the \
+                             next offset the post has, so far on from the one before",
+                        ),
+                        param(
+                            "order",
+                            ParamKind::String,
+                            false,
+                            "with several parts: tool (each tool at every part, the \
+                             default) or part (every operation at one part, then the next)",
+                        ),
+                        param(
+                            "fixtures",
+                            ParamKind::List,
+                            false,
+                            "body ids of what holds the part (vise jaws, clamps): never cut, \
+                             checked against every move, and not machined",
                         ),
                         param(
                             "size",
@@ -2149,20 +2182,32 @@ impl Bench for Cam {
         let number = |key: &str| args.get(key).and_then(Value::as_f64);
         match suffix(command).unwrap_or_default() {
             SETUP => {
-                let bodies = match args.get("bodies") {
+                let bodies: Vec<String> = match args.get("bodies") {
                     Some(list) => serde_json::from_value(list.clone())
                         .map_err(|_| "bodies is a list of body ids")?,
                     None => self.chosen_bodies(),
                 };
                 // Read before the setup is made, so a wrong one makes none.
                 let mut stock_from = None;
+                let mut stock_body = None;
                 let stock = match args.get("stock") {
                     None => None,
-                    Some(Value::Object(o)) => {
-                        let from = o
-                            .get("from")
+                    Some(Value::Object(o)) if o.contains_key("solid") => {
+                        let body = o
+                            .get("solid")
                             .and_then(Value::as_str)
-                            .ok_or("stock is a kind, or {from = \"previous\"} or a setup's name")?;
+                            .ok_or("stock = {solid = <a body id>}")?;
+                        if !host::bodies().iter().any(|b| b.id == body) {
+                            return Err(format!("no body '{body}' for the stock"));
+                        }
+                        stock_body = Some(body.to_string());
+                        Some(StockKind::Solid)
+                    }
+                    Some(Value::Object(o)) => {
+                        let from = o.get("from").and_then(Value::as_str).ok_or(
+                            "stock is a kind, {from = \"previous\"} or a setup's name, or \
+                             {solid = <a body id>}",
+                        )?;
                         if from != "previous" {
                             let (n, _) = setups()
                                 .into_iter()
@@ -2186,6 +2231,23 @@ impl Bench for Cam {
                         }
                     },
                 };
+                let fixtures: Vec<String> = match args.get("fixtures") {
+                    Some(list) => serde_json::from_value(list.clone())
+                        .map_err(|_| "fixtures is a list of body ids")?,
+                    None => Vec::new(),
+                };
+                if let Some(f) = fixtures
+                    .iter()
+                    .find(|f| !host::bodies().iter().any(|b| &b.id == *f))
+                {
+                    return Err(format!("no body '{f}' for a fixture"));
+                }
+                // The stock's body and the fixtures are not machined, though
+                // they are shown.
+                let bodies: Vec<String> = bodies
+                    .into_iter()
+                    .filter(|b| stock_body.as_ref() != Some(b) && !fixtures.contains(b))
+                    .collect();
                 let size: Option<[f64; 3]> = match args.get("size") {
                     Some(v) => Some(
                         serde_json::from_value(v.clone()).map_err(|_| "size is {x, y, z} in mm")?,
@@ -2333,7 +2395,14 @@ impl Bench for Cam {
                     if let Some(kind) = stock {
                         data.stock = kind;
                         data.stock_from = stock_from;
+                        data.stock_body = stock_body;
                     }
+                    data.fixtures = fixtures;
+                    data.part_order = match text("order").as_deref() {
+                        None | Some("tool") => camcraft_core::job::PlacementOrder::ByTool,
+                        Some("part") => camcraft_core::job::PlacementOrder::ByPart,
+                        Some(other) => return Err(format!("no order '{other}': tool or part")),
+                    };
                     if let Some([x, y, z]) = size {
                         (data.size_x, data.size_y, data.size_z) = (x, y, z);
                     }
@@ -2365,6 +2434,10 @@ impl Bench for Cam {
                         (data.wcs_x, data.wcs_y, data.wcs_z) = (at.x, at.y, at.z);
                     }
                     data.programs = programs;
+                    // After the post and its offset, which the parts' are among.
+                    if let Some(given) = args.get("parts") {
+                        data.parts = parts_of(&data, given)?;
+                    }
                     if let Some(n) = number("number") {
                         data.program_number = n;
                     }
@@ -3384,5 +3457,54 @@ mod tests {
         // One added since the run is not the setup's failure.
         let new = computed_status(&computed, Some("new"));
         assert_eq!(new.state, FeatureState::NotRun);
+    }
+}
+
+/// A script's `parts` for `setup`: a list of `{wcs, x, y, z}`, or a pattern
+/// `{count, x, y, z}` of so many parts in all, each the next work offset its
+/// post has, so far on from the one before.
+fn parts_of(setup: &SetupData, given: &Value) -> Result<Vec<data::PartData>, String> {
+    let axis = |v: &Value, k: &str| v.get(k).and_then(Value::as_f64).unwrap_or(0.0);
+    match given {
+        Value::Array(list) => list
+            .iter()
+            .map(|p| {
+                let w = match p.get("wcs") {
+                    Some(Value::String(w)) => w.trim().to_ascii_uppercase(),
+                    Some(v) => format!("G{}", v.as_f64().ok_or("a part's wcs is G55 or the like")?),
+                    None => return Err("each part names its wcs".to_string()),
+                };
+                let (n, _) = setup
+                    .work_offsets()
+                    .into_iter()
+                    .find(|(_, o)| *o == w)
+                    .ok_or_else(|| format!("no work offset {w} on {}", setup.post))?;
+                Ok(data::PartData {
+                    wcs: f64::from(n),
+                    x: axis(p, "x"),
+                    y: axis(p, "y"),
+                    z: axis(p, "z"),
+                })
+            })
+            .collect(),
+        Value::Object(_) => {
+            let count = given
+                .get("count")
+                .and_then(Value::as_u64)
+                .ok_or("parts is a list, or {count, x, y, z}")?;
+            let step = [axis(given, "x"), axis(given, "y"), axis(given, "z")];
+            let mut probe = setup.clone();
+            probe.parts.clear();
+            for k in 1..count {
+                let mut next = probe
+                    .next_part(0.0)
+                    .ok_or_else(|| format!("{} has not {count} work offsets", setup.post))?;
+                let f = k as f64;
+                (next.x, next.y, next.z) = (step[0] * f, step[1] * f, step[2] * f);
+                probe.parts.push(next);
+            }
+            Ok(probe.parts)
+        }
+        _ => Err("parts is a list, or {count, x, y, z}".into()),
     }
 }

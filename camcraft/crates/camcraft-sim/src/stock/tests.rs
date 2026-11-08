@@ -1078,3 +1078,44 @@ fn a_stock_kept_as_bytes_reads_back() {
     assert!(PackedStock::from_bytes(&bytes[..bytes.len() - 1]).is_err());
     assert!(PackedStock::from_bytes(b"not a stock").is_err());
 }
+
+/// A ball of material, as a solid: each column from the lowest the ball
+/// comes over it to the highest, standing on its own bottom, its volume
+/// the ball's; past it, nothing. A tool down through it to below its bottom
+/// leaves the column empty.
+#[test]
+fn a_solid_is_its_columns_from_bottom_to_top() {
+    let ball = synthetic::uv_sphere(5.0, 60, 90).mapped(|p| p + dvec3(0.0, 0.0, 10.0));
+    let ball = ball.unwrap();
+    let mut s = Stock::from_solid(&ball, dvec2(-6.0, -6.0), dvec2(6.0, 6.0), 0.0, 0.1).unwrap();
+    let under = |x: f64, y: f64| {
+        let f = s.field();
+        let ix = ((x - f.origin().x) / f.pitch()).round() as usize;
+        let iy = ((y - f.origin().y) / f.pitch()).round() as usize;
+        f64::from(s.under().unwrap()[iy * f.nx() as usize + ix])
+    };
+    assert!((s.height_at(0.0, 0.0).unwrap() - 15.0).abs() < 0.05);
+    assert!((under(0.0, 0.0) - 5.0).abs() < 0.05);
+    assert!((s.height_at(4.0, 0.0).unwrap() - 13.0).abs() < 0.1);
+    assert!((under(4.0, 0.0) - 7.0).abs() < 0.1);
+    assert_eq!(s.height_at(5.8, 5.8), Some(0.0), "none past it");
+    let v = 4.0 / 3.0 * std::f64::consts::PI * 125.0;
+    assert!((s.volume() - v).abs() < 0.02 * v, "{} {v}", s.volume());
+    let down = [
+        SimMove {
+            to: dvec3(0.0, 0.0, 20.0),
+            class: MoveClass::Rapid,
+            arc: None,
+        },
+        SimMove {
+            to: dvec3(0.0, 0.0, 4.0),
+            class: MoveClass::MayCut,
+            arc: None,
+        },
+    ];
+    s.sweep(&down, &Flat(0.5));
+    assert_eq!(s.height_at(0.0, 0.0), Some(0.0));
+    // Nothing there to take is no solid at all.
+    let far = Stock::from_solid(&ball, dvec2(20.0, 20.0), dvec2(30.0, 30.0), 0.0, 0.1);
+    assert_eq!(far.unwrap_err(), StockError::NoBlocks);
+}

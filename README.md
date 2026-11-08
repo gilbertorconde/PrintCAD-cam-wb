@@ -55,6 +55,38 @@ panels, the drawing and the helper that runs camcraft.
   from its bottom up to its top, so turned over it is the same material;
   seen from the side, or tilted, a pocket hidden inside the material along
   the new tool axis is taken as material, never the other way round.
+- **Stock from a body,** as Fusion's "From solid": a setup's stock can be a
+  body of the document, a casting, a blank cut before or a printed part
+  near its net shape. It is not machined: the setup starts from its
+  material as the setup sees it, each column from the lowest the body
+  comes over it to the highest along the tool, so a pocket cast open from
+  above is air and roughing does not cut it again (adaptive clearing
+  clears what stands, not the box round it); one hidden inside the
+  material, out of the tool's reach, is taken as material. Its box is the
+  stock's, which a work zero on the stock is placed on. The checks, the
+  simulation, playback and the times start from it, and the setup sheet
+  names the body.
+- **Several parts, each at its own work offset,** as on two vises or a
+  fixture plate's stations: a setup's Parts lists more, each at a work
+  offset of its own (`G55`, `G56`…) and as far from the first, the part as
+  the document has it at the setup's own offset, along the setup's axes;
+  Add a part takes the next offset the post has, as far on as the last two
+  are apart. The same operations are cut at each, and posted at each:
+  in one program by tool, each run of operations with one tool at every
+  part before the next tool, as Fusion's "WCS order by tool", or by part,
+  every operation at one part before the next; one program an operation
+  cuts it at each in turn. Between two parts the tool, still turning, is
+  sent clear as the profile's `safe_retract` takes it, the next offset is
+  selected, and it starts again from there; a profile with no
+  `safe_retract` cannot change offsets in one program. The program reads
+  back section by section, each on its offset. Each part is simulated as
+  the first, since each is cut the same in its own coordinates; what
+  differs is checked at each: the fixtures, against the toolpath where
+  that part is, and the travel, where its work offset is on the machine
+  (each known one's own, else the first's moved as far). Stocks so close
+  they overlap are a warning. The view draws each part's stock and work
+  zero; playback is the first part's; the machining time is every part's;
+  the setup sheet lists each part's offset.
 - **Tilted setups (3+2).** A setup's tool axis can be any direction: out of
   a flat face picked on the part, along a straight edge picked on it (either
   way), the document's Z tilted by angles about its X and then its Y, or a
@@ -401,6 +433,19 @@ panels, the drawing and the helper that runs camcraft.
   where they would meet the part, and links round what it left out; the
   check still runs, for the stock an earlier operation left. Other
   operations are only checked.
+- **Fixtures.** A setup can name the bodies that hold the part: vise jaws,
+  clamps, a sacrificial board, tabs on the table. They are not machined
+  and never cut: every move of every operation, cutting or rapid, is
+  checked against each, the tool whole (its cutter, its body past the
+  flutes, its shank and its holder), at each placement of the part, and
+  one that meets it is a failed check naming the fixture, what of the tool
+  met it and the first move it did, marked on the timeline ("holder segment
+  1 (Ø32.00) meets the fixture 'Jaw' on 6 move(s) from move 212, 4.10 mm
+  into it"). Each is drawn as the box round it, red where a tool meets it.
+  A 3D finish can be asked to Avoid fixtures: it leaves out its cuts where
+  the tool would meet one, as Use shank and holder does; the links round
+  what it leaves out are the linker's, which goes by the material, not the
+  fixtures, and are checked all the same.
 - **Playback,** as camcraft's: while a setup or one of its operations is
   open, a transport under the view plays its run back. A timeline has a span
   per operation as long as it takes to run, with failed checks marked filled
@@ -610,6 +655,11 @@ local disc = cam.setup{bodies = {"<body id>"}, stock = "cylinder", axis = "tool"
 local side = cam.setup{bodies = {"<body id>"}, tool_axis = "-y", machine_x = "+x"}
 local placed = cam.setup{bodies = {"<body id>"}, post = "linuxcnc", wcs = "G59.1",
                         work_offset = {x = 250, y = -180, z = -95}}  -- in machine coordinates
+local cast = cam.setup{bodies = {"<body id>"}, stock = {solid = "<casting's body id>"}}
+local held = cam.setup{bodies = {"<body id>"}, fixtures = {"<jaw id>", "<clamp id>"}}
+local vises = cam.setup{bodies = {"<body id>"}, post = "linuxcnc",
+                        parts = {{wcs = "G55", x = 150}}, order = "tool"}
+                                        -- or parts = {count = 4, x = 120}: G54 to G57
 local tilted = cam.setup{bodies = {"<body id>"}, tilt = {x = 30, y = 0}}
 local rotary = cam.setup{bodies = {"<body id>"}, stock = "cylinder", axis = "x",
                          post = "my-4-axis", wrap = {diameter = 40}}  -- or wrap = true

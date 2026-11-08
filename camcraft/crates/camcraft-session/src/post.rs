@@ -10,11 +10,17 @@
 //! written. Several setups are all posted or none are: half a job's programs are a
 //! trap on the machine. The command line's `--out` and the app's Post both come
 //! through here, so they write the same files under the same names.
+//!
+//! A setup of several placements, parts each at a work offset of its own,
+//! posts each operation at every one: in one program, each run of operations
+//! with one tool at every placement before the next tool, or every operation
+//! at one placement before the next ([`PlacementOrder`]); one an operation,
+//! the operation at each in turn.
 
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
-use camcraft_core::job::{Coolant, Programs, Setup};
+use camcraft_core::job::{Coolant, PlacementOrder, Programs, Setup};
 use camcraft_core::path::toolpath::Toolpath;
 use camcraft_core::run::{Made, OperationResult, SetupResult, StrategyDetail};
 use camcraft_core::setup::bounds_all;
@@ -339,16 +345,52 @@ pub fn custom_gcode(
 /// offsets. The moves are checked along the setup's own axes: tilted, as the
 /// machine moves once its rotaries have stood the part up (the setup's X on
 /// the machine's, as positioning them requires), or as it is fixtured tilted.
+///
+/// With several placements each is checked where its work offset puts it,
+/// what is past or not checked saying at which.
 pub fn travel_check(
     op: &OperationResult,
     setup: &Setup,
     frame: &Frame,
     profile: &Profile,
 ) -> TravelCheck {
-    let place = Placement {
-        zero: setup.work_offset.map(DVec3::from_array),
-        tool_length: op.tool_length,
-    };
+    let placed = setup.placed();
+    let several = placed.len() > 1;
+    let mut out = TravelCheck::default();
+    for p in placed {
+        let place = Placement {
+            zero: p.work_offset.map(DVec3::from_array),
+            tool_length: op.tool_length,
+        };
+        let check = travel_at(op, frame, profile, &place);
+        let at = |why: String| {
+            if several {
+                let word = profile
+                    .wcs_word(p.wcs)
+                    .unwrap_or_else(|| format!("G{}", p.wcs));
+                format!("at {word}: {why}")
+            } else {
+                why
+            }
+        };
+        out.past.extend(check.past.into_iter().map(at));
+        for why in check.unchecked.into_iter().map(at) {
+            if !out.unchecked.contains(&why) {
+                out.unchecked.push(why);
+            }
+        }
+    }
+    out
+}
+
+/// [`travel_check`] for one placement, its work zero placed by `place`.
+fn travel_at(
+    op: &OperationResult,
+    frame: &Frame,
+    profile: &Profile,
+    place: &Placement,
+) -> TravelCheck {
+    let place = *place;
     let Some((low, high)) = extents(&op.path) else {
         return TravelCheck::default();
     };
@@ -377,6 +419,38 @@ pub fn travel_check(
         }
     }
     out
+}
+
+/// `spec` once for each of `setup`'s placements, on its work offset: one
+/// operation's part of a program at each part.
+pub fn placed_specs(spec: &ProgramSpec, setup: &Setup) -> Vec<ProgramSpec> {
+    setup
+        .placed()
+        .iter()
+        .map(|p| ProgramSpec {
+            wcs: p.wcs,
+            ..spec.clone()
+        })
+        .collect()
+}
+
+/// One operation's program for a setup of several placements: `path` at
+/// each, as `specs` ([`placed_specs`]) say, and for each instruction how
+/// many of the path's moves are made once it has run, the first part's
+/// counted and the others' taken as after it, so a line is found from a
+/// move on the first.
+pub fn placed_program(
+    path: &Toolpath,
+    specs: &[ProgramSpec],
+    profile: &Profile,
+) -> Result<(Vec<camcraft_post::op::Op>, Vec<usize>), LowerError> {
+    let sections: Vec<Section> = specs.iter().map(|spec| Section { path, spec }).collect();
+    let (ops, made) = lower_setup(&sections, Joining::of(profile)).map_err(|e| e.error)?;
+    let made = made
+        .into_iter()
+        .map(|(section, n)| if section == 0 { n } else { path.len() })
+        .collect();
+    Ok((ops, made))
 }
 
 /// Render one operation, of a setup whose frame is `frame`, as a program for
@@ -430,7 +504,38 @@ pub fn setup_specs(
         spec.stock = stock;
         out.push((k, spec));
     }
-    Ok(out)
+    if setup.placements.is_empty() {
+        return Ok(out);
+    }
+    // Each operation at every part: by tool, each run of operations with
+    // one tool in turn; by part, all of them.
+    let mut runs: Vec<Vec<(usize, ProgramSpec)>> = Vec::new();
+    for (k, spec) in out {
+        match runs.last_mut() {
+            Some(run)
+                if setup.placement_order == PlacementOrder::ByPart
+                    || run.last().is_some_and(|(_, s)| s.tool == spec.tool) =>
+            {
+                run.push((k, spec));
+            }
+            _ => runs.push(vec![(k, spec)]),
+        }
+    }
+    let mut placed = Vec::new();
+    for run in runs {
+        for p in setup.placed() {
+            for (k, spec) in &run {
+                placed.push((
+                    *k,
+                    ProgramSpec {
+                        wcs: p.wcs,
+                        ..spec.clone()
+                    },
+                ));
+            }
+        }
+    }
+    Ok(placed)
 }
 
 /// A setup posted as one program.
@@ -615,7 +720,17 @@ pub fn plan_posting(
                     .saturating_add(u32::try_from(programs.len()).unwrap_or(u32::MAX)),
                 date: None,
             };
-            let ops = lower(&posted_path(op, &spec, 0.0), &spec).map_err(|e| in_setup(e.into()))?;
+            let ops = if !setup.placements.is_empty() {
+                placed_program(
+                    &posted_path(op, &spec, 0.0),
+                    &placed_specs(&spec, setup),
+                    &loaded,
+                )
+                .map(|(ops, _)| ops)
+            } else {
+                lower(&posted_path(op, &spec, 0.0), &spec)
+            }
+            .map_err(|e| in_setup(e.into()))?;
             let (text, report) = render_program(&ops, &loaded, &title);
             let whose = format!("setup '{}' operation '{}'", setup.name, op.name);
             programs.push((name, whose, op.name.clone(), text, report));

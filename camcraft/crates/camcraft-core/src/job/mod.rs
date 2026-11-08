@@ -98,8 +98,8 @@ pub use passes::{
 pub use pattern::{Linear, MOST_COPIES, Mirror, MirrorAxis, Pattern, Polar};
 pub use pick::{FeatureRef, PointRef, Snap};
 pub use setup::{
-    Along, BoxOf, DEFAULT_NUMBER, DEFAULT_SEGMENT, LAST_WCS, Origin, Programs, Setup, Wrap,
-    ZCorrection,
+    Along, BoxOf, DEFAULT_NUMBER, DEFAULT_SEGMENT, LAST_WCS, Origin, Placement, PlacementOrder,
+    Programs, Setup, Wrap, ZCorrection,
 };
 pub use strategy_spec::{
     ChamferSide, ContourOrder, CutDirection, FaceDirection, PassOrder, ProfileSide,

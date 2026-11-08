@@ -113,6 +113,8 @@ impl Job {
                     positive(&field("diameter"), *diameter)?;
                     positive(&field("length"), *length)?;
                 }
+                // Its model is checked above, with every stock's.
+                StockSpec::Solid { .. } => {}
             }
         }
 
@@ -184,6 +186,26 @@ impl Job {
         {
             return Err(JobError::BadWorkOffsetPosition(name.clone()));
         }
+        let mut offsets = BTreeSet::new();
+        for p in &setup.placements {
+            if !(54..=LAST_WCS).contains(&p.wcs) {
+                return Err(JobError::BadWorkOffset {
+                    setup: name.clone(),
+                    wcs: p.wcs,
+                });
+            }
+            let finite = |v: &[f64; 3]| v.iter().all(|c| c.is_finite());
+            if !finite(&p.at) || p.work_offset.is_some_and(|w| !finite(&w)) {
+                return Err(JobError::BadWorkOffsetPosition(name.clone()));
+            }
+            // Two parts on one offset would be cut in the same place.
+            if !offsets.insert(p.wcs) {
+                return Err(JobError::SameWorkOffset {
+                    setup: name.clone(),
+                    wcs: p.wcs,
+                });
+            }
+        }
         if let Some(z) = &setup.z_correction {
             let bad_map = |why: String| JobError::BadProbeMap {
                 setup: name.clone(),
@@ -228,10 +250,52 @@ impl Job {
             return Err(JobError::NoStock(name.clone()));
         }
         for s in &setup.stocks {
-            if self.stock(s).is_none() {
+            let Some(def) = self.stock(s) else {
                 return Err(JobError::UnknownStock {
                     setup: name.clone(),
                     stock: s.clone(),
+                });
+            };
+            // A solid's columns are its own: another block beside it would
+            // be one height a column with it, and the part cut from itself
+            // is no part.
+            if let StockSpec::Solid { model } = &def.spec {
+                let why = if setup.stocks.len() > 1 {
+                    Some("it must be the setup's only stock")
+                } else if setup.models.contains(model) {
+                    Some("it is one of the models the setup machines")
+                } else {
+                    None
+                };
+                if let Some(why) = why {
+                    return Err(JobError::SolidStock {
+                        setup: name.clone(),
+                        model: model.clone(),
+                        why,
+                    });
+                }
+            }
+        }
+        for f in &setup.fixtures {
+            let solid = setup
+                .stocks
+                .iter()
+                .filter_map(|s| self.stock(s))
+                .any(|d| matches!(&d.spec, StockSpec::Solid { model } if model == f));
+            let why = if self.model(f).is_none() {
+                Some("it is not in the job")
+            } else if setup.models.contains(f) {
+                Some("it is one of the models the setup machines")
+            } else if solid {
+                Some("it is the setup's stock")
+            } else {
+                None
+            };
+            if let Some(why) = why {
+                return Err(JobError::BadFixture {
+                    setup: name.clone(),
+                    model: f.clone(),
+                    why,
                 });
             }
         }

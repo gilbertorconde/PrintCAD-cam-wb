@@ -692,6 +692,59 @@ chamfer (`tip-length`), a spot drill no longer a plain cone; and
 `cutter/tool/tests.rs`, `cutter/dropcutter/tests.rs`, `job/tests.rs`
 (`kinds`), `run/tests/kinds.rs` and the two imports'.
 
+And stock from a solid, as Fusion's "From solid". In `camcraft-core`,
+`StockSpec::Solid` names a model of the job that is the stock: a setup's
+only one, never one of its models (`JobError::SolidStock`). Anything that
+needs only a bound takes its box; `prepare_from` lays it out in the
+setup's frame (`Prepared::solid`), and `Prepared::fresh_stock` starts the
+run, and a pattern's or rest machining's copies, from it, as from what an
+earlier setup left. In `camcraft-sim`, `Stock::from_solid` samples a mesh
+into columns, each from the lowest it comes over the column's middle to
+the highest, the bottom kept as the underside (`part::extremes` rasterises
+both). An adaptive clearing whose setup starts from such material, a
+solid's or what an earlier setup left (`Prepared::starts_shaped`), is
+worked out as a pattern's one copy is, its material at each level where
+that stands above it rather than its blocks, so it does not clear a cast
+pocket, or what the side before cut, again. In `camcraft-session`, the
+run's notes name the solid.
+
+And fixtures, which are never cut. In `camcraft-core`, a `Setup` has
+`fixtures`, models of the job that are neither its parts nor its stock
+(`JobError::BadFixture`), laid out in its frame (`Prepared::fixtures`).
+`run::fixtures` lays each one's top on a grid once, grown a cell, no finer
+than 0.2 mm (`Fixture::of`), and checks every move of every operation with
+paths, after any probe correction, against each, at each placement of the
+part (`Setup::placement_offsets`), with the tool whole (`whole_tool`: the
+cutter as cylinders up its tip, then what stands above its flutes) through
+`camcraft_sim::stock::Reach`, as the holder is checked against the
+material. What meets one is an `OperationResult::fixtures` entry
+(`FixtureHit`: the fixture, the placement, what of the tool, the first
+move, how many, how deep, whether at rapid), which fails `is_clean`.
+`Passes::avoid_fixtures` makes a 3D finish leave out the cuts where the
+tool would meet a fixture, as `use_holder` does the part (`leave_out`, which
+both now share). In `camcraft-session`, the checks add `CC113` (a fixture
+met: fails) and `CC219` (cuts left out to avoid one).
+
+And several parts in one setup, each at its own work offset. In
+`camcraft-core`, a `Setup` has `placements` (`Placement`: a `wcs`, `at`,
+how far its part is from the job's along the setup's axes, and its
+`work_offset` in machine coordinates, else the first's moved by `at`;
+`Setup::placed` gives them, or the one part at `wcs`; two on one offset are
+`JobError::SameWorkOffset`) and `placement_order` (`PlacementOrder`:
+`by-tool` or `by-part`). Each part is cut the same in its own coordinates,
+so the run is the first's; the fixtures are checked at each placement's
+`at`. In `camcraft-post`, `lower_setup` writes the work offset again where
+two sections' differ, the tool kept turning: sent clear by the profile's
+`safe_retract` (`Op::SafeRetract`) first, the next section starting from a
+place not known; a profile without one is refused
+(`LowerError::OffsetsWithoutRetract`). `readback::check_setup` reads it as
+it is. In `camcraft-session`, `setup_specs` gives each operation at every
+placement in the order asked (by tool, each run of operations with one tool
+at every placement), `placed_specs` and `placed_program` post one operation
+at each, `travel_check` checks each placement where its offset is, saying
+which, and a run warns of placements whose stocks overlap. A golden program
+of two vises by tool (`linuxcnc-setup-vises.nc`).
+
 And one test: ogeom is 0.11.1 here, which printCAD's shapes need, and it
 meshes `round_edge_loose_fit.step`'s seam that 0.11.0 drew off the torus, so
 `a_loose_fit_is_refused_for_ogeoms_seam` became

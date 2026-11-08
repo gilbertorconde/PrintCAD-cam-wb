@@ -172,18 +172,24 @@ pub fn check(
             Group {
                 op: Some(i),
                 title: format!("{}. {}", i + 1, op.name),
-                findings: sorted(operation_findings(
-                    op,
-                    tool.as_ref(),
-                    // A probe's path is not corrected: it touches the
-                    // surface wherever it is, from above the part as
-                    // modelled.
-                    (
-                        &cutter,
-                        probed.filter(|_| !matches!(op.detail, StrategyDetail::Probe(_))),
-                    ),
-                    job.tolerance,
-                )),
+                findings: sorted({
+                    let mut out = operation_findings(
+                        op,
+                        tool.as_ref(),
+                        // A probe's path is not corrected: it touches the
+                        // surface wherever it is, from above the part as
+                        // modelled.
+                        (
+                            &cutter,
+                            probed.filter(|_| !matches!(op.detail, StrategyDetail::Probe(_))),
+                        ),
+                        job.tolerance,
+                    );
+                    if let Some(s) = job.setups.get(setup) {
+                        fixture_findings(op, s, &mut out);
+                    }
+                    out
+                }),
             }
         })
         .collect();
@@ -306,6 +312,50 @@ fn holder_findings(op: &OperationResult, out: &mut Vec<Finding>) {
                 c.trimmed
             ),
             "and not finished: Use shank and holder".into(),
+        ));
+    }
+}
+
+/// CC113: each fixture the operation's tool meets, at each placement of the
+/// part, a failure at the first move it does; else a pass, where the setup
+/// has fixtures. A fixture is never cut: whatever of the tool meets one,
+/// cutting or at rapid, breaks the tool or the fixture, or throws the part.
+fn fixture_findings(op: &OperationResult, setup: &Setup, out: &mut Vec<Finding>) {
+    if setup.fixtures.is_empty() {
+        return;
+    }
+    let several = setup.placement_offsets().len() > 1;
+    for hit in &op.fixtures {
+        let wcs = several.then(|| setup.placement_word(hit.placement));
+        out.push(
+            finding(
+                Level::Fail,
+                "CC113",
+                hit.line(wcs.as_deref()),
+                "move the fixture, or keep the operation off it: its boundary, its heights, \
+                 or Avoid fixtures"
+                    .into(),
+            )
+            .at(hit.first_move),
+        );
+    }
+    if op.fixtures.is_empty() {
+        out.push(finding(
+            Level::Pass,
+            "CC113",
+            format!("the tool meets no fixture: {}", setup.fixtures.join(", ")),
+            String::new(),
+        ));
+    }
+    if op.fixture_trimmed > 0 {
+        out.push(finding(
+            Level::Note,
+            "CC219",
+            format!(
+                "{} cutting move(s) left out where the tool would meet a fixture",
+                op.fixture_trimmed
+            ),
+            "and not finished: Avoid fixtures".into(),
         ));
     }
 }

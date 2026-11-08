@@ -12,9 +12,16 @@
 //! tool changed even when it is the same, as a program of its own would.
 //! Where the profile asks for it, the program stops between every two
 //! operations for the operator (`M1`), the spindle stopped first. The
-//! setup's stock and its work offset are written once, and after each tool
-//! change the next operation's other tool is called up, where the profile
-//! does that.
+//! setup's stock is written once, its work offset once and again where it
+//! changes, and after each tool change the next operation's other tool is
+//! called up, where the profile does that.
+//!
+//! A setup holding several parts, each at its own work offset, posts the
+//! same operations at each: between two on different offsets the tool, still
+//! turning, goes up clear as the profile takes it, the next offset is
+//! selected, and the next starts from there as from a tool change, where it
+//! is in the new coordinates not known. A profile with no way up of its own
+//! cannot change offsets in one program.
 
 use camcraft_core::job::Coolant;
 use camcraft_core::path::toolpath::Toolpath;
@@ -73,6 +80,16 @@ pub type Made = Vec<(usize, usize)>;
 pub fn lower_setup(sections: &[Section], join: Joining) -> Result<(Vec<Op>, Made), SectionError> {
     for (i, s) in sections.iter().enumerate() {
         refuse(s.path, s.spec).map_err(|error| SectionError { section: i, error })?;
+        let moved = i
+            .checked_sub(1)
+            .and_then(|b| sections.get(b))
+            .is_some_and(|b| b.spec.wcs != s.spec.wcs);
+        if moved && !join.retracts {
+            return Err(SectionError {
+                section: i,
+                error: LowerError::OffsetsWithoutRetract,
+            });
+        }
     }
     let mut w = Stream::default();
     let Some(first) = sections.first() else {
@@ -103,6 +120,10 @@ pub fn lower_setup(sections: &[Section], join: Joining) -> Result<(Vec<Op>, Made
         });
         match before {
             Some(b) if !restarts(b.spec, spec, join) => {
+                // Another part: its offset, the tool clear of the last.
+                if b.spec.wcs != spec.wcs {
+                    w.push(Op::WorkOffset(spec.wcs));
+                }
                 // The same tool, still turning: at this one's speed and with
                 // its coolant.
                 if (b.spec.rpm, b.spec.spin) != (spec.rpm, spec.spin) {
@@ -261,7 +282,9 @@ impl Stream {
     /// up clear as the profile goes, or else straight up as high as either
     /// goes, and across there, so `n`'s first move goes only down.
     fn link(&mut self, s: &Section, n: &Section, join: Joining) {
-        if join.retracts {
+        // To another part's offset: clear first, as only the profile can
+        // say in the machine's terms.
+        if join.retracts || s.spec.wcs != n.spec.wcs {
             self.push(Op::SafeRetract);
             return;
         }
@@ -471,6 +494,54 @@ mod tests {
         )
         .unwrap();
         assert_eq!(ops, lower(&a, &spec).unwrap());
+    }
+
+    /// Two parts on two work offsets, one tool: the offset written for
+    /// each, the tool sent clear and kept turning between, never changed
+    /// again; for a profile with no way to send it clear, refused.
+    #[test]
+    fn another_work_offset_is_selected_with_the_tool_clear() {
+        let (a, b) = (path(0.0), path(0.0));
+        let specs = [
+            spec("a", 1, 18000),
+            ProgramSpec {
+                wcs: 55,
+                ..spec("a", 1, 18000)
+            },
+        ];
+        let sections = [
+            Section {
+                path: &a,
+                spec: &specs[0],
+            },
+            Section {
+                path: &b,
+                spec: &specs[1],
+            },
+        ];
+        let join = Joining {
+            optional_stop: false,
+            retracts: true,
+        };
+        let (ops, _) = lower_setup(&sections, join).unwrap();
+        assert_eq!(count(&ops, |o| matches!(o, Op::ToolChange { .. })), 1);
+        let to = ops.iter().position(|o| *o == Op::WorkOffset(55)).unwrap();
+        let clear = ops[..to]
+            .iter()
+            .rposition(|o| *o == Op::SafeRetract)
+            .unwrap();
+        let start = ops[..to]
+            .iter()
+            .rposition(|o| matches!(o, Op::SectionStart { .. }))
+            .unwrap();
+        assert!(clear < start, "clear before the next part starts");
+        assert_eq!(
+            count(&ops, |o| *o == Op::SpindleOff),
+            2,
+            "at the start and end"
+        );
+        let e = lower_setup(&sections, Joining::default()).unwrap_err();
+        assert_eq!((e.section, e.error), (1, LowerError::OffsetsWithoutRetract));
     }
 
     /// A section that cannot be posted is named.

@@ -32,9 +32,9 @@ use camcraft_post::profile::{ProbeStyle, Profile, Rapid};
 use camcraft_post::render::{Title, render_program};
 use camcraft_session::checks::Level as CheckLevel;
 use camcraft_session::{
-    Model, Models, Ran, custom_gcode, load_profile, next_tools, parse_job, posted_path,
-    program_spec, read_probe_results, run_setup_from, setup_program, setup_program_name,
-    travel_check,
+    Model, Models, Ran, custom_gcode, load_profile, next_tools, parse_job, placed_program,
+    placed_specs, posted_path, program_spec, read_probe_results, run_setup_from, setup_program,
+    setup_program_name, travel_check,
 };
 use camcraft_sim::stock::{Axis, Block};
 use glam::{DAffine3, DMat4, DVec2, DVec3};
@@ -243,7 +243,15 @@ pub(crate) fn execute(
                 }
                 spec.next_tool = next.get(k).copied().flatten();
                 spec.stock = stock_box.map(|b| (b.min, b.max));
-                lower_counted(&posted_path(op, &spec, 0.0), &spec)
+                if !setup.placements.is_empty() {
+                    placed_program(
+                        &posted_path(op, &spec, 0.0),
+                        &placed_specs(&spec, setup),
+                        &profile,
+                    )
+                } else {
+                    lower_counted(&posted_path(op, &spec, 0.0), &spec)
+                }
             });
             match posted {
                 Ok((ops, made)) => {
@@ -407,8 +415,10 @@ pub(crate) fn execute(
     if tool_changes == 0 {
         tool_changes = changes_by_tool(&ran.result.operations);
     }
+    // Each part machined as the first is.
+    let parts = setup.placed().len();
     let machining = Machining {
-        moves: elapsed,
+        moves: elapsed * parts as f64,
         tool_changes: u32::try_from(tool_changes).unwrap_or(u32::MAX),
         tool_change: profile.tool_change_seconds,
         rapid: [rapid.x, rapid.y, rapid.z],
@@ -451,7 +461,42 @@ pub(crate) fn execute(
             .collect(),
         warnings: ran.warnings.clone(),
         stock,
+        fixtures: setup
+            .fixtures
+            .iter()
+            .filter_map(|name| {
+                let [low, high] = part_box(&loaded, std::slice::from_ref(name), &frame)?;
+                Some(cam_protocol::FixtureBox {
+                    name: name.clone(),
+                    corners: corners(
+                        &frame,
+                        Aabb {
+                            min: DVec3::from_array(low),
+                            max: DVec3::from_array(high),
+                        },
+                    ),
+                    met: ran
+                        .result
+                        .operations
+                        .iter()
+                        .any(|op| op.fixtures.iter().any(|h| &h.fixture == name)),
+                })
+            })
+            .collect(),
         cylinder: cylinder(&frame, &ran.result.stocks),
+        placements: setup
+            .placed()
+            .iter()
+            .map(|p| cam_protocol::PlacedPart {
+                wcs: profile
+                    .wcs_word(p.wcs)
+                    .unwrap_or_else(|| format!("G{}", p.wcs)),
+                offset: to_array(
+                    frame.to_model(DVec3::from_array(p.at)) - frame.to_model(DVec3::ZERO),
+                ),
+                work_offset: p.work_offset,
+            })
+            .collect(),
         origin: to_array(frame.to_model(DVec3::ZERO)),
         operations,
         material: material(&ran),

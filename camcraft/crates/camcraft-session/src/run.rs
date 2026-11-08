@@ -82,6 +82,14 @@ pub fn run_setup_from(
     let bodies: Bodies<'_> = models.iter().map(|(n, m)| (*n, &m.body)).collect();
     progress(Stage::Preparing);
     let prepared = prepare_from(job, index, &bodies, carried)?;
+    if prepared.solid.is_some()
+        && let Some(def) = setup.stocks.first().and_then(|s| job.stock(s))
+    {
+        notes.push(format!(
+            "stock: the solid '{}', as it is",
+            def.spec.models().join("', '")
+        ));
+    }
     let result = run_prepared_planned(job, index, &prepared, &bodies, plans, progress)?;
     notes.extend(summary(&result));
 
@@ -103,6 +111,20 @@ pub fn run_setup_from(
         result.probe_map.as_ref(),
     );
     let mut warnings = result.warnings();
+    // Parts placed so close their stocks overlap cut each other's.
+    let placed = setup.placed();
+    let (lo, hi) = (result.stock_min, result.stock_max);
+    for (i, a) in placed.iter().enumerate() {
+        for b in placed.iter().skip(i + 1) {
+            let d = glam::DVec2::new(b.at[0] - a.at[0], b.at[1] - a.at[1]).abs();
+            if d.x < hi.x - lo.x && d.y < hi.y - lo.y {
+                warnings.push(format!(
+                    "the stocks at G{} and G{} overlap: each part's cuts would reach the other's",
+                    a.wcs, b.wcs
+                ));
+            }
+        }
+    }
     warnings.extend(model_warnings);
     Ok(Ran {
         result,

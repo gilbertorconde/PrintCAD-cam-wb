@@ -16,6 +16,9 @@ const MUTED: Rgb = [0.55, 0.58, 0.62];
 const STOCK: Rgb = [0.9, 0.62, 0.25];
 const RAPID: Rgb = [0.9, 0.3, 0.25];
 const ZERO: Rgb = [0.35, 0.8, 0.4];
+/// A fixture, and one a tool meets.
+const FIXTURE: Rgb = [0.62, 0.45, 0.85];
+const FIXTURE_MET: Rgb = [0.95, 0.2, 0.2];
 const MATERIAL: Rgb = [0.78, 0.66, 0.5];
 /// camcraft's colours for a boundary, and for the hatching over what the
 /// tool cuts outside the part: amber, the darkest for the hatch.
@@ -100,6 +103,25 @@ pub fn draw(cam: &Cam, frame: &mut Frame) {
             continue;
         };
         stock_box(frame, run, mine);
+        // Each other part: its stock and its work zero, where it is.
+        for p in run.placements.iter().skip(1) {
+            let moved = |c: [f64; 3]| std::array::from_fn(|i| c[i] + p.offset[i]);
+            box_lines(
+                frame,
+                &run.stock.map(moved),
+                if mine { STOCK } else { MUTED },
+                true,
+            );
+            frame.marks.push(Mark {
+                at: moved(run.origin).map(|v| v as f32),
+                color: ZERO,
+                kind: MarkKind::Cross { size: 8.0 },
+            });
+        }
+        for f in &run.fixtures {
+            let color = if f.met { FIXTURE_MET } else { FIXTURE };
+            box_lines(frame, &f.corners, if mine { color } else { MUTED }, false);
+        }
         frame.marks.push(Mark {
             at: run.origin.map(|v| v as f32),
             color: ZERO,
@@ -404,13 +426,18 @@ fn stock_box(frame: &mut Frame, run: &Run, mine: bool) {
         frame.lines.extend(cylinder(c, color));
         return;
     }
-    // Corner `i` is high in X, Y and Z where bits 1, 2 and 4 of it are.
+    box_lines(frame, &c, color, true);
+}
+
+/// A box by its corners as its twelve edges. Corner `i` is high in X, Y and
+/// Z where bits 1, 2 and 4 of it are.
+fn box_lines(frame: &mut Frame, c: &[[f64; 3]; 8], color: Rgb, dashed: bool) {
     let p = |i: usize| c[i].map(|v| v as f32);
     for z in [0, 4] {
         frame.lines.push(Polyline {
             points: [0, 1, 3, 2].iter().map(|i| p(i + z)).collect(),
             color,
-            dashed: true,
+            dashed,
             closed: true,
             ..Default::default()
         });
@@ -419,7 +446,7 @@ fn stock_box(frame: &mut Frame, run: &Run, mine: bool) {
         frame.lines.push(Polyline {
             points: vec![p(i), p(i + 4)],
             color,
-            dashed: true,
+            dashed,
             ..Default::default()
         });
     }

@@ -2094,3 +2094,204 @@ fn a_setup_on_a_rotary_is_wrapped_round_it() {
     // No height planes across a bar.
     assert!(op.heights.is_empty());
 }
+
+/// What a run's operations say they removed, in cubic millimetres.
+fn removed(run: &cam_protocol::Run) -> f64 {
+    run.operations
+        .iter()
+        .filter_map(|op| op.summary.split("removed ").nth(1))
+        .filter_map(|r| r.split(' ').next()?.parse::<f64>().ok())
+        .sum()
+}
+
+/// A setup whose stock is a body of its own, a printed part near its net
+/// shape a millimetre higher than the part: its stock's box is that body's,
+/// it is not machined, and roughing takes only the millimetre, not a block
+/// round the part.
+#[test]
+fn a_body_is_the_stock_it_starts_from() {
+    let part = native("hinge_jig.step");
+    let mut up = IDENTITY;
+    up[11] = 1.0;
+    let request = |job: String, stock: bool| Request {
+        version: VERSION,
+        job,
+        shapes: BTreeMap::from_iter(
+            [
+                (
+                    "part".to_string(),
+                    Shape {
+                        text: part.clone(),
+                        placement: IDENTITY,
+                    },
+                ),
+                (
+                    "printed".to_string(),
+                    Shape {
+                        text: part.clone(),
+                        placement: up,
+                    },
+                ),
+            ]
+            .into_iter()
+            .take(if stock { 2 } else { 1 }),
+        ),
+        max_points: 0,
+        ..Request::default()
+    };
+    let solid = JOB
+        .replace(
+            "[[stock]]\nname = \"block\"\nkind = \"around-models\"\nmargin = [2.0, 2.0, 2.0]",
+            "[[model]]\nname = \"printed\"\npath = \"printed\"\n\n\
+             [[stock]]\nname = \"block\"\nkind = \"solid\"\nmodel = \"printed\"",
+        )
+        .replace("[[setup]]", "[[setup]]\norigin = { kind = \"box-point\", of = \"stock\", x = \"min\", y = \"min\", z = \"max\" }");
+    assert!(solid.contains("kind = \"solid\""));
+    let near = answer(&request(solid, true)).unwrap();
+    let block = answer(&request(JOB.into(), false)).unwrap();
+    assert!(
+        near.notes.iter().any(|n| n.contains("the solid 'printed'")),
+        "{:?}",
+        near.notes
+    );
+    // Its box is the printed part's, a millimetre up: X and Y as the part's,
+    // where the block is two more each way.
+    let size = |r: &cam_protocol::Run| {
+        let (a, b) = (r.stock[0], r.stock[7]);
+        [b[0] - a[0], b[1] - a[1], b[2] - a[2]]
+    };
+    let (n, b) = (size(&near), size(&block));
+    assert!((b[0] - n[0] - 4.0).abs() < 0.1, "{n:?} {b:?}");
+    assert!((near.stock[7][2] - block.stock[7][2] + 1.0).abs() < 0.1);
+    // The work zero on the stock's top front-left corner is on its box.
+    let corner = near.stock[4];
+    assert!((0..3).all(|i| (near.origin[i] - corner[i]).abs() < 1e-6));
+    let (a, b) = (removed(&near), removed(&block));
+    assert!(a > 0.0 && a < 0.5 * b, "{a} {b}");
+}
+
+/// A fixture where the roughing goes, a second hinge jig standing on the
+/// first a little to the side, is a failed check that names it, at the
+/// first move to meet it, and comes back to be drawn, met; the run is not
+/// passed. Far off to the side it is met by nothing.
+#[test]
+fn a_fixture_in_the_path_is_a_failed_check() {
+    let part = native("hinge_jig.step");
+    let run = |placement: [f64; 16]| {
+        let request = Request {
+            version: VERSION,
+            job: JOB
+                .replace(
+                    "[[stock]]",
+                    "[[model]]\nname = \"clamp\"\npath = \"clamp\"\n\n[[stock]]",
+                )
+                .replace(
+                    "stocks = [\"block\"]",
+                    "stocks = [\"block\"]\nfixtures = [\"clamp\"]",
+                ),
+            shapes: BTreeMap::from([
+                (
+                    "part".to_string(),
+                    Shape {
+                        text: part.clone(),
+                        placement: IDENTITY,
+                    },
+                ),
+                (
+                    "clamp".to_string(),
+                    Shape {
+                        text: part.clone(),
+                        placement,
+                    },
+                ),
+            ]),
+            max_points: 0,
+            ..Request::default()
+        };
+        answer(&request).unwrap()
+    };
+    let mut on = IDENTITY;
+    (on[3], on[11]) = (10.0, 20.0);
+    let held = run(on);
+    assert!(!held.passed);
+    let hit = held
+        .findings
+        .iter()
+        .find(|f| f.code == "CC113" && f.level == Level::Fail)
+        .expect("a failed fixture check");
+    assert!(
+        hit.text.contains("meets the fixture 'clamp'"),
+        "{}",
+        hit.text
+    );
+    assert_eq!(hit.operation, Some(0));
+    assert!(hit.at_move.is_some());
+    assert_eq!(held.fixtures.len(), 1);
+    assert!(held.fixtures[0].met);
+    let mut off = IDENTITY;
+    off[3] = 500.0;
+    let clear = run(off);
+    assert!(
+        clear
+            .findings
+            .iter()
+            .any(|f| f.code == "CC113" && f.level == Level::Pass),
+        "{:?}",
+        clear.findings
+    );
+    assert!(!clear.fixtures[0].met);
+}
+
+/// Two vises, G54 and G55, 100 mm apart: the setup's program cuts the
+/// roughing at G54 and then at G55, the offset changed between, it
+/// machines twice as long, and the parts come back to be drawn, the second
+/// moved 100 mm along X.
+#[test]
+fn two_vises_are_posted_and_timed_as_two_parts() {
+    let request = |placements: &str| Request {
+        version: VERSION,
+        job: JOB
+            .replace("programs = \"operation\"", "post = \"linuxcnc\"")
+            .replace("post = \"grbl\"\n", "")
+            .replace(
+                "[[setup.operation]]",
+                &format!("{placements}[[setup.operation]]"),
+            ),
+        shapes: BTreeMap::from([(
+            "part".to_string(),
+            Shape {
+                text: native("hinge_jig.step"),
+                placement: IDENTITY,
+            },
+        )]),
+        max_points: 0,
+        ..Request::default()
+    };
+    let one = answer(&request("")).unwrap();
+    let two = answer(&request(
+        "[[setup.placement]]\nwcs = 54\n\n[[setup.placement]]\nwcs = 55\nat = [100.0, 0.0, 0.0]\n\n",
+    ))
+    .unwrap();
+    let text = &two.program.as_ref().expect("the setup's program").text;
+    let g54 = text.find("\nG54\n").expect(text);
+    let g55 = text.find("\nG55\n").expect(text);
+    assert!(g54 < g55);
+    assert_eq!(text.matches(" M6").count(), 1, "one tool, changed once");
+    assert!(
+        (two.machining.moves - 2.0 * one.machining.moves).abs() < 1e-6 * one.machining.moves,
+        "{} {}",
+        two.machining.moves,
+        one.machining.moves
+    );
+    assert_eq!(two.placements.len(), 2);
+    assert_eq!(two.placements[1].wcs, "G55");
+    assert!((two.placements[1].offset[0] - 100.0).abs() < 1e-9);
+    assert!(
+        two.passed,
+        "{:?}",
+        two.findings
+            .iter()
+            .filter(|f| f.level == Level::Fail)
+            .collect::<Vec<_>>()
+    );
+}
