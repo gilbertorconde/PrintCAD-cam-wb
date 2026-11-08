@@ -619,6 +619,24 @@ from the bar, and the rotary's angles, as posted alone, against its
 limits unless it is continuous. Golden programs: `linuxcnc-wrap-a.nc` and
 `mach-wrap-a-degrees.nc`.
 
+And on a rotary, parallel finishing is rotary finishing
+(`strategy::rotary`): `StrategySpec::Parallel` on a wrapped setup goes
+along the bar in passes a stepover apart round it, back and forth, for an
+angle within 45 degrees of along it, else in one helix a stepover along
+it a turn (`RotaryPattern`), from end to end of the part, at levels a
+stepdown apart from the stock's top when one is given, the last on the
+part: the first level on the part everywhere ends it. Each point's tip
+is as near the axis as the tool comes without meeting the part on the simulator's grid (`rotary::Unrolled::tip`): each
+column round from the tool is a ray out from the axis, met by the tool's
+side `ρ sin dθ` across, so its tip may come no nearer than `ρ cos dθ` less
+the tool's height there, the column taken no higher than where the ray
+leaves the tool's side, rows round from the tool's taken while they could
+still be met higher than the best yet. Points are sampled a quarter of
+the tool's radius apart, again between two where the tip strays from
+the line between them, in parallel, and simplified. `JobError::Wrap`
+lets parallel finishing through, and `StrategyError::RotaryGrid` refuses a
+part on a grid that does not go round in whole cells.
+
 And one test: ogeom is 0.11.1 here, which printCAD's shapes need, and it
 meshes `round_edge_loose_fit.step`'s seam that 0.11.0 drew off the torus, so
 `a_loose_fit_is_refused_for_ogeoms_seam` became

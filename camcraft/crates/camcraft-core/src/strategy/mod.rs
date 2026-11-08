@@ -9,6 +9,7 @@ pub mod morph;
 pub mod parallel;
 pub mod patterns;
 pub mod projected;
+pub mod rotary;
 pub mod scallop;
 pub mod waterline;
 
@@ -50,6 +51,10 @@ pub enum StrategyError {
         /// What it was.
         value: f64,
     },
+    /// On a rotary, the part is not on a grid that goes round in whole
+    /// cells, which a rotary finish plans on.
+    #[error("the part on the rotary is not on a grid that goes round it in whole cells")]
+    RotaryGrid,
     /// The region was empty or inverted.
     #[error("region is empty or inverted: {min:?} to {max:?}")]
     EmptyRegion {

@@ -81,7 +81,15 @@ panels, the drawing and the helper that runs camcraft.
   it) and out from its axis. A sketch is wrapped round it as drawn, flat
   over its top, its Y (or X) the distance round, so engraving, slots, 2D
   profiles and pockets and V-carving cut it round the bar, a line longer
-  than the bar is round going on round it. The work zero is on the axis,
+  than the bar is round going on round it. Parallel finishing is rotary
+  finishing there, the tool on its radius: passes along the bar, a
+  stepover apart round it at the wrap diameter, the rotary indexing
+  between them (an angle within 45° of 0), or one helix round it, a
+  stepover along it each turn (within 45° of 90), from end to end of the
+  part; given a stepdown, it roughs down from the stock's top a level at a
+  time first. Each point is as near the axis as the tool comes without
+  meeting the part as the simulation holds it, its side as well as its
+  tip, so what it plans it verifies. The work zero is on the axis,
   across it: Y0 Z0 (or X0 Z0), Z out from the axis. Its program moves X,
   Z and the rotary at once, each move fed in inverse time (`G93`, its own
   `F` one over its minutes along the material at the tool's tip) or,
@@ -112,8 +120,8 @@ panels, the drawing and the helper that runs camcraft.
   top, beside a wall, keeps its material, so less is taken there than
   was, never more. The shank and holder are not checked on a rotary, and a
   note says so. Faces and edges picked on the part, and the operations
-  planned flat on it (clearing, facing, holes, 3D finishing), are refused
-  there.
+  planned flat on it (clearing, facing, holes, the other 3D finishes),
+  are refused there.
 - **Operations**, after Fusion's: adaptive and pocket clearing; parallel,
   scallop, contour, flat, spiral, radial and morphed spiral finishing; 2D
   profiles and pockets; facing; drilling: at once, in pecks backing out,

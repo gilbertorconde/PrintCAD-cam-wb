@@ -29,15 +29,16 @@ pub(super) fn rod(r: f64, length: f64, n: u32) -> TriMesh {
     TriMesh::new(v, t).unwrap()
 }
 
-/// The rod, 40 across and 60 long, in a bar its size on a rotary, with one
+/// A rod `rod_radius` round and 60 long, in a bar round it on a rotary, with one
 /// operation of `strategy` with `tool`, following `curves`.
 pub(super) fn on_a_rotary(
+    rod_radius: f64,
     strategy: StrategySpec,
     tool: crate::job::ToolSpec,
     curves: Vec<Curve>,
     edit: impl FnOnce(&mut Job),
 ) -> (Job, Result<SetupResult, RunError>) {
-    let body = Body::derived(rod(20.0, 60.0, 96));
+    let body = Body::derived(rod(rod_radius, 60.0, 96));
     let mut job: Job = toml::from_str(crate::fixture::JOB).unwrap();
     job.setups[0].operations.retain(|op| op.name == "rough");
     job.stocks[0].spec = StockSpec::CylinderAroundModels {
@@ -84,7 +85,7 @@ fn an_engraving_is_wrapped_round_the_bar() {
         direction: TraceDirection::Climb,
         reverse: false,
     };
-    let (_, result) = on_a_rotary(engrave, super::flat(1.0), drawn(), |_| {});
+    let (_, result) = on_a_rotary(20.0, engrave, super::flat(1.0), drawn(), |_| {});
     let result = result.unwrap();
     let w = result.frame.wrap.unwrap();
     assert!((w.radius - 20.0).abs() < 1e-6, "{w:?}");
@@ -132,6 +133,7 @@ fn what_is_not_wrapped_is_refused() {
         reverse: false,
     };
     let (_, r) = on_a_rotary(
+        20.0,
         StrategySpec::Face {
             angle: 0.0,
             direction: Default::default(),
@@ -144,7 +146,7 @@ fn what_is_not_wrapped_is_refused() {
     );
     let e = r.unwrap_err().to_string();
     assert!(e.contains("not planned on a rotary"), "{e}");
-    let (_, r) = on_a_rotary(engrave, super::flat(1.0), drawn(), |job| {
+    let (_, r) = on_a_rotary(20.0, engrave, super::flat(1.0), drawn(), |job| {
         job.stocks[0].spec = StockSpec::AroundModels {
             models: vec![],
             margin: [0.0; 3],
@@ -153,4 +155,82 @@ fn what_is_not_wrapped_is_refused() {
     });
     let e = r.unwrap_err().to_string();
     assert!(e.contains("one cylinder"), "{e}");
+}
+
+/// A rod 30 across in a bar 40 across, roughed and finished on a rotary by
+/// a flat end mill in parallel passes along it (angle 0) or one helix round
+/// it (90): a level down from the bar, then on the rod. Every column the
+/// passes went over is the rod's to within the tolerance, none below it;
+/// the helix goes round many turns.
+#[test]
+fn a_rotary_finish_takes_a_bar_down_to_the_rod() {
+    use crate::job::FixedCylinder;
+    for angle in [0.0, 90.0] {
+        let (job, result) = on_a_rotary(
+            15.0,
+            StrategySpec::Parallel { angle },
+            super::flat(6.0),
+            vec![],
+            |job| {
+                job.stocks[0].spec = StockSpec::FixedCylinder(FixedCylinder {
+                    models: vec![],
+                    axis: BarAxis::X,
+                    diameter: 40.0,
+                    length: 60.0,
+                    place: crate::job::Place::Center {},
+                });
+                let op = &mut job.setups[0].operations[0];
+                op.passes.stepover = 2.5;
+                op.passes.stepdown = Some(3.0);
+                op.passes.feed = 1000.0;
+                op.heights.clearance = Height {
+                    reference: HeightRef::StockTop,
+                    offset: 5.0,
+                };
+            },
+        );
+        let result = result.unwrap();
+        let op = &result.operations[0];
+        assert!(op.sim.is_clean(), "{angle}: {:?}", op.sim);
+        assert!(result.is_clean(), "{angle}: {:?}", result.warnings());
+        assert_eq!(result.verify.gouged, 0, "{angle}");
+        let lowest = op
+            .path
+            .moves()
+            .iter()
+            .filter(|m| m.role == MoveRole::Cut)
+            .map(|m| m.to.z)
+            .fold(f64::MAX, f64::min);
+        assert!((lowest - 15.0).abs() < job.tolerance, "{angle}: {lowest}");
+        // Round and round, past a whole turn, for the helix.
+        let w = result.frame.wrap.unwrap();
+        let (lo, hi) = op
+            .path
+            .moves()
+            .iter()
+            .fold((f64::MAX, f64::MIN), |(a, b), m| {
+                (a.min(m.to.y), b.max(m.to.y))
+            });
+        if angle > 45.0 {
+            assert!(hi - lo > 10.0 * w.period(), "{angle}: {lo} to {hi}");
+        } else {
+            assert!(hi - lo < w.period(), "{angle}: {lo} to {hi}");
+        }
+        // Along the rod, clear of its ends, the bar is the rod all round.
+        let after = result.keyframes[1].unpack().unwrap();
+        let f = after.field();
+        let mut worst: f64 = 0.0;
+        for iy in 0..f.ny() {
+            for ix in 0..f.nx() {
+                let p = f.position(ix, iy).unwrap();
+                if !(5.0..55.0).contains(&p.x) {
+                    continue;
+                }
+                let h = f.get(ix, iy).unwrap();
+                assert!(h > 15.0 - 0.05, "{angle}: {h} at {p}");
+                worst = worst.max(h - 15.0);
+            }
+        }
+        assert!(worst < 0.05, "{angle}: {worst} left");
+    }
 }

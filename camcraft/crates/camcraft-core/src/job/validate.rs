@@ -318,12 +318,14 @@ impl Job {
                     | StrategySpec::Profile { .. }
                     | StrategySpec::Pocket { .. }
                     | StrategySpec::VCarve { .. }
+                    | StrategySpec::Parallel { .. }
                     | StrategySpec::CustomGcode {}
             );
             if !wraps {
                 return Err(refuse(format!(
                     "operation '{}' is {}, which is not planned on a rotary: engraving, slots, \
-                     2D profiles and pockets and V-carving are wrapped round it",
+                     2D profiles and pockets and V-carving are wrapped round it, and parallel \
+                     finishing goes along or round it",
                     op.name,
                     op.strategy.name()
                 )));

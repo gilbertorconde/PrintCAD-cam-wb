@@ -957,7 +957,8 @@ fn rotary_rows(id: &str, setup: &SetupData) -> Vec<Widget> {
         text: format!(
             "Turned by {word} about {along}. Sketches are wrapped round it as drawn, flat over \
              its top: across {along} is the distance round at the wrap diameter (0: the \
-             stock's). The work zero is on the axis."
+             stock's). Parallel finishing goes along it (angle 0) or round it in a helix \
+             (90). The work zero is on the axis."
         ),
         mono: false,
     });

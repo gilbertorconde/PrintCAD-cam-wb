@@ -70,8 +70,8 @@ use clearing::{
 pub(super) use clearing::{heights_of, planar_areas};
 use copies::each_copy;
 use finishing::{
-    contour_paths, flat_paths, morphed_spiral_paths, parallel_paths, radial_paths, scallop_paths,
-    spiral_paths,
+    contour_paths, flat_paths, morphed_spiral_paths, parallel_paths, radial_paths, rotary_paths,
+    scallop_paths, spiral_paths,
 };
 pub(super) use holder::cut_kept;
 use holder::{Watching, clash_warning, trim, trims};
@@ -213,6 +213,10 @@ pub(super) fn run_operation(
         paths
     } else {
         match op.strategy {
+            // On a rotary, along the bar or round it.
+            StrategySpec::Parallel { angle } if work.prepared.frame.wrap.is_some() => {
+                rotary_paths(work, angle, &mut warnings)?
+            }
             StrategySpec::Parallel { angle } => parallel_paths(work, angle, limit, &mut warnings)?,
             StrategySpec::Scallop {
                 direction, order, ..

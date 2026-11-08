@@ -1460,7 +1460,8 @@ impl Bench for Cam {
                             "true, or {diameter = mm}: on a rotary turning its cylinder, \
                              lying along x or y (stock = \"cylinder\", axis = \"x\"), about \
                              its axis; sketches wrapped round it at the diameter (the stock's \
-                             unless given)",
+                             unless given); parallel finishing goes along it (angle 0) or \
+                             round it in a helix (angle 90)",
                         ),
                         param("name", ParamKind::String, false, "the setup's name"),
                     ],
