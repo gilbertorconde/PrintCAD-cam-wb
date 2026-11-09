@@ -12,7 +12,7 @@ crate-type = ["cdylib"]
 [dependencies]
 # The SDK from crates.io; to build against a local printCAD, add a
 # [patch.crates-io] naming the checkout's crates.
-printcad-bench-sdk = "0.1.4"
+printcad-bench-sdk = "0.1.5"
 serde = { version = "1", features = ["derive"] }
 cam-protocol = { path = "protocol" }
 # camcraft's job types, tool library and job file, to build what the helper
