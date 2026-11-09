@@ -8,7 +8,9 @@ use camcraft_post::profile::Profile;
 use camcraft_session::library::{fusion_csv, fusion_json, system};
 use printcad_bench_sdk::api::*;
 
-use crate::panel::{button, choice, group};
+use printcad_bench_sdk::panel as pb;
+
+use crate::panel::{about, button, buttons, choice, note};
 
 /// The open dialogs the page asks for, by the id their files come back
 /// under.
@@ -332,31 +334,19 @@ fn fields(kind: ToolKind) -> Vec<(&'static str, &'static str, Dim, usize)> {
 }
 
 fn unbound(id: String, label: &str, value: f64, dim: Dim, decimals: usize) -> Widget {
-    Widget::Number {
-        id,
-        label: label.into(),
-        value,
-        dim,
-        bind: None,
-        min: None,
-        max: None,
-        decimals,
-        error: None,
-    }
+    crate::panel::unbound(&id, label, value, dim, decimals)
 }
 
-fn cell(v: Option<f64>) -> String {
-    v.map_or(String::new(), |v| format!("{v}"))
+/// A number of a preset, for its row: none shown as a dash.
+fn given(v: Option<f64>) -> String {
+    v.map_or("–".into(), crate::sheet::num)
 }
 
-/// The chosen tool's editor: its name, kind, dimensions and presets.
+/// The chosen tool's editor: its name, kind, dimensions, holder and presets,
+/// the chosen preset's numbers typed below them.
 pub fn tool_editor(name: &str, t: &ToolSpec, chosen_preset: Option<usize>) -> Widget {
     let mut rows = vec![
-        Widget::TextField {
-            id: "tool/name".into(),
-            label: "Name".into(),
-            value: name.into(),
-        },
+        pb::entry("tool/name", "Name", name, "The tool's name"),
         choice(
             "tool/kind",
             "Kind",
@@ -384,53 +374,87 @@ pub fn tool_editor(name: &str, t: &ToolSpec, chosen_preset: Option<usize>) -> Wi
     // What its fields leave wrong, where the editor cannot refuse it: a
     // tapered mill's flutes, a slot cutter's neck.
     if let Some(e) = t.check().first() {
-        rows.push(Widget::Text {
-            text: format!("Not yet a tool: {e}."),
-            mono: false,
-        });
+        rows.push(note(NoteKind::Warning, format!("Not yet a tool: {e}.")));
     }
+    rows.push(pb::entry(
+        "tool/comment",
+        "Comment",
+        &t.comment,
+        "A note of your own",
+    ));
     rows.extend(holder_rows(t));
-    rows.push(Widget::TextField {
-        id: "tool/comment".into(),
-        label: "Comment".into(),
-        value: t.comment.clone(),
-    });
-    rows.push(Widget::Table {
-        id: "presets".into(),
-        columns: [
-            "Preset", "rev/min", "Feed", "Plunge", "Stepover", "Stepdown",
-        ]
-        .map(String::from)
-        .to_vec(),
-        rows: t
-            .presets
-            .iter()
-            .map(|p| {
-                vec![
-                    p.name.clone(),
-                    cell(p.rpm.map(f64::from)),
-                    cell(p.feed),
-                    cell(p.plunge_feed),
-                    cell(p.stepover),
-                    cell(p.stepdown),
-                ]
-            })
-            .collect(),
-        selected: chosen_preset,
-        editable: vec![true; 6],
-    });
-    rows.push(Widget::Row {
-        children: vec![
-            button("add_preset", "Add a preset", ButtonStyle::Secondary, true),
-            button(
-                "remove_preset",
-                "Remove the chosen preset",
-                ButtonStyle::Small,
-                chosen_preset.is_some(),
+    rows.push(pb::overline("Presets"));
+    rows.push(
+        pb::items("presets")
+            .items(t.presets.iter().enumerate().map(|(i, p)| {
+                pb::item(&p.name)
+                    .icon("material")
+                    .value(&format!(
+                        "{} rpm · F{}",
+                        p.rpm.map_or("–".into(), |r| r.to_string()),
+                        given(p.feed)
+                    ))
+                    .selected(chosen_preset == Some(i))
+                    .menu("copy", "Copy")
+                    .menu("remove", "Remove")
+                    .into()
+            }))
+            .empty("None: the tool's own speed, and the operation's feeds.")
+            .into(),
+    );
+    if let Some(p) = chosen_preset.and_then(|i| t.presets.get(i)) {
+        let opt = |v: Option<f64>| v.unwrap_or(0.0);
+        rows.push(pb::fields([
+            pb::entry("preset/name", "Preset", &p.name, "Its name"),
+            unbound(
+                "preset/rpm".into(),
+                "Spindle, rev/min",
+                opt(p.rpm.map(f64::from)),
+                Dim::Number,
+                0,
             ),
-        ],
-    });
-    group("The chosen tool", rows)
+            unbound(
+                "preset/feed".into(),
+                "Feed, mm/min",
+                opt(p.feed),
+                Dim::Number,
+                0,
+            ),
+            unbound(
+                "preset/plunge".into(),
+                "Plunge, mm/min",
+                opt(p.plunge_feed),
+                Dim::Number,
+                0,
+            ),
+            unbound(
+                "preset/stepover".into(),
+                "Stepover",
+                opt(p.stepover),
+                Dim::Length,
+                3,
+            ),
+            unbound(
+                "preset/stepdown".into(),
+                "Stepdown",
+                opt(p.stepdown),
+                Dim::Length,
+                3,
+            ),
+        ]));
+        rows.push(about("0 leaves a number out: the operation's own is used."));
+    }
+    rows.push(buttons(vec![button(
+        "add_preset",
+        "Add a preset",
+        ButtonStyle::Secondary,
+        true,
+    )]));
+    pb::section("The chosen tool")
+        .id("tool_editor")
+        .summary(name)
+        .children(rows)
+        .into()
 }
 
 /// Which of the holder choices `t` has: none, a built-in one, or its own.
@@ -455,46 +479,44 @@ fn holder_rows(t: &ToolSpec) -> Vec<Widget> {
         _ => "Its own".into(),
     });
     let mut rows = vec![
+        pb::overline("Holder"),
         choice("tool/holder", "Holder", options, holder_choice(t, &builtin)),
-        Widget::Text {
-            text: "The stickout is how far the tool comes out of the holder. With it, the \
-                   flute length and the shank, the simulator checks that nothing above the \
-                   flutes meets the material."
-                .into(),
-            mono: false,
-        },
+        about(
+            "The stickout is how far the tool comes out of the holder. With it, the \
+             flute length and the shank, the simulator checks that nothing above the \
+             flutes meets the material.",
+        ),
     ];
     let Some(h) = &t.holder else {
         return rows;
     };
-    rows.push(Widget::Table {
-        id: "holder_segments".into(),
-        columns: ["Foot Ø", "Top Ø", "Length"].map(String::from).to_vec(),
-        rows: h
-            .segments
-            .iter()
-            .map(|s| {
-                vec![
-                    format!("{}", s.diameter),
-                    format!("{}", s.top()),
-                    format!("{}", s.length),
-                ]
-            })
-            .collect(),
-        selected: None,
-        editable: vec![true; 3],
-    });
-    rows.push(Widget::Row {
-        children: vec![
-            button("add_segment", "Add a segment", ButtonStyle::Secondary, true),
-            button(
-                "remove_segment",
-                "Remove the top segment",
-                ButtonStyle::Small,
-                !h.segments.is_empty(),
-            ),
-        ],
-    });
+    // A segment a row: its foot's and top's diameters and its length.
+    let cell = |id: String, label: &str, v: f64| {
+        pb::inline(Quantity {
+            id,
+            label: label.into(),
+            value: v,
+            dim: Dim::Length,
+            width: Some(64.0),
+            ..Default::default()
+        })
+    };
+    rows.extend(h.segments.iter().enumerate().map(|(i, s)| {
+        pb::flow_no_wrap([
+            cell(format!("segment/{i}/foot"), "Foot Ø", s.diameter),
+            cell(format!("segment/{i}/top"), "Top Ø", s.top()),
+            cell(format!("segment/{i}/length"), "Long", s.length),
+        ])
+    }));
+    rows.push(buttons(vec![
+        button("add_segment", "Add a segment", ButtonStyle::Secondary, true),
+        button(
+            "remove_segment",
+            "Remove the top segment",
+            ButtonStyle::Small,
+            !h.segments.is_empty(),
+        ),
+    ]));
     rows
 }
 
@@ -512,28 +534,25 @@ fn holder_event(tool: &mut ToolSpec, event: &PanelEvent) -> bool {
                 }
             }
         }
-        PanelEvent::Cell {
-            id,
-            row,
-            column,
-            value,
-        } if id == "holder_segments" => {
-            let Some(s) = tool.holder.as_mut().and_then(|h| h.segments.get_mut(*row)) else {
+        PanelEvent::Number { id, value } if id.starts_with("segment/") => {
+            let mut parts = id.split('/').skip(1);
+            let (Some(row), Some(column)) = (
+                parts.next().and_then(|r| r.parse::<usize>().ok()),
+                parts.next(),
+            ) else {
                 return true;
             };
-            let Some(v) = value
-                .trim()
-                .replace(',', ".")
-                .parse::<f64>()
-                .ok()
-                .filter(|v| v.is_finite() && *v > 0.0)
-            else {
+            let Some(s) = tool.holder.as_mut().and_then(|h| h.segments.get_mut(row)) else {
                 return true;
             };
+            let v = *value;
+            if !(v.is_finite() && v > 0.0) {
+                return true;
+            }
             match column {
-                0 => s.diameter = v,
-                1 => s.top_diameter = ((v - s.diameter).abs() > 1e-9).then_some(v),
-                2 => s.length = v,
+                "foot" => s.diameter = v,
+                "top" => s.top_diameter = ((v - s.diameter).abs() > 1e-9).then_some(v),
+                "length" => s.length = v,
                 _ => {}
             }
         }
@@ -581,12 +600,9 @@ pub fn tool_event(
         return true;
     }
     match event {
-        PanelEvent::Number { id, value } => match id.strip_prefix("tool/") {
-            Some(f) => {
-                set_field(tool, f, *value);
-            }
-            None => return false,
-        },
+        PanelEvent::Number { id, value } if id.starts_with("tool/") => {
+            set_field(tool, id.trim_start_matches("tool/"), *value);
+        }
         PanelEvent::Choice { id, index } if id == "tool/kind" => {
             if let Some((k, _)) = KINDS.get(*index) {
                 tool.kind = *k;
@@ -632,28 +648,46 @@ pub fn tool_event(
             }
         }
         PanelEvent::Select { id, index } if id == "presets" => *chosen_preset = Some(*index),
-        PanelEvent::Cell {
-            id,
-            row,
-            column,
-            value,
-        } if id == "presets" => {
-            let Some(p) = tool.presets.get_mut(*row) else {
+        PanelEvent::Text { id, value } if id == "preset/name" => {
+            let text = value.trim();
+            if let Some(p) = chosen_preset.and_then(|i| tool.presets.get_mut(i))
+                && !text.is_empty()
+            {
+                p.name = text.to_string();
+            }
+        }
+        PanelEvent::Number { id, value } if id.starts_with("preset/") => {
+            let Some(p) = chosen_preset.and_then(|i| tool.presets.get_mut(i)) else {
                 return true;
             };
-            let text = value.trim();
-            let number = text.replace(',', ".").parse::<f64>().ok();
-            let given = |n: Option<f64>| n.filter(|v| v.is_finite() && *v > 0.0);
-            match column {
-                0 if !text.is_empty() => p.name = text.to_string(),
-                1 => p.rpm = given(number).map(|v| v.round() as u32),
-                2 => p.feed = given(number),
-                3 => p.plunge_feed = given(number),
-                4 => p.stepover = given(number),
-                5 => p.stepdown = given(number),
+            let given = Some(*value).filter(|v| v.is_finite() && *v > 0.0);
+            match id.as_str() {
+                "preset/rpm" => p.rpm = given.map(|v| v.round() as u32),
+                "preset/feed" => p.feed = given,
+                "preset/plunge" => p.plunge_feed = given,
+                "preset/stepover" => p.stepover = given,
+                "preset/stepdown" => p.stepdown = given,
                 _ => {}
             }
         }
+        PanelEvent::ContextMenu { id, index, action } if id == "presets" => match action.as_str() {
+            "remove" if *index < tool.presets.len() => {
+                tool.presets.remove(*index);
+                *chosen_preset = None;
+            }
+            "copy" => {
+                *chosen_preset = Some(*index);
+                return tool_event(
+                    tools,
+                    chosen,
+                    chosen_preset,
+                    &PanelEvent::Button {
+                        id: "add_preset".into(),
+                    },
+                );
+            }
+            _ => {}
+        },
         PanelEvent::Button { id } if id == "add_preset" => {
             let mut p = chosen_preset
                 .and_then(|i| tool.presets.get(i).cloned())
@@ -677,67 +711,37 @@ pub fn tool_event(
             tool.presets.push(p);
             *chosen_preset = Some(tool.presets.len() - 1);
         }
-        PanelEvent::Button { id } if id == "remove_preset" => {
-            if let Some(i) = chosen_preset.take()
-                && i < tool.presets.len()
-            {
-                tool.presets.remove(i);
-            }
-        }
         _ => return false,
     }
     true
 }
 
-/// The groups for importing tools and keeping posts.
-pub fn files_groups(posts: &BTreeMap<String, String>, chosen_post: Option<usize>) -> Vec<Widget> {
-    let mut out = vec![group(
-        "Import tools from Fusion",
-        vec![
-            Widget::Text {
-                text: "In Fusion's Tool Library, right-click a library and Export it as \
-                       CSV or JSON, then import that file here. JSON brings each tool's \
-                       holder too."
-                    .into(),
-                mono: false,
-            },
-            button(
-                "import_tools",
-                "Import from Fusion…",
-                ButtonStyle::Secondary,
-                true,
-            ),
-        ],
-    )];
-    let mut rows = vec![Widget::Text {
-        text: "A machine profile of your own, in camcraft's TOML (its README says how to \
-               write one), joins the built-in posts. A setup posting with it carries a copy."
-            .into(),
-        mono: false,
-    }];
-    if !posts.is_empty() {
-        rows.push(Widget::Table {
-            id: "posts".into(),
-            columns: vec!["Your posts".into()],
-            rows: posts.keys().map(|n| vec![n.clone()]).collect(),
-            selected: chosen_post,
-            editable: Vec::new(),
-        });
-        rows.push(button(
-            "remove_post",
-            "Remove the chosen post",
-            ButtonStyle::Small,
-            chosen_post.is_some(),
-        ));
-    }
-    rows.push(button(
-        "add_post",
-        "Add a post…",
-        ButtonStyle::Secondary,
-        true,
-    ));
-    out.push(group("Posts", rows));
-    out
+/// The posts of the user's own, each removed from its menu.
+pub fn posts_group(posts: &BTreeMap<String, String>) -> Widget {
+    pb::section("Your posts")
+        .id("posts")
+        .count(posts.len())
+        .summary(&if posts.is_empty() {
+            "None".to_string()
+        } else {
+            posts.keys().cloned().collect::<Vec<_>>().join(", ")
+        })
+        .action("add_post", "plus", "Add a post…")
+        .child(
+            pb::items("posts")
+                .items(posts.keys().map(|n| {
+                    pb::item(n)
+                        .icon("file-document")
+                        .menu("remove", "Remove")
+                        .into()
+                }))
+                .empty("None: add one with +."),
+        )
+        .child(about(
+            "A machine profile of your own, in camcraft's TOML (its README says how to \
+             write one), joins the built-in posts. A setup posting with it carries a copy.",
+        ))
+        .into()
 }
 
 #[cfg(test)]
@@ -792,11 +796,9 @@ mod tests {
         send(PanelEvent::Button {
             id: "add_preset".into(),
         });
-        send(PanelEvent::Cell {
-            id: "presets".into(),
-            row: 0,
-            column: 2,
-            value: "1500".into(),
+        send(PanelEvent::Number {
+            id: "preset/feed".into(),
+            value: 1500.0,
         });
         let t = &tools["Bull 6"];
         assert_eq!(t.kind, ToolKind::Bullnose);
@@ -988,20 +990,16 @@ mod tests {
         assert_eq!(tools["Flat 6"].holder.as_ref(), Some(&first));
         send(
             &mut tools,
-            PanelEvent::Cell {
-                id: "holder_segments".into(),
-                row: 0,
-                column: 1,
-                value: "24".into(),
+            PanelEvent::Number {
+                id: "segment/0/top".into(),
+                value: 24.0,
             },
         );
         send(
             &mut tools,
-            PanelEvent::Cell {
-                id: "holder_segments".into(),
-                row: 0,
-                column: 2,
-                value: "nope".into(),
+            PanelEvent::Number {
+                id: "segment/0/length".into(),
+                value: 0.0,
             },
         );
         send(

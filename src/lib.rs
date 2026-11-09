@@ -146,6 +146,24 @@ struct Editing {
     fresh: bool,
 }
 
+/// What a panel's list has the pointer on, lit in the view.
+enum Lit {
+    /// A body of the setup's, or a fixture, by its id, with its triangles:
+    /// kept by the host, or, where it keeps none, sent with each frame.
+    Body(String, Result<KeptBody, Mesh>),
+    /// An operation of a setup, by the setup's id and its place in it.
+    Operation(String, usize),
+}
+
+/// A lit body's triangles the host keeps, let go once it is not lit.
+struct KeptBody(u64);
+
+impl Drop for KeptBody {
+    fn drop(&mut self) {
+        host::mesh_remove(self.0);
+    }
+}
+
 #[derive(Default)]
 struct Cam {
     editing: Option<Editing>,
@@ -155,10 +173,8 @@ struct Cam {
     settings: Settings,
     /// The settings page's selected tool.
     chosen_tool: Option<usize>,
-    /// The setup panel's selected body.
-    chosen_body: Option<usize>,
-    /// The setup panel's selected fixture.
-    chosen_fixture: Option<usize>,
+    /// What a panel's list has the pointer on, lit in the view.
+    lit: Option<Lit>,
     /// The setup panel's selected part, of those past the first.
     chosen_part: Option<usize>,
     /// The setup panel's strategy for Add operation, by its place in
@@ -185,9 +201,8 @@ struct Cam {
     material: std::cell::RefCell<draw::KeptMaterial>,
     /// A slot picking in the view.
     armed: Option<picking::Armed>,
-    /// The settings page's chosen preset of the chosen tool, and chosen post.
+    /// The settings page's chosen preset of the chosen tool.
     chosen_preset: Option<usize>,
-    chosen_post: Option<usize>,
     /// What the settings page last did with a file.
     settings_note: Option<Result<String, String>>,
     /// A word for the task panel about the last thing tried.
@@ -513,6 +528,32 @@ fn computed_status(computed: &Computed, op: Option<&str>) -> FeatureStatus {
 }
 
 impl Cam {
+    /// Light body `body` in the view, or none: its triangles are asked for
+    /// once, as the pointer comes onto its row.
+    fn light_body(&mut self, body: Option<&String>) {
+        let Some(body) = body else {
+            self.lit = None;
+            return;
+        };
+        if matches!(&self.lit, Some(Lit::Body(b, _)) if b == body) {
+            return;
+        }
+        self.lit = host::body_mesh(body).map(|(positions, indices)| {
+            let kept = host::mesh_create(&positions, &indices, &[]).map(KeptBody);
+            Lit::Body(
+                body.clone(),
+                kept.map_err(|_| Mesh {
+                    positions,
+                    indices,
+                    color: draw::LIT,
+                    opacity: draw::LIT_OPACITY,
+                    on_top: true,
+                    ..Default::default()
+                }),
+            )
+        });
+    }
+
     /// The setup whose run plays back: the open setup, or the open
     /// operation's.
     fn played_setup(&self) -> Option<String> {
@@ -1088,12 +1129,11 @@ impl Cam {
             fresh,
         });
         self.hint = None;
-        self.chosen_body = None;
+        self.lit = None;
         self.template_ui.first = false;
         self.template_ui.name = None;
         self.template_ui.rules = None;
         self.load_templates();
-        self.chosen_fixture = None;
         self.chosen_part = None;
         self.refresh_for(id, false);
         if let Some(setup) = self.setup_of(id) {
@@ -3009,6 +3049,7 @@ impl Bench for Cam {
     fn task_close(&mut self, accept: bool) -> Option<String> {
         let editing = self.editing.take()?;
         self.hint = None;
+        self.lit = None;
         if accept {
             self.refresh_for(&editing.id, false);
             return Some(match editing.kind {

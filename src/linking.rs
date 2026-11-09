@@ -10,7 +10,7 @@ use printcad_bench_sdk::serde_json::{self, Value};
 use serde::{Deserialize, Serialize};
 
 use crate::data::OperationData;
-use crate::panel::{choice, group, number};
+use crate::panel::{choice, fold, number, toggle};
 
 /// A number that need not be given: the strategy's own when it is not. It keeps
 /// its value either way, so a formula always has one to drive.
@@ -187,24 +187,44 @@ pub fn optional_row(
     dim: Dim,
     feature: &str,
 ) {
-    rows.push(Widget::Toggle {
-        id: format!("{prefix}/{field}/given"),
-        label: if opt.given {
-            format!("Set the {}", label.to_lowercase())
-        } else {
-            format!("{label}: {absent}")
-        },
-        on: opt.given,
-    });
+    let given = format!("{prefix}/{field}/given");
     if opt.given {
-        rows.push(number(
-            &format!("{prefix}/{field}/value"),
-            label,
-            opt.value,
-            dim,
-            2,
-            feature,
-        ));
+        // Ticked, its number beside it.
+        let value = crate::hints::with_hint(
+            Quantity {
+                id: format!("{prefix}/{field}/value"),
+                value: opt.value,
+                dim,
+                bind: Some(Bind {
+                    feature: feature.to_string(),
+                    key: format!("/{prefix}/{field}/value"),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+            .into(),
+        );
+        rows.push(printcad_bench_sdk::panel::flow_no_wrap([
+            Check {
+                id: given,
+                label: label.into(),
+                on: true,
+                ..Default::default()
+            }
+            .into(),
+            printcad_bench_sdk::panel::fill(value),
+        ]));
+    } else {
+        rows.push(
+            Check {
+                id: given,
+                label: label.into(),
+                text: absent.into(),
+                on: false,
+                ..Default::default()
+            }
+            .into(),
+        );
     }
 }
 
@@ -358,15 +378,15 @@ pub fn linking_group(data: &OperationData, tool: Option<&ToolSpec>, feature: &st
     // A pocket's leads take the tool onto its finishing passes and off.
     let pocket_leads = uses.finishing && op.passes.finishing.is_some();
     if uses.leads || pocket_leads {
-        rows.push(Widget::Toggle {
-            id: "linking/leads".into(),
-            label: if uses.leads {
-                "Leads on and off each ring".into()
+        rows.push(toggle(
+            "linking/leads",
+            if uses.leads {
+                "Leads on and off each ring"
             } else {
-                "Leads onto the finishing passes and off".into()
+                "Leads onto the finishing passes and off"
             },
-            on: l.leads,
-        });
+            l.leads,
+        ));
         if l.leads {
             let tenth = of_tool(0.1, "a tenth of the tool");
             // A pocket's finishing passes are entered level, beside the wall:
@@ -414,18 +434,23 @@ pub fn linking_group(data: &OperationData, tool: Option<&ToolSpec>, feature: &st
         }
     }
     if uses.reorder {
-        rows.push(Widget::Toggle {
-            id: "linking/reorder".into(),
-            label: "Reorder to shorten travel".into(),
-            on: l.reorder,
-        });
-        rows.push(Widget::Toggle {
-            id: "linking/allow_reverse".into(),
-            label: "Reverse passes while reordering (changes climb)".into(),
-            on: l.allow_reverse,
-        });
+        rows.push(toggle(
+            "linking/reorder",
+            "Reorder to shorten travel",
+            l.reorder,
+        ));
+        rows.push(toggle(
+            "linking/allow_reverse",
+            "Reverse passes while reordering (changes climb)",
+            l.allow_reverse,
+        ));
     }
-    group("Linking", rows)
+    let summary = format!(
+        "Safe distance {} · retract {} mm/min",
+        crate::sheet::num(l.safe_distance),
+        crate::sheet::num(l.retract_feed)
+    );
+    fold("Linking", &summary, rows)
 }
 
 /// Where an optional number starts when it is first given: what it was without

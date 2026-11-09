@@ -15,8 +15,6 @@ use std::ops::Range;
 use cam_protocol::{Program, Run};
 use printcad_bench_sdk::api::*;
 
-use crate::panel::group;
-
 /// How many lines are shown before the playhead's, and after it.
 const BEFORE: usize = 8;
 const AFTER: usize = 16;
@@ -201,29 +199,38 @@ pub fn widgets(
         _ if program.is_setups() => program.name.clone(),
         _ => o.name.clone(),
     };
-    let mut children = vec![Widget::Value {
-        label: name,
-        value: if marked {
-            format!("line {} of {lines}", at + 1)
-        } else {
-            format!("{lines} lines")
-        },
-        mono: false,
-    }];
+    let place_words = if marked {
+        format!("line {} of {lines}", at + 1)
+    } else {
+        format!("{lines} lines")
+    };
+    let mut children = vec![
+        printcad_bench_sdk::panel::item(&name)
+            .id("listing_at")
+            .icon("file-document")
+            .value(&place_words)
+            .into(),
+    ];
     if program.moves.is_empty() {
-        children.push(Widget::Text {
-            text: "Generate again to follow the playhead here.".into(),
-            mono: false,
-        });
+        children.push(printcad_bench_sdk::panel::caption(
+            "Generate again to follow the playhead here.",
+            Tone::Muted,
+            true,
+        ));
     }
-    // A sheet, not a table: it scrolls sideways where a long line would
-    // widen the panel over the view.
+    // A sheet, not a list: it scrolls sideways where a long line would
+    // widen the panel over the view, and its lines are in the mono face.
     children.push(Widget::Sheet {
         id: ID.into(),
         columns: vec!["Line".into(), "G-code".into()],
         rows,
     });
-    vec![group("Program", children)]
+    vec![
+        printcad_bench_sdk::panel::section("Program")
+            .summary(&format!("{name} · {place_words}"))
+            .children(children)
+            .into(),
+    ]
 }
 
 /// The section (an operation at a part) and the moves made at the line a
@@ -276,8 +283,8 @@ mod tests {
 
     /// The sheet's rows as text, and which is marked.
     fn sheet(widgets: &[Widget]) -> (Vec<Vec<String>>, Option<usize>) {
-        let Some(Widget::Group { children, .. }) = widgets.first() else {
-            panic!("no group");
+        let Some(Widget::Section(PanelSection { children, .. })) = widgets.first() else {
+            panic!("no section");
         };
         let rows = children
             .iter()
@@ -357,8 +364,8 @@ mod tests {
         assert_eq!(rows.len(), 7, "the whole program");
         assert_eq!(marked, Some(4), "the second's first move");
         let label = |w: &[Widget]| match w.first() {
-            Some(Widget::Group { children, .. }) => match children.first() {
-                Some(Widget::Value { label, .. }) => label.clone(),
+            Some(Widget::Section(PanelSection { children, .. })) => match children.first() {
+                Some(Widget::Item(Item { label, .. })) => label.clone(),
                 _ => String::new(),
             },
             _ => String::new(),
@@ -438,11 +445,11 @@ mod tests {
         let shown = widgets(&run, 0, Some((1, 1)), &mut kept);
         let (_, marked) = sheet(&shown);
         assert_eq!(marked, Some(6), "the second part's first move");
-        let Some(Widget::Group { children, .. }) = shown.first() else {
+        let Some(Widget::Section(PanelSection { children, .. })) = shown.first() else {
             panic!("no group");
         };
         assert!(
-            matches!(children.first(), Some(Widget::Value { label, .. }) if label == "Rough at G55"),
+            matches!(children.first(), Some(Widget::Item(Item { label, .. })) if label == "Rough at G55"),
             "{children:?}"
         );
         let (_, marked) = sheet(&widgets(&run, 0, Some((0, 1)), &mut kept));

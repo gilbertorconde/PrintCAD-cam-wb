@@ -204,7 +204,7 @@ panels, the drawing and the helper that runs camcraft.
   their middle, as deep as each is wide: past its deepest it cuts the walls
   that deep and leaves the flat floor between, and says so, for a flat end
   mill to clear. And Custom G-code, Fusion's Manual NC: lines of your own,
-  typed a row at a time, written into the program where the operation
+  typed in as text, written into the program where the operation
   stands in its setup: before the next operation's start (its stop, tool
   change and spindle), or, last in the setup, after the one before ends.
   It has no tool and no toolpath, and the simulation does not see it.
@@ -299,8 +299,9 @@ panels, the drawing and the helper that runs camcraft.
   or not, with leads and tabs, and in every copy of a pattern; the
   simulation cuts the notches, and the checks take what they cut past the
   part as meant, not as a gouge.
-- **Picking in the view,** as camcraft's: a pick row in the panel arms it,
-  and while it is armed, hovering shows what a click takes. An operation
+- **Picking in the view,** as camcraft's: a pick chip in the panel arms it,
+  and its cross clears what it holds; while it is armed, hovering shows what
+  a click takes. An operation
   takes faces, and edges by the loop they go round at their height (an edge
   that is not level, alone; an engraving's, each alone, and those end to
   end followed as one); a click on a picked one takes it out. A hole
@@ -423,6 +424,19 @@ panels, the drawing and the helper that runs camcraft.
   out on tabs).
 - **Status in the tree.** Each setup and operation shows how its run went:
   running (with how far), done, warnings, failed, or out of date.
+- **Panels as printCAD's own.** The setup's and the operation's panels and
+  the preferences page are made of printCAD's panel blocks, so the app draws
+  them as it draws the sketcher's. Each part of a panel is a fold with its
+  count and, closed, a line of what it holds; the less used (fixtures, the
+  work offset, parts, the probed surface, tabs, linking, the pattern) start
+  closed. The task's header says what is edited and, in a pill, how its run
+  went: "3 operations · 12 min", not run, running, or how many checks
+  failed. Bodies, fixtures, parts, operations, templates, tools and presets
+  are lists whose rows have a right-click menu: remove a body, a fixture or
+  a part; open an operation or turn it off; apply, export or delete a
+  template; copy or remove a tool or a preset. The pointer over a body or a
+  fixture lights it in the view, and over an operation its toolpath. The
+  tool library has a filter, by name or by kind.
 - **Turned off.** An operation, or a whole setup, can be turned off without
   deleting it: Turn off in its menu in the tree, Runs in its panel, or
   `enable` by script. An operation off stays in its setup but is not run,
@@ -816,7 +830,8 @@ useful there.
 
 ## Install it
 
-It needs printCAD 0.11 or later.
+It needs printCAD 0.11 or later, of the workbench contract 0.1.4 or later
+(for its panel blocks): an earlier printCAD refuses the package.
 
 - From a release: download the `.pcbench` file from the
   [releases](https://github.com/gilbertorconde/PrintCAD-cam-wb/releases)

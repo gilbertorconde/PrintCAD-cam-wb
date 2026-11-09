@@ -20,7 +20,9 @@ use std::time::Instant;
 use cam_protocol::{Moment, Playback, Run, Section};
 use printcad_bench_sdk::api::*;
 
-use crate::panel::{button, choice};
+use printcad_bench_sdk::panel as pb;
+
+use crate::panel::{button, toggle};
 
 /// How fast it plays, as many machining seconds a second: camcraft's app's.
 pub const SPEEDS: [f64; 15] = [
@@ -467,27 +469,22 @@ pub fn transport_widgets(
         small("t_step_on", "|▶"),
         small("t_next_op", "⏩"),
         small("t_end", "⏭"),
-        Widget::Value {
-            label: String::new(),
-            value: format!("{} / {}", clock(at), clock(line.total)),
+        Caption {
+            text: format!("{} / {}", clock(at), clock(line.total)),
             mono: true,
-        },
-        choice(
-            "t_speed",
-            "",
-            SPEEDS.iter().map(|s| speed_label(*s)).collect(),
-            SPEEDS.iter().position(|s| *s == t.speed).unwrap_or(0),
-        ),
-        Widget::Toggle {
-            id: "t_stop_problems".into(),
-            label: "Stop at problems".into(),
-            on: t.stop_at_problems,
-        },
-        Widget::Toggle {
-            id: "t_stop_ops".into(),
-            label: "Stop after each operation".into(),
-            on: t.stop_at_ops,
-        },
+            ..Default::default()
+        }
+        .into(),
+        Select {
+            id: "t_speed".into(),
+            options: SPEEDS.iter().map(|s| speed_label(*s)).collect(),
+            selected: SPEEDS.iter().position(|s| *s == t.speed).unwrap_or(0),
+            width: Some(72.0),
+            ..Default::default()
+        }
+        .into(),
+        toggle("t_stop_problems", "Stop at problems", t.stop_at_problems),
+        toggle("t_stop_ops", "Stop after each operation", t.stop_at_ops),
     ];
     if let Some((s, moves, of)) = under_way(run, playing, exact) {
         let section = line.sections.get(s).copied().unwrap_or_default();
@@ -499,11 +496,7 @@ pub fn transport_widgets(
             Some(p) => format!("{name} at {}, move {moves} of {of}", p.wcs),
             None => format!("{name}, move {moves} of {of}"),
         };
-        out.push(Widget::Value {
-            label: String::new(),
-            value,
-            mono: false,
-        });
+        out.push(pb::caption(&value, Tone::Neutral, false));
     }
     // Last, so it takes the strip's width on a line of its own.
     out.push(Widget::Diagram {
