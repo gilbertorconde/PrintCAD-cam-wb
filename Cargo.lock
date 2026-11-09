@@ -869,9 +869,9 @@ dependencies = [
 
 [[package]]
 name = "printcad-bench-api"
-version = "0.1.2"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49306c986db4b85c5bed00a263fe16a116177e652a3fefcbb5615a2c27aa4ecd"
+checksum = "13b12922846e617f890e310bddc0812d1d57d89e2043f1a418dafbd8c1c2f649"
 dependencies = [
  "printcad-kernel-api",
  "serde",
@@ -880,9 +880,9 @@ dependencies = [
 
 [[package]]
 name = "printcad-bench-sdk"
-version = "0.1.2"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e106d6dc7094c158fe5e07c9977993116027441aefcda1fe0b8cc81df3b136db"
+checksum = "f6d2e14f5bd2532f00553382de0a7d50da2146f0486af5c66319d8eb056d764e"
 dependencies = [
  "printcad-bench-api",
  "serde",
