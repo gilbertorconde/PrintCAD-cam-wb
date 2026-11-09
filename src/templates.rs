@@ -1159,26 +1159,101 @@ impl crate::Cam {
     }
 }
 
-/// The setup panel's Templates group, for setup `name` with `ops` operations.
+/// The setup panel's Templates fold, for setup `name` with `ops` operations:
+/// the templates to apply, each with its menu, and the setup saved as one.
 pub fn group(cam: &crate::Cam, name: &str, ops: usize) -> Widget {
-    use crate::panel::{button, choice};
+    use crate::panel::{about, button, buttons, choice, note, own_icon, toggle};
+    use printcad_bench_sdk::panel as pb;
     let all = cam.templates();
-    let mut rows = vec![Widget::Text {
-        text: "A template keeps the setup's stock, work zero, orientation, post and \
-               tolerance, and its operations with their tools and passes, but not what \
-               is picked on the part."
+    let chosen = cam.template_ui.chosen.min(all.0.len().saturating_sub(1));
+    let items = all.0.iter().enumerate().map(|(i, k)| {
+        let t = &k.template;
+        let mut row = pb::item(&t.name)
+            .icon(&own_icon("template"))
+            .plain_value(&format!(
+                "{} op{}",
+                t.operations.len(),
+                if t.operations.len() == 1 { "" } else { "s" }
+            ))
+            .selected(i == chosen)
+            .menu("apply", "Add its operations here")
+            .menu("export", "Export…");
+        if k.file.is_none() {
+            row = row.secondary("built in");
+        } else {
+            row = row.menu_with(printcad_bench_sdk::api::PanelAction {
+                id: "delete".into(),
+                label: "Delete".into(),
+                separated: true,
+                ..Default::default()
+            });
+        }
+        if !t.description.is_empty() {
+            row = row.hint(&t.description);
+        }
+        row.into()
+    });
+    let mut rows = vec![
+        pb::items("templates")
+            .items(items)
+            .empty(if cam.templates_read() {
+                "No templates."
+            } else {
+                "Reading the templates saved…"
+            })
             .into(),
-        mono: false,
-    }];
-    rows.push(Widget::TextField {
-        id: "template_name".into(),
-        label: "Save as".into(),
-        value: cam
-            .template_ui
+    ];
+    if let Some(k) = all.0.get(chosen) {
+        let t = &k.template;
+        if !t.description.is_empty() {
+            rows.push(about(t.description.clone()));
+        }
+        rows.push(
+            pb::items("template_ops")
+                .items(t.operations.iter().map(|o| {
+                    pb::item(&o.name)
+                        .icon(&own_icon("operation"))
+                        .tone(printcad_bench_sdk::api::Tone::Muted)
+                        .secondary(crate::data::strategy_label(&o.data.strategy()))
+                        .plain_value(&o.fill.words())
+                        .into()
+                }))
+                .into(),
+        );
+        if t.setup.is_some() {
+            rows.push(toggle(
+                "template_rules",
+                "Take its stock, work zero and post too",
+                cam.template_ui.rules.unwrap_or(ops == 0),
+            ));
+        }
+        rows.push(buttons(vec![button(
+            "apply_template",
+            "Add its operations here",
+            ButtonStyle::Primary,
+            true,
+        )]));
+    }
+    rows.extend(
+        all.1
+            .iter()
+            .map(|bad| note(NoteKind::Warning, format!("Not read: {bad}"))),
+    );
+    rows.push(pb::overline("Save this setup"));
+    rows.push(about(
+        "A template keeps the setup's stock, work zero, orientation, post and \
+         tolerance, and its operations with their tools and passes, but not what \
+         is picked on the part.",
+    ));
+    rows.push(pb::entry(
+        "template_name",
+        "Name",
+        &cam.template_ui
             .name
             .clone()
             .unwrap_or_else(|| name.to_string()),
-    });
+        "The template's name",
+    ));
     rows.push(choice(
         "template_what",
         "Keep",
@@ -1188,90 +1263,21 @@ pub fn group(cam: &crate::Cam, name: &str, ops: usize) -> Widget {
         ],
         usize::from(cam.template_ui.alone),
     ));
-    rows.push(button(
+    rows.push(buttons(vec![button(
         "save_template",
         "Save as template",
         ButtonStyle::Secondary,
         ops > 0 || !cam.template_ui.alone,
-    ));
-    if !cam.templates_read() {
-        rows.push(Widget::Text {
-            text: "Reading the templates saved…".into(),
-            mono: false,
-        });
+    )]));
+    let mut fold = pb::section("Templates")
+        .count(all.0.len())
+        .summary(all.0.get(chosen).map_or("", |k| k.template.name.as_str()))
+        .action("import_template", "open", "Import a template…")
+        .children(rows);
+    if !cam.template_ui.first {
+        fold = fold.closed();
     }
-    let names: Vec<String> = all
-        .0
-        .iter()
-        .map(|k| match k.file {
-            None => format!("{} (built in)", k.template.name),
-            Some(_) => k.template.name.clone(),
-        })
-        .collect();
-    let chosen = cam.template_ui.chosen.min(names.len().saturating_sub(1));
-    rows.push(choice("template", "Template", names, chosen));
-    if let Some(k) = all.0.get(chosen) {
-        let t = &k.template;
-        if !t.description.is_empty() {
-            rows.push(Widget::Text {
-                text: t.description.clone(),
-                mono: false,
-            });
-        }
-        rows.extend(t.operations.iter().map(|o| Widget::Value {
-            label: o.name.clone(),
-            value: format!(
-                "{}, {}",
-                crate::data::strategy_label(&o.data.strategy()),
-                o.fill.words()
-            ),
-            mono: false,
-        }));
-        let rules = t.setup.is_some();
-        if rules {
-            rows.push(Widget::Toggle {
-                id: "template_rules".into(),
-                label: "Take its stock, work zero and post too".into(),
-                on: cam.template_ui.rules.unwrap_or(ops == 0),
-            });
-        }
-        rows.push(button(
-            "apply_template",
-            "Add its operations here",
-            ButtonStyle::Primary,
-            true,
-        ));
-        rows.push(button(
-            "export_template",
-            "Export…",
-            ButtonStyle::Small,
-            true,
-        ));
-        if k.file.is_some() {
-            rows.push(button(
-                "delete_template",
-                "Delete this template",
-                ButtonStyle::Small,
-                true,
-            ));
-        }
-    }
-    rows.push(button(
-        "import_template",
-        "Import a template…",
-        ButtonStyle::Small,
-        true,
-    ));
-    rows.extend(all.1.iter().map(|bad| Widget::Note {
-        kind: NoteKind::Warning,
-        title: None,
-        text: format!("Not read: {bad}"),
-    }));
-    Widget::Group {
-        title: "Templates".into(),
-        open: cam.template_ui.first,
-        children: rows,
-    }
+    fold.into()
 }
 
 /// What the Templates group's widgets do, in setup `id`'s panel; whether
@@ -1284,9 +1290,27 @@ pub fn event(cam: &mut crate::Cam, id: &str, name: &str, event: &PanelEvent) -> 
         PanelEvent::Choice { id: c, index } if c == "template_what" => {
             cam.template_ui.alone = *index == 1;
         }
-        PanelEvent::Choice { id: c, index } if c == "template" => {
+        PanelEvent::Select { id: c, index } if c == "templates" => {
             cam.template_ui.chosen = *index;
             cam.template_ui.rules = None;
+        }
+        // A template's menu: the same as its buttons, on that template.
+        PanelEvent::ContextMenu {
+            id: c,
+            index,
+            action,
+        } if c == "templates" => {
+            if cam.template_ui.chosen != *index {
+                cam.template_ui.chosen = *index;
+                cam.template_ui.rules = None;
+            }
+            let button = match action.as_str() {
+                "apply" => "apply_template",
+                "export" => "export_template",
+                "delete" => "delete_template",
+                _ => return true,
+            };
+            return self::event(cam, id, name, &PanelEvent::Button { id: button.into() });
         }
         PanelEvent::Toggle { id: t, on } if t == "template_rules" => {
             cam.template_ui.rules = Some(*on);

@@ -8,7 +8,7 @@ use printcad_bench_sdk::serde_json::{self, Value};
 use serde::{Deserialize, Serialize};
 
 use crate::data::OperationData;
-use crate::panel::{choice, group, number};
+use crate::panel::{about, choice, fold, number, toggle};
 
 /// A pattern as numbers, each part on or off. A part turned off keeps its
 /// numbers, so turning it on again finds them, and a formula always has
@@ -161,11 +161,7 @@ pub fn pattern_group(data: &OperationData, feature: &str) -> Widget {
     let p = &data.transform;
     let length = |id: &str, label: &str, v: f64| number(id, label, v, Dim::Length, 2, feature);
     let whole = |id: &str, label: &str, v: f64| number(id, label, v, Dim::Number, 0, feature);
-    let toggle = |id: &str, label: &str, on: bool| Widget::Toggle {
-        id: format!("transform/{id}"),
-        label: label.into(),
-        on,
-    };
+    let toggle = |id: &str, label: &str, on: bool| toggle(format!("transform/{id}"), label, on);
     let mut rows = vec![toggle("linear", "In rows along X and Y", p.linear)];
     if p.linear {
         rows.push(whole("transform/x_count", "Along X, copies", p.x_count));
@@ -201,20 +197,22 @@ pub fn pattern_group(data: &OperationData, feature: &str) -> Widget {
         rows.push(length("transform/through_y", "Through Y", p.through_y));
     }
     let copies = p.pattern().copies();
-    rows.push(Widget::Text {
-        text: if copies > 1 {
-            format!(
-                "{copies} copies of the toolpath, the original among them, from the work \
+    rows.push(about(if copies > 1 {
+        format!(
+            "{copies} copies of the toolpath, the original among them, from the work \
                  zero in the setup's axes: the rows, each round the centre, then all \
                  mirrored. Each copy is linked, simulated and checked; a mirrored one's \
                  rings are turned round so it still climbs."
-            )
-        } else {
-            "The toolpath once, where it is.".into()
-        },
-        mono: false,
-    });
-    group("Pattern", rows)
+        )
+    } else {
+        "The toolpath once, where it is.".into()
+    }));
+    let summary = if copies > 1 {
+        format!("{copies} copies")
+    } else {
+        "Once".into()
+    };
+    fold("Pattern", &summary, rows)
 }
 
 /// A widget of the Pattern group changed: `id` without its `transform/`.

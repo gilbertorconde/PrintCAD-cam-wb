@@ -175,6 +175,7 @@ fn hint(id: &str) -> Option<(&'static str, Widget)> {
 pub fn with_hint(widget: Widget) -> Widget {
     let id = match &widget {
         Widget::Number { id, .. } => id.clone(),
+        Widget::Quantity(q) => q.id.clone(),
         _ => return widget,
     };
     match hint(&id) {

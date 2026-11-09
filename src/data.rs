@@ -1100,24 +1100,15 @@ impl OperationData {
         self.operation.gcode.lines().map(str::to_string).collect()
     }
 
-    /// Set line `row` of its custom G-code to `text`: a row past the last
-    /// adds a line, and an empty line is taken out.
-    pub fn set_gcode_line(&mut self, row: usize, text: &str) {
-        let mut lines = self.gcode_lines();
-        let text = text.trim_end();
-        match (row < lines.len(), text.is_empty()) {
-            (true, true) => {
-                lines.remove(row);
-            }
-            (true, false) => {
-                if let Some(line) = lines.get_mut(row) {
-                    *line = text.to_string();
-                }
-            }
-            (false, false) => lines.push(text.to_string()),
-            (false, true) => {}
-        }
-        self.operation.gcode = lines.join("\n");
+    /// Set its custom G-code to `text`, a line a line: each line's end
+    /// trimmed, and an empty line taken out.
+    pub fn set_gcode(&mut self, text: &str) {
+        self.operation.gcode = text
+            .lines()
+            .map(str::trim_end)
+            .filter(|l| !l.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
     }
 
     /// The operation's own numbers into the top-level fields.
@@ -2141,7 +2132,7 @@ mod tests {
         );
     }
 
-    /// Custom G-code: its lines, edited a row at a time, survive the
+    /// Custom G-code: its lines, typed as text, survive the
     /// document, reach the job with no tool, and read back; it is no
     /// problem without a tool, and changing its strategy and back keeps them.
     #[test]
@@ -2152,16 +2143,12 @@ mod tests {
             StrategySpec::named("custom-gcode").unwrap(),
         );
         assert!(op.is_custom());
-        op.set_gcode_line(0, "M0 (check the clamps)");
-        op.set_gcode_line(1, "M7  ");
-        op.set_gcode_line(5, "G4 P@rpm@");
-        op.set_gcode_line(1, "M8");
-        op.set_gcode_line(9, "");
+        op.set_gcode("M0 (check the clamps)\nM7  \n\nG4 P@rpm@\n");
         assert_eq!(
             op.gcode_lines(),
-            ["M0 (check the clamps)", "M8", "G4 P@rpm@"]
+            ["M0 (check the clamps)", "M7", "G4 P@rpm@"]
         );
-        op.set_gcode_line(1, "");
+        op.set_gcode("M0 (check the clamps)\n\nG4 P@rpm@");
         assert_eq!(op.gcode_lines(), ["M0 (check the clamps)", "G4 P@rpm@"]);
         assert_eq!(op.problem(&setup.tools), None, "it has no tool");
         let back = OperationData::from(&op.to_value()).unwrap();

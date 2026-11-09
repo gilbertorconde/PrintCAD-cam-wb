@@ -9,10 +9,13 @@ use printcad_bench_sdk::host;
 
 use crate::playback::{material_at, tool_at, tool_tip};
 use crate::runs::State;
-use crate::{Cam, Kind, operations_of, setups};
+use crate::{Cam, Kind, Lit, operations_of, setups};
 
 const ACCENT: Rgb = [0.31, 0.64, 0.9];
 const MUTED: Rgb = [0.55, 0.58, 0.62];
+/// What a panel's row has the pointer on: a body, an operation's path.
+pub(crate) const LIT: Rgb = [1.0, 0.82, 0.3];
+pub(crate) const LIT_OPACITY: f32 = 0.45;
 const STOCK: Rgb = [0.9, 0.62, 0.25];
 const RAPID: Rgb = [0.9, 0.3, 0.25];
 const ZERO: Rgb = [0.35, 0.8, 0.4];
@@ -219,7 +222,15 @@ pub fn draw(cam: &Cam, frame: &mut Frame) {
                     outlines(frame, o);
                 }
             }
-            let color = if this || edited_setup { ACCENT } else { MUTED };
+            let lit =
+                matches!(&cam.lit, Some(Lit::Operation(setup, k)) if *setup == node.id && *k == i);
+            let color = if lit {
+                LIT
+            } else if this || edited_setup {
+                ACCENT
+            } else {
+                MUTED
+            };
             // Played back, as far as the tool has gone.
             let mut left = match gone {
                 Some((op, _, _)) if i > op => continue,
@@ -244,7 +255,13 @@ pub fn draw(cam: &Cam, frame: &mut Frame) {
                 frame.lines.push(Polyline {
                     points,
                     color: if stroke.rapid { RAPID } else { color },
-                    width: if this { 1.5 } else { 1.0 },
+                    width: if lit {
+                        2.0
+                    } else if this {
+                        1.5
+                    } else {
+                        1.0
+                    },
                     dashed: stroke.rapid,
                     ..Default::default()
                 });
@@ -262,6 +279,17 @@ pub fn draw(cam: &Cam, frame: &mut Frame) {
             (None, Some((play, m))) => tool_at(frame, play, m, STOCK),
             _ => {}
         }
+    }
+    match &cam.lit {
+        Some(Lit::Body(_, Ok(kept))) => frame.kept.push(KeptMesh {
+            handle: kept.0,
+            color: LIT,
+            opacity: LIT_OPACITY,
+            on_top: true,
+            ..Default::default()
+        }),
+        Some(Lit::Body(_, Err(mesh))) => frame.meshes.push(mesh.clone()),
+        _ => {}
     }
 }
 

@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::data::OperationData;
 use crate::linking::{Opt, optional_row};
-use crate::panel::{choice, group, number};
+use crate::panel::{about, choice, fold, number, toggle};
 
 /// An operation's own numbers of its Passes tab, beyond the stepover, depths,
 /// feeds and stock to leave. A number its strategy has not keeps camcraft's
@@ -880,37 +880,30 @@ pub fn strategy_rows(data: &OperationData, tool: Option<&ToolSpec>, feature: &st
         ));
     }
     if let Some(f) = flat_areas_mut(&mut s) {
-        rows.push(Widget::Toggle {
-            id: "passes/flat_areas".into(),
-            label: "A level on each flat face".into(),
-            on: *f,
-        });
+        rows.push(toggle("passes/flat_areas", "A level on each flat face", *f));
     }
     if let StrategySpec::Adaptive { .. } = s {
-        rows.push(Widget::Toggle {
-            id: "passes/rest".into(),
-            label: "Rest machining, from previous operations".into(),
-            on: p.rest,
-        });
+        rows.push(toggle(
+            "passes/rest",
+            "Rest machining, from previous operations",
+            p.rest,
+        ));
         if p.rest {
             rows.push(length(
                 "passes/rest_adjustment",
                 "Rest adjustment",
                 p.rest_adjustment,
             ));
-            rows.push(Widget::Text {
-                text: "Clears only what the operations before it in the setup left. \
-                       Rest thinner than the adjustment is left alone."
-                    .into(),
-                mono: false,
-            });
+            rows.push(about(
+                "Clears only what the operations before it in the setup left. \
+                       Rest thinner than the adjustment is left alone.",
+            ));
         }
     }
     if let StrategySpec::PocketClearing { .. } = s {
-        rows.push(Widget::Text {
-            text: "Pocket clearing always clears what the operations before it left.".into(),
-            mono: false,
-        });
+        rows.push(about(
+            "Pocket clearing always clears what the operations before it left.",
+        ));
         rows.push(length(
             "passes/min_ring_length",
             "Shortest ring",
@@ -924,15 +917,15 @@ pub fn strategy_rows(data: &OperationData, tool: Option<&ToolSpec>, feature: &st
         } else {
             "the point furthest inside"
         };
-        rows.push(Widget::Toggle {
-            id: "passes/centre".into(),
-            label: if p.centre {
+        rows.push(toggle(
+            "passes/centre",
+            if p.centre {
                 "Set the centre".into()
             } else {
                 format!("Centre: {absent}")
             },
-            on: p.centre,
-        });
+            p.centre,
+        ));
         if p.centre {
             rows.push(length("passes/centre_x", "Centre X", p.centre_x));
             rows.push(length("passes/centre_y", "Centre Y", p.centre_y));
@@ -975,14 +968,12 @@ pub fn strategy_rows(data: &OperationData, tool: Option<&ToolSpec>, feature: &st
     }
     if let StrategySpec::Bore { .. } = s {
         rows.push(length("passes/bore_pitch", "Helix pitch", p.bore_pitch));
-        rows.push(Widget::Text {
-            text: "Down a helix from just above each hole to its bottom, the pitch a turn, \
+        rows.push(about(
+            "Down a helix from just above each hole to its bottom, the pitch a turn, \
                    round once there, then out to the wall in the finishing passes, each in \
                    and out along an arc. A hole wider than twice the tool leaves a core in \
-                   its middle, and says so."
-                .into(),
-            mono: false,
-        });
+                   its middle, and says so.",
+        ));
     }
     if let StrategySpec::Circular { .. } = s {
         rows.push(length(
@@ -990,14 +981,12 @@ pub fn strategy_rows(data: &OperationData, tool: Option<&ToolSpec>, feature: &st
             "Boss stock width",
             p.boss_width,
         ));
-        rows.push(Widget::Text {
-            text: "A hole is cleared in circles from its middle out to its wall; a boss \
+        rows.push(about(
+            "A hole is cleared in circles from its middle out to its wall; a boss \
                    from the boss stock width out from it in to it (one circle round it \
                    when 0). Each level is entered down a helix at the ramp angle, and \
-                   its last circle left along an arc."
-                .into(),
-            mono: false,
-        });
+                   its last circle left along an arc.",
+        ));
     }
     if let StrategySpec::Thread { spring_pass, .. } = s {
         thread_rows(&mut rows, data, spring_pass, tool, feature);
@@ -1013,20 +1002,14 @@ pub fn strategy_rows(data: &OperationData, tool: Option<&ToolSpec>, feature: &st
             &TRACE_DIRECTIONS,
             direction,
         ));
-        rows.push(Widget::Toggle {
-            id: "passes/reverse".into(),
-            label: "Reverse".into(),
-            on: reverse,
-        });
-        rows.push(Widget::Text {
-            text: "Climbing goes round each closed curve as cutting what it encloses \
+        rows.push(toggle("passes/reverse", "Reverse", reverse));
+        rows.push(about(
+            "Climbing goes round each closed curve as cutting what it encloses \
                    climbs; an open curve runs as drawn. Each curve ramps down along \
                    itself at the ramp angle, round a closed one and back and forth \
                    along an open one, a stepdown at most each time, then once at \
-                   the depth."
-                .into(),
-            mono: false,
-        });
+                   the depth.",
+        ));
     }
     if let StrategySpec::Slot {
         pattern, reverse, ..
@@ -1039,24 +1022,17 @@ pub fn strategy_rows(data: &OperationData, tool: Option<&ToolSpec>, feature: &st
             &SLOT_PATTERNS,
             pattern,
         ));
-        rows.push(Widget::Toggle {
-            id: "passes/reverse".into(),
-            label: "Reverse".into(),
-            on: reverse,
-        });
+        rows.push(toggle("passes/reverse", "Reverse", reverse));
         let width = match tool {
             Some(t) => format!("{:.2} mm, the tool's", t.diameter),
             None => "the tool's".into(),
         };
-        rows.push(Widget::Text {
-            text: format!(
-                "The slot is {width} wide, along each curve as drawn. Both ways, it goes \
+        rows.push(about(format!(
+            "The slot is {width} wide, along each curve as drawn. Both ways, it goes \
                  a stepdown deeper each time along it, ramping as it goes, then once at \
                  the depth; one way, it cuts each level from the start, lifting at the \
                  end, and goes into each as the linking's entry says."
-            ),
-            mono: false,
-        });
+        )));
     }
     if let StrategySpec::Chamfer { side, .. } = s {
         rows.push(length(
@@ -1066,10 +1042,7 @@ pub fn strategy_rows(data: &OperationData, tool: Option<&ToolSpec>, feature: &st
         ));
         rows.push(length("passes/tip_offset", "Tip offset", p.tip_offset));
         rows.push(pick("passes/chamfer_side", "Side", &CHAMFER_SIDES, side));
-        rows.push(Widget::Text {
-            text: chamfer_note(p, tool),
-            mono: false,
-        });
+        rows.push(about(chamfer_note(p, tool)));
     }
     if let StrategySpec::VCarve { .. } = s {
         let full = match tool.and_then(v_depth) {
@@ -1086,26 +1059,24 @@ pub fn strategy_rows(data: &OperationData, tool: Option<&ToolSpec>, feature: &st
             Dim::Length,
             feature,
         );
-        rows.push(Widget::Text {
-            text: "The V goes down the middle of each area, as deep as it has to be to \
+        rows.push(about(
+            "The V goes down the middle of each area, as deep as it has to be to \
                    reach the walls. Where the area is wider than that at the deepest, it \
                    cuts the walls that deep and leaves the floor between them flat, \
-                   and says so: clear it with a flat end mill."
-                .into(),
-            mono: false,
-        });
+                   and says so: clear it with a flat end mill.",
+        ));
     }
     if follows_part(&s) {
-        rows.push(Widget::Toggle {
-            id: "passes/use_holder".into(),
-            label: "Use shank and holder: leave out cuts where they meet the part".into(),
-            on: p.use_holder,
-        });
-        rows.push(Widget::Toggle {
-            id: "passes/avoid_fixtures".into(),
-            label: "Avoid fixtures: leave out cuts where the tool meets one".into(),
-            on: p.avoid_fixtures,
-        });
+        rows.push(toggle(
+            "passes/use_holder",
+            "Use shank and holder: leave out cuts where they meet the part",
+            p.use_holder,
+        ));
+        rows.push(toggle(
+            "passes/avoid_fixtures",
+            "Avoid fixtures: leave out cuts where the tool meets one",
+            p.avoid_fixtures,
+        ));
     }
     if let StrategySpec::Probe { .. } = s {
         probe_rows(&mut rows, p, feature);
@@ -1156,15 +1127,15 @@ fn probe_rows(rows: &mut Vec<Widget>, p: &PassesData, feature: &str) {
             p.probe_y_spacing,
         ),
     ] {
-        rows.push(Widget::Toggle {
-            id: format!("passes/{field}/given"),
-            label: if opt.given {
+        rows.push(toggle(
+            format!("passes/{field}/given"),
+            if opt.given {
                 format!("Set the {}", label.to_lowercase())
             } else {
                 format!("{label}: as many as the spacing makes")
             },
-            on: opt.given,
-        });
+            opt.given,
+        ));
         rows.push(if opt.given {
             number(
                 &format!("passes/{field}/value"),
@@ -1209,18 +1180,16 @@ fn probe_rows(rows: &mut Vec<Widget>, p: &PassesData, feature: &str) {
         2,
         feature,
     ));
-    rows.push(Widget::Text {
-        text: "Each point of the grid, over what the boundary keeps it to, is touched \
+    rows.push(about(
+        "Each point of the grid, over what the boundary keeps it to, is touched \
                from the retract height: down at the probe feed until the probe touches \
                (G38.2), no further than the probe depth below the top, and back up. \
                The spindle never turns. LinuxCNC writes the points to a file named \
                after the operation ((PROBEOPEN ...)); GRBL reports each over the \
                serial line, in machine coordinates, for the sender to keep. Other \
                posts cannot probe. Load the points into the setup to correct its \
-               depths."
-            .into(),
-        mono: false,
-    });
+               depths.",
+    ));
 }
 
 /// Where a chamfer puts `tool`, or why it cannot.
@@ -1293,11 +1262,11 @@ fn thread_rows(
         0,
         feature,
     ));
-    rows.push(Widget::Toggle {
-        id: "passes/spring_pass".into(),
-        label: "Cut the last pass twice (spring pass)".into(),
-        on: spring_pass,
-    });
+    rows.push(toggle(
+        "passes/spring_pass",
+        "Cut the last pass twice (spring pass)",
+        spring_pass,
+    ));
     let pitch = p.thread_pitch;
     let depth = |boss| camcraft_core::strategy::holes::thread_depth(pitch, boss);
     let mut text = format!(
@@ -1321,7 +1290,7 @@ fn thread_rows(
     } else {
         text.push_str(" It cuts with a thread mill.");
     }
-    rows.push(Widget::Text { text, mono: false });
+    rows.push(about(text));
 }
 
 /// A drilling operation's rows: its pecks, how they break the chip and the
@@ -1377,18 +1346,15 @@ fn drill_rows(
             feature,
         );
         if let (true, Some(t)) = (p.spot.given, tool) {
-            rows.push(Widget::Text {
-                text: match t.spot_depth(p.spot.value) {
-                    Some(depth) => format!(
-                        "Each hole {:.3} mm deep, its point {} mm across at the top.",
-                        depth, p.spot.value
-                    ),
-                    None => "The tool's point is not that wide: spot with a spot drill, a \
+            rows.push(about(match t.spot_depth(p.spot.value) {
+                Some(depth) => format!(
+                    "Each hole {:.3} mm deep, its point {} mm across at the top.",
+                    depth, p.spot.value
+                ),
+                None => "The tool's point is not that wide: spot with a spot drill, a \
                              countersink or a drill wider than the spot."
-                        .into(),
-                },
-                mono: false,
-            });
+                    .into(),
+            }));
         }
     }
     optional_row(
@@ -1412,15 +1378,12 @@ fn drill_rows(
             Some(rpm) => format!("{:.0} mm/min at {rpm:.0} rev/min", p.pitch.value * rpm),
             None => "the pitch times the spindle's speed".into(),
         };
-        rows.push(Widget::Text {
-            text: format!(
-                "Fed in at the pitch a turn, {feed}, and back out with the spindle \
+        rows.push(about(format!(
+            "Fed in at the pitch a turn, {feed}, and back out with the spindle \
                  reversed. Only a machine that taps can write it: LinuxCNC, Fanuc, \
                  Haas, Centroid CNC12, Heidenhain and Sinumerik do; Masso, GRBL and Mach \
                  cannot."
-            ),
-            mono: false,
-        });
+        )));
     }
 }
 
@@ -1430,11 +1393,7 @@ pub fn tabs_group(data: &OperationData, feature: &str) -> Option<Widget> {
         return None;
     }
     let p = &data.passes;
-    let mut rows = vec![Widget::Toggle {
-        id: "passes/tabs".into(),
-        label: "Leave tabs to hold the part".into(),
-        on: p.tabs,
-    }];
+    let mut rows = vec![toggle("passes/tabs", "Leave tabs to hold the part", p.tabs)];
     if p.tabs {
         rows.push(pick("passes/tab_shape", "Shape", &TAB_SHAPES, p.tab_shape));
         for (field, label, v) in [
@@ -1451,14 +1410,12 @@ pub fn tabs_group(data: &OperationData, feature: &str) -> Option<Widget> {
                 feature,
             ));
         }
-        rows.push(Widget::Text {
-            text: "Tabs go evenly round each loop cut at the deepest level, and every cut \
-                   over one rides over its top."
-                .into(),
-            mono: false,
-        });
+        rows.push(about(
+            "Tabs go evenly round each loop cut at the deepest level, and every cut \
+                   over one rides over its top.",
+        ));
     }
-    Some(group("Tabs", rows))
+    Some(fold("Tabs", if p.tabs { "On" } else { "Off" }, rows))
 }
 
 /// The Corners group, for a strategy that can relieve them.
@@ -1467,11 +1424,11 @@ pub fn relief_group(data: &OperationData, feature: &str) -> Option<Widget> {
         return None;
     }
     let p = &data.passes;
-    let mut rows = vec![Widget::Toggle {
-        id: "passes/relief".into(),
-        label: "Relieve inside corners, so a square part fits".into(),
-        on: p.relief,
-    }];
+    let mut rows = vec![toggle(
+        "passes/relief",
+        "Relieve inside corners, so a square part fits",
+        p.relief,
+    )];
     if p.relief {
         rows.push(pick(
             "passes/relief_style",
@@ -1493,16 +1450,21 @@ pub fn relief_group(data: &OperationData, feature: &str) -> Option<Widget> {
             ReliefStyle::Dogbone => "out into it, halfway between its walls",
             _ => "on along one wall, into the other",
         };
-        rows.push(Widget::Text {
-            text: format!(
-                "Where the tool leaves an inside corner round, it goes {how}, until \
+        rows.push(about(format!(
+            "Where the tool leaves an inside corner round, it goes {how}, until \
                  its side reaches the corner's point, and back, at every level. The \
                  notch cuts past the part, as it is meant to: it is no gouge."
-            ),
-            mono: false,
-        });
+        )));
     }
-    Some(group("Corners", rows))
+    let summary = if p.relief {
+        RELIEF_STYLES
+            .iter()
+            .find(|(s, _)| *s == p.relief_style)
+            .map_or("On", |(_, l)| l)
+    } else {
+        "Off"
+    };
+    Some(fold("Corners", summary, rows))
 }
 
 /// The Finishing passes group, for a strategy that has them.
@@ -1515,11 +1477,11 @@ pub fn finishing_group(
         return None;
     }
     let p = &data.passes;
-    let mut rows = vec![Widget::Toggle {
-        id: "passes/finishing".into(),
-        label: "Finish the walls with the side of the tool".into(),
-        on: p.finishing,
-    }];
+    let mut rows = vec![toggle(
+        "passes/finishing",
+        "Finish the walls with the side of the tool",
+        p.finishing,
+    )];
     if p.finishing {
         rows.push(number(
             "passes/finishing_passes",
@@ -1553,13 +1515,18 @@ pub fn finishing_group(
             Dim::Number,
             feature,
         );
-        rows.push(Widget::Toggle {
-            id: "passes/finishing_repeat".into(),
-            label: "Cut the last one twice".into(),
-            on: p.finishing_repeat,
-        });
+        rows.push(toggle(
+            "passes/finishing_repeat",
+            "Cut the last one twice",
+            p.finishing_repeat,
+        ));
     }
-    Some(group("Finishing passes", rows))
+    let summary = if p.finishing {
+        format!("{} pass(es)", crate::sheet::num(p.finishing_passes))
+    } else {
+        "Off".into()
+    };
+    Some(fold("Finishing passes", &summary, rows))
 }
 
 /// Where an optional number starts when it is first given.
@@ -2097,7 +2064,7 @@ mod tests {
             assert_eq!(o.passes.use_holder, kept, "{strategy}");
             let shown = strategy_rows(&data, None, "f")
                 .iter()
-                .any(|w| matches!(w, Widget::Toggle { id, .. } if id == "passes/use_holder"));
+                .any(|w| matches!(w, Widget::Check(c) if c.id == "passes/use_holder"));
             assert_eq!(shown, kept, "{strategy}");
             if kept {
                 assert!(PassesData::of(&o).use_holder);
