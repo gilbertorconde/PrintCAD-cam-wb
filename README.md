@@ -328,7 +328,7 @@ panels, the drawing and the helper that runs camcraft.
   zero or the picked faces and edges. The view shows them as planes across the
   stock while the operation is edited.
 
-  ![An adaptive clearing open for editing: its toolpath, its heights as planes, and its settings](docs/screenshots/operation.png)
+  ![An adaptive clearing open for editing: its toolpath and heights, its checks, and the setup's program](docs/screenshots/operation.png)
 
 - **Linking**, as Fusion's Linking tab: retract feed, retraction, safe and
   stay-down distances, ramps, the entry (helix, plunge or ramp), leads on and
