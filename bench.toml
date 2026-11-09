@@ -1,6 +1,6 @@
 id = "io.github.gilbertorconde.cam"
 name = "CAM"
-version = "0.9.0"
+version = "0.10.0"
 api = "printcad:workbench@0.1"
 min_contract = "0.1.4"
 description = "3-axis CNC toolpaths on the document's solids with camcraft, checked against the material and written as G-code"

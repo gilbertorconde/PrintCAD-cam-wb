@@ -104,7 +104,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "cam"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "cam-protocol",
  "camcraft-core",
@@ -869,9 +869,9 @@ dependencies = [
 
 [[package]]
 name = "printcad-bench-api"
-version = "0.1.4"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13b12922846e617f890e310bddc0812d1d57d89e2043f1a418dafbd8c1c2f649"
+checksum = "dc176318675fafea6fca49c624dd1fe790791318374f351f89b57f9752ded395"
 dependencies = [
  "printcad-kernel-api",
  "serde",
@@ -880,9 +880,9 @@ dependencies = [
 
 [[package]]
 name = "printcad-bench-sdk"
-version = "0.1.4"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6d2e14f5bd2532f00553382de0a7d50da2146f0486af5c66319d8eb056d764e"
+checksum = "f3391020bf7e5e13015727b93b596ef6c6282482e98469ef5a186fd17f4cedc6"
 dependencies = [
  "printcad-bench-api",
  "serde",
@@ -892,9 +892,9 @@ dependencies = [
 
 [[package]]
 name = "printcad-kernel-api"
-version = "0.1.2"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c5f14a07e8729845970e382b9689563c956ab0769fd25f7417d87197376cc5cb"
+checksum = "4e814e9c7f2636429fe6fe71a450cb8ac60237b433971bafb1b2aa7b8b436158"
 dependencies = [
  "anyhow",
  "serde",
